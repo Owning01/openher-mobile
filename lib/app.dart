@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'data/connectivity/network_monitor.dart';
+import 'ui/core/low_data_banner.dart';
 import 'core/network/api_client.dart';
 import 'core/network/server_config.dart';
 import 'data/repositories/session_repository.dart';
@@ -150,12 +152,46 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   late final MobileNav _nav = widget.nav ?? MobileNav();
 
+  /// Detector de red. Decide la política de consumo: **sólo** con datos
+  /// móviles entra en modo bajo (sin streaming, polling lento, página chica).
+  final NetworkMonitor _network = NetworkMonitor();
+
+  /// El usuario puede desactivar el modo a mano aunque siga con datos
+  /// móviles; eso manda por encima de la red hasta que cambie de tipo.
+  bool _lowDataOverride = false;
+
+  /// `true` = consumir poco. La red manda; el override solo puede **bajar**.
+  bool get _lowData => !_lowDataOverride && _network.kind == NetworkKind.mobile;
+
+  DataPolicy get _policy =>
+      _lowData ? const DataPolicy.lowData() : const DataPolicy.normal();
+
+  @override
+  void initState() {
+    super.initState();
+    _network.addListener(_onNetwork);
+    _network.start();
+  }
+
+  void _onNetwork() {
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _network
+      ..removeListener(_onNetwork)
+      ..dispose();
+    super.dispose();
+  }
+
   /// Las 94 claves de la spec aprobada, con su default de diseño.
   Future<Map<String, bool>> _loadLayerSpec() async => {
     for (final spec in LayerCatalog.instance.all) spec.key: spec.defaultOn,
   };
 
-  /// El toggle del usuario: el catálogo persiste vía `PrefsStore.setLayers`.
+  /// El toggle del usuario: el catálogo persiste vía PrefsStore.setLayers.
   Future<void> _onLayerToggle(String key, bool value) =>
       LayerCatalog.instance.toggle(key, value);
 
@@ -167,28 +203,47 @@ class _AppShellState extends State<AppShell> {
         return Scaffold(
           body: SafeArea(
             bottom: false,
-            child: IndexedStack(
-              index: _nav.tab.index,
+            child: Column(
               children: [
-                _SessionsTab(config: widget.config, onOpen: _nav.openSession),
-                _ChatTab(
-                  sessionId: _nav.chatSessionId ?? '',
-                  config: widget.config,
-                  visible: _nav.tab == MobileTab.chat,
-                  onBack: _nav.leaveChat,
-                  streamFactory: widget.chatStreamFactory,
+                // Sólo aparece con datos móviles: explica por qué la app se
+                // recorta, en vez de que el usuario adivine que anda lento.
+                LowDataBanner(
+                  onCellular: _lowData,
+                  onDisable: () => setState(() => _lowDataOverride = true),
                 ),
-                _FilesTab(config: widget.config),
-                SettingsView(
-                  config: widget.config,
-                  prefs: widget.prefs,
-                  creds: widget.creds,
-                  onProbe: widget.onProbe,
-                  onLoggedOut: widget.onLoggedOut,
-                  // Las 94 claves de la spec aprobada salen del catálogo que
-                  // ya está cargado; el toggle persiste vía PrefsStore.
-                  loadLayerSpec: _loadLayerSpec,
-                  onLayerToggle: _onLayerToggle,
+                Expanded(
+                  child: IndexedStack(
+                    index: _nav.tab.index,
+                    children: [
+                      _SessionsTab(
+                        config: widget.config,
+                        onOpen: _nav.openSession,
+                      ),
+                      _ChatTab(
+                        sessionId: _nav.chatSessionId ?? '',
+                        config: widget.config,
+                        visible: _nav.tab == MobileTab.chat,
+                        onBack: _nav.leaveChat,
+                        streamFactory: widget.chatStreamFactory,
+                        policy: _policy,
+                        // La política forma parte de la identidad del chat:
+                        // al cambiar de red se reconstruye con el consumo nuevo.
+                        key: ValueKey('chat-${_nav.chatSessionId}-$_lowData'),
+                      ),
+                      _FilesTab(config: widget.config),
+                      SettingsView(
+                        config: widget.config,
+                        prefs: widget.prefs,
+                        creds: widget.creds,
+                        onProbe: widget.onProbe,
+                        onLoggedOut: widget.onLoggedOut,
+                        // Las 94 claves de la spec aprobada salen del catálogo
+                        // que ya está cargado; el toggle persiste vía PrefsStore.
+                        loadLayerSpec: _loadLayerSpec,
+                        onLayerToggle: _onLayerToggle,
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -248,11 +303,13 @@ class _SessionsTabState extends State<_SessionsTab> {
 /// `setVisible(false)` pausa el SSE cuando el chat no está al frente.
 class _ChatTab extends StatefulWidget {
   const _ChatTab({
+    super.key,
     required this.sessionId,
     required this.config,
     required this.visible,
     required this.onBack,
     this.streamFactory,
+    this.policy = const DataPolicy.normal(),
   });
 
   final String sessionId;
@@ -262,6 +319,10 @@ class _ChatTab extends StatefulWidget {
 
   /// Lo inyecta el shell; ver [AppShell.chatStreamFactory].
   final ChatEventSourceFactory? streamFactory;
+
+  /// Política de consumo: con datos móviles el chat recorta streaming,
+  /// polling y tamaño de página (ver DataPolicy).
+  final DataPolicy policy;
 
   /// Estado sin sesión abierta (prueba de que no se pide nada a un id vacío).
   static const Key noSessionKey = AppShell.noChatSessionKey;
@@ -308,6 +369,7 @@ class _ChatTabState extends State<_ChatTab> {
       ApiClient(config: widget.config),
       sessionId: sessionId,
       streamFactory: widget.streamFactory,
+      policy: widget.policy,
     )..load();
   }
 

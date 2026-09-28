@@ -39,6 +39,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../../../data/connectivity/network_monitor.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/network/server_config.dart';
 import '../../../core/network/sse_client.dart';
@@ -197,6 +198,7 @@ class ChatViewModel extends ChangeNotifier {
     this.sessionInfo,
     this.directory,
     ChatEventSourceFactory? streamFactory,
+    this._policy = const DataPolicy.normal(),
   }) : _streamFactory = streamFactory ?? _defaultSource;
 
   /// `ses_…`.
@@ -396,7 +398,7 @@ class ChatViewModel extends ChangeNotifier {
     try {
       final page = await _api.listMessages(
         sessionId,
-        limit: pageSize,
+        limit: _policy.pageSize,
         order: 'desc',
         directory: directory,
       );
@@ -428,7 +430,7 @@ class ChatViewModel extends ChangeNotifier {
     try {
       final page = await _api.listMessages(
         sessionId,
-        limit: pageSize,
+        limit: _policy.pageSize,
         order: 'asc',
         cursor: cursor,
         directory: directory,
@@ -597,6 +599,14 @@ class ChatViewModel extends ChangeNotifier {
   void connectStream() {
     if (_disposed) return;
     if (_source != null) return;
+    // Modo de bajo consumo (datos móviles): no se abre el stream en vivo. El
+    // turno llega por el polling, que con datos cellulares es 6x más barato
+    // que un socket que manda deltas cada 50 ms.
+    if (!_policy.streamingEnabled) {
+      _startPolling();
+      return;
+    }
+    if (_source != null) return;
     final source = _streamFactory(
       // La config no vive en el VM: la app tiene una sola y la inyecta el
       // shell a través de la factoría por defecto.
@@ -669,7 +679,7 @@ class ChatViewModel extends ChangeNotifier {
 
   void _startPolling() {
     if (_pollTimer != null || _disposed) return;
-    _pollTimer = Timer.periodic(pollInterval, (_) => refresh());
+    _pollTimer = Timer.periodic(_policy.pollInterval, (_) => refresh());
   }
 
   void _stopPolling() {
@@ -923,6 +933,12 @@ class ChatViewModel extends ChangeNotifier {
 
   /// 30 mensajes por página: la misma ventana que el cliente de escritorio y
   /// la del prototipo ("Cargar 30 anteriores").
+  /// Política de consumo. Con datos móviles se recorta el polling, la página y
+  /// el streaming (ver `DataPolicy`). Es inyectable para tests.
+  final DataPolicy _policy;
+
+  /// La política activa. El chat lee "qué hacer", no la regla.
+  DataPolicy get policy => _policy;
   static const int pageSize = 30;
 
   /// Buffer de deltas: 50 ms ⇒ 20 fps.

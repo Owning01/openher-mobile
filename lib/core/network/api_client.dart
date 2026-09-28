@@ -180,7 +180,10 @@ class ApiClient {
         'id': ?id,
         'agent': ?agent,
         'model': ?model,
-        'location': ?directory,
+        if (directory != null)
+          'location': <String, dynamic>{'directory': directory},
+        // location es un OBJETO {directory, workspaceID?}, no un
+        // string plano (medido 2026-09-28: string plano => 400).
       },
     );
   }
@@ -203,10 +206,16 @@ class ApiClient {
     'cursor': cursor,
   }, directory);
 
-  /// `POST /api/session/{id}/prompt` — **admitir** el prompt.
+  /// `POST /api/session/{id}/prompt` - **admitir** el prompt.
   ///
   /// No devuelve el turno: devuelve el "admitido" y el turno llega por el SSE
-  /// de la sesión (decisión D4, `API_CONTRACT.md` §8 "regla de oro del streaming").
+  /// global (decisión D4, `API_CONTRACT.md` §8).
+  ///
+  /// **Medido 2026-09-28 contra el server real**: el body exige `text` en la
+  /// RAÍZ. Mandarlo anidado bajo `prompt` devuelve
+  /// `InvalidRequestError: Missing key at ["text"]` (400), por lo que el
+  /// mensaje no se enviaba y el optimista se borraba. `files` y `agents` van
+  /// en la raíz, junto a `text`.
   Future<Map<String, dynamic>> sendPrompt(
     String sessionId, {
     required String text,
@@ -221,11 +230,9 @@ class ApiClient {
     directory: directory,
     body: <String, dynamic>{
       'id': ?id,
-      'prompt': <String, dynamic>{
-        'text': text,
-        if (files != null && files.isNotEmpty) 'files': files,
-        if (agents != null && agents.isNotEmpty) 'agents': agents,
-      },
+      'text': text,
+      if (files != null && files.isNotEmpty) 'files': files,
+      if (agents != null && agents.isNotEmpty) 'agents': agents,
       'delivery': ?delivery,
     },
   );
@@ -331,7 +338,10 @@ class ApiClient {
     request.headers['accept'] = 'application/json';
     final auth = config.basicAuthHeader;
     if (auth != null) request.headers['authorization'] = auth;
-    if (body != null) request.body = jsonEncode(body);
+    if (body != null) {
+      request.headers['content-type'] = 'application/json';
+      request.body = jsonEncode(body);
+    }
     return request;
   }
 
