@@ -344,6 +344,24 @@ class ChatViewModel extends ChangeNotifier {
 
   /// `assistantMessageID` del turno al que pertenecen los deltas en el buffer.
   String? _deltaMessageId;
+
+  /// Gasto y tokens **en vivo**, sin esperar el re-fetch.
+  ///
+  /// **Medido 2026-09-28**: el server manda `session.usage.updated` en cada
+  /// paso (`{sessionID, cost, tokens:{input, output, reasoning, cache}}`).
+  /// Antes solo se leian de la pagina de mensajes, o sea que el contador de
+  /// contexto y de costo se congelaba hasta el proximo re-fetch: se veia
+  /// "17208k contexto - $3.38" clavado mientras el modelo seguia trabajando.
+  int? _liveTokens;
+  double? _liveCost;
+
+  /// El titulo que el server le puso a la sesion (`session.renamed`, medido).
+  ///
+  /// El server titula solo, con el primer mensaje. Sin este evento el chat se
+  /// quedaba mostrando `ses_0acd172...` hasta un re-fetch completo, y el
+  /// usuario veia un id donde deberia ver de que hablaba.
+  String? _liveTitle;
+
   bool _disposed = false;
   final Set<String> _seenEventIds = <String>{};
 
@@ -375,6 +393,10 @@ class ChatViewModel extends ChangeNotifier {
   /// Contexto en tokens. `session.tokens` si el shell lo trajo; si no, la suma
   /// en memoria de los `assistant.tokens` que ya tenemos.
   int get serverTokens {
+    // El valor en vivo manda: el server lo manda en cada paso y el de la
+    // pagina de mensajes va atras.
+    final live = _liveTokens;
+    if (live != null) return live;
     final info = sessionInfo;
     if (info != null) return info.tokens.total;
     var total = 0;
@@ -386,6 +408,8 @@ class ChatViewModel extends ChangeNotifier {
 
   /// Gasto en USD, con el mismo fallback que [serverTokens].
   double get serverCost {
+    final live = _liveCost;
+    if (live != null) return live;
     final info = sessionInfo;
     if (info != null) return info.cost;
     var total = 0.0;
@@ -404,6 +428,14 @@ class ChatViewModel extends ChangeNotifier {
   }
 
   /// La pregunta que el agente está esperando, o `null` si no hay ninguna.
+  /// El titulo de la sesion: el que le puso el server con
+  /// `session.renamed`, si no el de la lista, y si no el id recortado.
+  ///
+  /// El server titula solo con el primer mensaje (medido). Sin esto el
+  /// chat se quedaba mostrando `ses_0acd172...` hasta un re-fetch
+  /// completo: el usuario veia un id donde deberia ver de que hablaba.
+  String? get liveTitle => _liveTitle ?? sessionInfo?.title;
+
   PendingQuestion? get pendingQuestion => _pendingQuestion;
 
   /// Hay una pregunta esperando respuesta.
@@ -807,6 +839,36 @@ class ChatViewModel extends ChangeNotifier {
   // ───────────────────────── aplicación de eventos ─────────────────────────
 
   /// Un frame del stream global. Todo el filtrado y toda la política viven acá.
+  /// `session.usage.updated` - gasto y tokens en vivo.
+  ///
+  /// **Medido 2026-09-28**: `{sessionID, cost, tokens: {input, output,
+  /// reasoning, cache}}`. Sin esto el contador de contexto queda congelado
+  /// hasta el proximo re-fetch, que durante un turno puede tardar segundos.
+  void _applyUsage(Map<String, Object?> data) {
+    final cost = data['cost'];
+    if (cost is num) _liveCost = cost.toDouble();
+    final tokens = asMap(data['tokens']);
+    if (tokens != null) {
+      final input = asNum(tokens['input']) ?? 0;
+      final output = asNum(tokens['output']) ?? 0;
+      final cache = asMap(tokens['cache']);
+      // El contexto es lo que entra mas lo que se relee de cache: es el
+      // numero que el server manda como `input` mas `cache.read`, y sin el
+      // cache el contador se queda en cero con sesiones largas.
+      _liveTokens = (input + output + (asNum(cache?['read']) ?? 0)).toInt();
+    }
+    _safeNotify();
+  }
+
+  /// `session.renamed` - el server titulo la sesion sola.
+  void _applyRenamed(Map<String, Object?> data) {
+    final title = asStr(data['title']);
+    if (title == null || title.isEmpty) return;
+    if (_liveTitle == title) return;
+    _liveTitle = title;
+    _safeNotify();
+  }
+
   void _applyEvent(OcEvent event) {
     // Filtro por sesión: el socket es global. Un evento sin `sessionID`
     // (`server.connected`) es de la app y se aplica.
@@ -836,6 +898,17 @@ class ChatViewModel extends ChangeNotifier {
 
     // Preguntas (§6). Van antes que el status porque el `requestID` de la
     // respuesta vive acá, no en el mensaje.
+    // Medidos y sin manejar antes: el costo/contexto en vivo y el titulo
+    // que el server le pone solo a la sesion.
+    if (lower == 'session.usage.updated') {
+      _applyUsage(event.data);
+      return;
+    }
+    if (lower == 'session.renamed') {
+      _applyRenamed(event.data);
+      return;
+    }
+
     if (kQuestionAskedEvents.contains(lower)) {
       _applyQuestionAsked(event.data);
       // La lista de mensajes todavía no tiene el tool `question` en `pending`:

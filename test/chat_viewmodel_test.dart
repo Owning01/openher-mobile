@@ -233,7 +233,10 @@ void main() {
             if (call == 1) {
               return {
                 'data': [userMessage('msg_u1', 'hola')],
-                'cursor': {'previous': 'eyJpZCI6Im1zZ19uMSJ9', 'next': 'eyJpZCI6Im1zZ19uMSJ9'},
+                'cursor': {
+                  'previous': 'eyJpZCI6Im1zZ19uMSJ9',
+                  'next': 'eyJpZCI6Im1zZ19uMSJ9',
+                },
               };
             }
             return {
@@ -1199,5 +1202,74 @@ void main() {
         expect(vm.retryNotice, isNull);
       },
     );
+  });
+
+  group('eventos que el server manda y la app no escuchaba', () {
+    // Capturado del stream real (2026-09-28). Los dos se ven en pantalla:
+    // sin ellos el contador de contexto queda congelado y el titulo de la
+    // sesion nunca aparece, porque el server titula solo con el primer
+    // mensaje y solo lo avisa por `session.renamed`.
+    test('session.usage.updated actualiza costo y tokens en vivo', () async {
+      final source = FakeEventSource();
+      final vm = buildVm(
+        jsonClient((request) => {'data': <Object?>[]}),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+      vm.connectStream();
+
+      expect(vm.serverCost, 0);
+      source.emit('session.usage.updated', {
+        'sessionID': kSessionId,
+        'cost': 0.42,
+        'tokens': {
+          'input': 1000,
+          'output': 200,
+          'reasoning': 50,
+          'cache': {'read': 8000, 'write': 0},
+        },
+      });
+      await pumpEventQueue();
+      expect(vm.serverCost, 0.42);
+      // El contexto es input + output + cache leido: sin el cache el
+      // contador se queda en cero con sesiones largas.
+      expect(vm.serverTokens, 9200);
+    });
+
+    test('session.renamed muestra el titulo que pone el server', () async {
+      final source = FakeEventSource();
+      final vm = buildVm(
+        jsonClient((request) => {'data': <Object?>[]}),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+      vm.connectStream();
+
+      expect(vm.liveTitle, isNull);
+      source.emit('session.renamed', {
+        'sessionID': kSessionId,
+        'title': 'Auditar la paginacion',
+      });
+      await pumpEventQueue();
+      expect(vm.liveTitle, 'Auditar la paginacion');
+    });
+
+    test('un titulo vacio no borra el vigente', () async {
+      final source = FakeEventSource();
+      final vm = buildVm(
+        jsonClient((request) => {'data': <Object?>[]}),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+      vm.connectStream();
+      source.emit('session.renamed', {'sessionID': kSessionId, 'title': 'Uno'});
+      await pumpEventQueue();
+      source.emit('session.renamed', {'sessionID': kSessionId, 'title': ''});
+      await pumpEventQueue();
+      expect(vm.liveTitle, 'Uno');
+    });
   });
 }
