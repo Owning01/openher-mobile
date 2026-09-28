@@ -27,6 +27,24 @@ param(
   [string]$Version = ''
 )
 
+# --------------------------------------------------------------------------
+# Guard de version: este script corre con PowerShell 7 o superior.
+#
+# Windows PowerShell 5.1 no se puede desinstalar: es un componente del sistema
+# operativo, con su binario en control de TrustedInstaller, y Windows Update
+# lo sigue usando. Ademas se comporta distinto en justo lo que este script
+# hace (redireccion de streams, Invoke-RestMethod, codificacion de salida),
+# asi que dejarlo correr en silencio es peor que negarse a correr.
+# --------------------------------------------------------------------------
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+  Write-Host 'Este script necesita PowerShell 7+ y se esta ejecutando bajo 5.1.'
+  Write-Host ''
+  Write-Host 'Correlo con:  pwsh -File .\publish-update.ps1  <tus argumentos>'
+  Write-Host '(en Windows Terminal el perfil por defecto ya es PowerShell 7.6)'
+  exit 1
+}
+
+
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 $root = (Get-Location).Path
