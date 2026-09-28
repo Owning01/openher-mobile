@@ -19,6 +19,8 @@ import 'package:flutter/material.dart';
 import '../../../core/network/server_config.dart';
 import '../../../core/storage/creds_store.dart';
 import '../../../core/storage/prefs_store.dart';
+import '../../core/app_icon.dart';
+import '../../core/theme_variants.dart';
 import '../../core/tokens.dart';
 import '../../core/layer_gate.dart';
 import '../connect/connect_view.dart' show ServerProbe, describeProbeError;
@@ -37,6 +39,7 @@ class SettingsRow extends StatelessWidget {
     this.trailing,
     this.danger = false,
     this.dotColor,
+    this.leading,
   });
 
   final String label;
@@ -56,6 +59,9 @@ class SettingsRow extends StatelessWidget {
   /// Punto de estado antes del valor.
   final Color? dotColor;
 
+  /// Muestras de color antes del rótulo (la fila de tema de color).
+  final Widget? leading;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -72,6 +78,10 @@ class SettingsRow extends StatelessWidget {
           ),
           child: Row(
             children: <Widget>[
+              if (leading != null) ...<Widget>[
+                leading!,
+                const SizedBox(width: AppSpacing.sm),
+              ],
               if (dotColor != null) ...<Widget>[
                 Container(
                   width: 6,
@@ -154,6 +164,73 @@ class SettingsGroup extends StatelessWidget {
   }
 }
 
+/// Las cuatro muestras de una paleta: fondo, marco, primario y acento.
+///
+/// Es el mismo criterio que usa el `ThemePicker` del escritorio —que muestra
+/// la paleta real y no un ícono— así que la variante se reconoce de un golpe
+/// sin abrir nada. Los circles llevan borde porque sobre un tema claro un
+/// círculo del mismo color se perdería.
+class ThemeSwatch extends StatelessWidget {
+  const ThemeSwatch(this.colors, {super.key});
+
+  /// Los colores a mostrar, en orden ([ThemeVariantColors.swatch]).
+  final List<Color> colors;
+
+  @override
+  Widget build(BuildContext context) {
+    final border = Theme.of(context).colorScheme.outline;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        for (final color in colors)
+          Container(
+            width: 10,
+            height: 10,
+            margin: const EdgeInsets.only(right: 3),
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              border: Border.all(color: border, width: 1),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// El galón de la entrada elegida.
+///
+/// Se reserva el mismo ancho (20 px, el tamaño del ícono) en las filas no
+/// elegidas para que los rótulos no se corran al seleccionar una.
+class _CheckMark extends StatelessWidget {
+  const _CheckMark();
+
+  @override
+  Widget build(BuildContext context) =>
+      AppIcon('check', size: 20, color: Theme.of(context).colorScheme.primary);
+}
+
+/// Rótulo de sección dentro de la tarjeta (`Oscuro` / `Claro`). La lista son
+/// 61 entradas: sin estos dos títulos, buscar un tema es recorrerla entera.
+class _VariantSection extends StatelessWidget {
+  const _VariantSection(this.title);
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.lg,
+        AppSpacing.md,
+        AppSpacing.lg,
+        AppSpacing.xs,
+      ),
+      child: Text(title, style: Theme.of(context).textTheme.labelSmall),
+    );
+  }
+}
+
 /// Pantalla de ajustes.
 class SettingsView extends StatefulWidget {
   const SettingsView({
@@ -164,6 +241,7 @@ class SettingsView extends StatefulWidget {
     this.onProbe,
     this.onLoggedOut,
     this.onLayerToggle,
+    this.onThemeVariant,
     this.layerKeys,
     this.layerDefaults,
     this.loadLayerSpec,
@@ -185,6 +263,11 @@ class SettingsView extends StatefulWidget {
 
   /// Se llama en cada toggle de capa, después de persistir.
   final void Function(String key, bool value)? onLayerToggle;
+
+  /// Se llama al elegir un tema de color, después de persistir, con el id
+  /// elegido o `''` para volver al automático. Es lo que repinta el
+  /// `MaterialApp`; sin él la preferencia queda guardada y no se ve.
+  final void Function(String variantId)? onThemeVariant;
 
   /// Las claves de la spec, ya resueltas (para tests y para cableado simple).
   final List<String>? layerKeys;
@@ -246,6 +329,16 @@ class SettingsView extends StatefulWidget {
   /// Fila `Tema`.
   static const Key themeRowKey = Key('settings-row-theme');
 
+  /// Fila `Tema de color`: abre la lista de paletas.
+  static const Key themeVariantRowKey = Key('settings-row-theme-variant');
+
+  /// Fila de la paleta [id], dentro de la lista desplegada.
+  static Key themeVariantOptionKey(String id) =>
+      Key('settings-theme-variant-$id');
+
+  /// Fila `Automático` de la lista: la paleta del sistema, sin variante.
+  static const Key themeVariantAutoKey = Key('settings-theme-variant-auto');
+
   /// Fila `Tamaño de texto`.
   static const Key textScaleRowKey = Key('settings-row-textscale');
 
@@ -269,6 +362,10 @@ class _SettingsViewState extends State<SettingsView> {
   /// El grupo de capas arranca plegado: 94 switches no se construyen hasta que
   /// se piden.
   bool _layersOpen = false;
+
+  /// La lista de paletas también arranca plegada: son 61 entradas y son la
+  /// pantalla más larga de Ajustes.
+  bool _variantsOpen = false;
 
   bool _probing = false;
 
@@ -301,6 +398,60 @@ class _SettingsViewState extends State<SettingsView> {
   /// default de la spec.
   bool _layerOn(String key) =>
       widget.prefs.layerEnabled(key, fallback: _spec[key] ?? true);
+
+  /// Variante de color elegida, o `null` si está en automático. Un id que no
+  /// está en el catálogo (app vieja, catálogo editado) también da `null`: la
+  /// lista marca el automático y la app no se queda con un tema que no existe.
+  ThemeVariant? get _variant => ThemeVariants.byId(widget.prefs.themeVariantId);
+
+  /// Las muestras de la paleta actual, para la fila. En automático son los
+  /// tokens del chrome con el brillo que se está viendo, que es lo que va a
+  /// pintar de verdad.
+  List<Color> _swatchOf(Brightness brightness) {
+    final variant = _variant;
+    if (variant != null) return variant.colors.swatch;
+    final dark = brightness == Brightness.dark;
+    return <Color>[
+      dark ? AppColors.darkBg : AppColors.lightBg,
+      dark ? AppColors.darkSurfaceStrong : AppColors.lightSurfaceStrong,
+      dark ? AppColors.darkPrimary : AppColors.lightPrimary,
+      dark ? AppColors.darkSecondary : AppColors.lightSecondary,
+    ];
+  }
+
+  /// Las 61 paletas agrupadas por tipo, con el automático primero. El orden es
+  /// el del catálogo (alfabético por id), que es el que ya usa el escritorio.
+  List<Widget> _variantOptions(Brightness brightness, String selected) {
+    final children = <Widget>[
+      const _VariantSection('Del sistema'),
+      SettingsRow(
+        key: SettingsView.themeVariantAutoKey,
+        label: 'Automático',
+        leading: ThemeSwatch(_swatchOf(brightness)),
+        trailing: selected.isEmpty
+            ? const _CheckMark()
+            : const SizedBox(width: 20),
+        onTap: () => _selectVariant(''),
+      ),
+    ];
+    for (final kind in ThemeVariantKind.values) {
+      children.add(_VariantSection(kind.label));
+      for (final variant in ThemeVariants.ofKind(kind)) {
+        children.add(
+          SettingsRow(
+            key: SettingsView.themeVariantOptionKey(variant.id),
+            label: variant.name,
+            leading: ThemeSwatch(variant.colors.swatch),
+            trailing: variant.id == selected
+                ? const _CheckMark()
+                : const SizedBox(width: 20),
+            onTap: () => _selectVariant(variant.id),
+          ),
+        );
+      }
+    }
+    return children;
+  }
 
   // ───────────────────────────── acciones ────────────────────────────────────
 
@@ -341,6 +492,16 @@ class _SettingsViewState extends State<SettingsView> {
     await widget.prefs.setLayer(key, value);
     if (mounted) setState(() {}); // re-pinta leyendo el valor persistido
     widget.onLayerToggle?.call(key, value);
+  }
+
+  /// Elige la paleta [id] (`''` = automático), la persiste y avisa. Después de
+  /// elegir se pliega la lista: la fila contraída muestra el tema nuevo y la
+  /// elección se lee sin recorrer 61 filas.
+  Future<void> _selectVariant(String id) async {
+    await widget.prefs.setThemeVariant(id);
+    if (!mounted) return;
+    setState(() => _variantsOpen = false);
+    widget.onThemeVariant?.call(id);
   }
 
   /// `Cerrar sesión`: confirmación explícita (el borrado es irreversible) y
@@ -490,6 +651,25 @@ class _SettingsViewState extends State<SettingsView> {
                   prefs.setThemeMode,
                 ),
               ),
+              // La paleta va aparte del brillo a propósito: con una variante
+              // elegida, `Tema` deja de mandar (la variante trae el suyo) y sólo
+              // cuenta en automático.
+              SettingsRow(
+                key: SettingsView.themeVariantRowKey,
+                label: 'Tema de color',
+                value: _variant?.name ?? 'Automático',
+                leading: ThemeSwatch(_swatchOf(Theme.of(context).brightness)),
+                trailing: Icon(
+                  _variantsOpen ? Icons.expand_more : Icons.chevron_right,
+                  size: 20,
+                ),
+                onTap: () => setState(() => _variantsOpen = !_variantsOpen),
+              ),
+              if (_variantsOpen)
+                ..._variantOptions(
+                  Theme.of(context).brightness,
+                  _variant?.id ?? '',
+                ),
               SettingsRow(
                 key: SettingsView.textScaleRowKey,
                 label: 'Tamaño de texto',

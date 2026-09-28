@@ -12,6 +12,7 @@ import 'core/storage/prefs_store.dart';
 import 'ui/core/app_icon.dart';
 import 'ui/core/layer_gate.dart';
 import 'ui/core/theme.dart';
+import 'ui/core/theme_variants.dart';
 import 'ui/core/tokens.dart';
 import 'ui/features/chat/chat_view.dart';
 import 'ui/features/chat/chat_viewmodel.dart';
@@ -42,6 +43,29 @@ class OpenHerMobileApp extends StatefulWidget {
 class _OpenHerMobileAppState extends State<OpenHerMobileApp> {
   late Future<ServerConfig?> _config = _readConfig();
 
+  /// Id crudo de la variante elegida en Ajustes; vacío = el chrome de siempre
+  /// (`light()` / `dark()`).
+  ///
+  /// Vive como estado y no se relee de las prefs en cada build porque
+  /// `MaterialApp` **no** escucha a `PrefsStore` (no es un `ChangeNotifier`):
+  /// si sólo se leyera en `build`, cambiar el tema no repintaría nada hasta
+  /// que otro cambio de estado moviera el árbol entero. Por eso el setState
+  /// explícito de [_onThemeVariant].
+  String _variantId = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _variantId = widget.prefs.themeVariantId;
+  }
+
+  /// Ajustes -> "Tema de color". Repinta en vivo: la preferencia ya está
+  /// persistida por el `PrefsStore`, acá sólo se avisa al árbol.
+  void _onThemeVariant(String id) {
+    if (!mounted || id == _variantId) return;
+    setState(() => _variantId = id);
+  }
+
   Future<ServerConfig?> _readConfig() async {
     // El catálogo se carga una vez: la UI consulta el singleton.
     await LayerCatalog.load(
@@ -58,6 +82,17 @@ class _OpenHerMobileAppState extends State<OpenHerMobileApp> {
     await ApiClient(config: config).probeServer();
   }
 
+  /// La variante de color para un brillo, o `null` si no hay ninguna.
+  ///
+  /// La resolución va por el catálogo y no por un `switch` sobre el id: un id
+  /// desconocido (variante borrada, typo, prefs de una versión vieja) tiene que
+  /// caerse al chrome por defecto, no romper la app.
+  ThemeData? _variant(ThemeVariantKind kind) {
+    final v = ThemeVariants.byId(_variantId);
+    if (v == null || v.kind != kind) return null;
+    return AppTheme.variantOf(v);
+  }
+
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<ServerConfig?>(
@@ -67,8 +102,12 @@ class _OpenHerMobileAppState extends State<OpenHerMobileApp> {
         return MaterialApp(
           title: 'OpenHer Mobile',
           debugShowCheckedModeBanner: false,
-          theme: AppTheme.light(),
-          darkTheme: AppTheme.dark(),
+          // La variante manda sobre el chrome por defecto; sin id (o
+          // con un id que el catálogo ya no conoce) se sigue con
+          // light()/dark(), así que borrar el catálogo no deja la
+          // app sin tema.
+          theme: _variant(ThemeVariantKind.light) ?? AppTheme.light(),
+          darkTheme: _variant(ThemeVariantKind.dark) ?? AppTheme.dark(),
           themeMode: switch (prefs.themeMode) {
             AppThemeMode.system => ThemeMode.system,
             AppThemeMode.light => ThemeMode.light,
@@ -90,6 +129,7 @@ class _OpenHerMobileAppState extends State<OpenHerMobileApp> {
                       config: snap.data!,
                       prefs: prefs,
                       creds: widget.creds,
+                      onThemeVariant: _onThemeVariant,
                       onProbe: _probe,
                       onLoggedOut: () =>
                           setState(() => _config = _readConfig()),
@@ -119,6 +159,7 @@ class AppShell extends StatefulWidget {
     required this.prefs,
     required this.creds,
     required this.onProbe,
+    required this.onThemeVariant,
     required this.onLoggedOut,
     this.nav,
     this.chatStreamFactory,
@@ -132,6 +173,9 @@ class AppShell extends StatefulWidget {
   /// El mismo probe que usa la pantalla Conectar, para que la fila
   /// `Probar conexión` de Ajustes no dependa de la capa de red por su cuenta.
   final ServerProbe onProbe;
+
+  /// Ajustes -> Apariencia -> Tema de color. Repinta en vivo.
+  final ValueChanged<String> onThemeVariant;
 
   final VoidCallback onLoggedOut;
 
@@ -288,6 +332,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         prefs: widget.prefs,
                         creds: widget.creds,
                         onProbe: widget.onProbe,
+                        onThemeVariant: widget.onThemeVariant,
                         onLoggedOut: widget.onLoggedOut,
                         // Las 94 claves de la spec aprobada salen del catálogo
                         // que ya está cargado; el toggle persiste vía PrefsStore.
