@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 
 import 'data/connectivity/network_monitor.dart';
 import 'ui/core/low_data_banner.dart';
+import 'ui/core/update_banner.dart';
 import 'core/network/api_client.dart';
+import 'core/update/update_service.dart';
 import 'core/network/server_config.dart';
 import 'data/repositories/session_repository.dart';
 import 'core/storage/creds_store.dart';
@@ -120,6 +122,7 @@ class AppShell extends StatefulWidget {
     required this.onLoggedOut,
     this.nav,
     this.chatStreamFactory,
+    this.updates,
   });
 
   final ServerConfig config;
@@ -141,6 +144,10 @@ class AppShell extends StatefulWidget {
   /// un fake para no dejar un socket ni timers colgados.
   final ChatEventSourceFactory? chatStreamFactory;
 
+  /// Autoupdate. Por defecto, el servicio real contra el manifiesto
+  /// publicado; un test inyecta uno falso para no tocar la red.
+  final UpdateService? updates;
+
   /// Estado del destino Chat sin ninguna sesión abierta: no hay viewmodel, no
   /// hay request y se dice qué hacer en vez de mostrar un error de red.
   static const Key noChatSessionKey = Key('shell-chat-no-session');
@@ -149,7 +156,7 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends State<AppShell> {
+class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   late final MobileNav _nav = widget.nav ?? MobileNav();
 
   /// Detector de red. Decide la política de consumo: **sólo** con datos
@@ -166,11 +173,43 @@ class _AppShellState extends State<AppShell> {
   DataPolicy get _policy =>
       _lowData ? const DataPolicy.lowData() : const DataPolicy.normal();
 
+  /// Autoupdate. Se inyecta para que un test no toque la red ni el canal
+  /// nativo; por defecto es el servicio real.
+  late final UpdateService _updates = widget.updates ?? UpdateService();
+  bool _updateDismissed = false;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _network.addListener(_onNetwork);
     _network.start();
+    // El chequeo arranca después del primer frame: si se hiciera en
+    // `initState`, la app espera a GitHub antes de pintar el chat.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkForUpdate());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Volver a primer plano es el momento natural para re-chequear: es cuando
+    // el usuario puede haberse bajado la versión nueva.
+    if (state == AppLifecycleState.resumed) _checkForUpdate();
+  }
+
+  /// Chequea y, si hay versión nueva y **no estamos con datos móviles**, la
+  /// empieza a bajar sola. No pide permiso ni abre nada: sólo aparece la banda
+  /// con el progreso. Instalar es lo único que queda en mano del usuario, y
+  /// Android igual pone su propia pantalla de confirmación encima.
+  ///
+  /// Con datos móviles **no** se baja sola: son 50 MB y el usuario no pidió
+  /// gastar sus datos en esto. La banda aparece igual y él decide.
+  Future<void> _checkForUpdate() async {
+    if (_updateDismissed) return;
+    final found = await _updates.check();
+    if (!found || !mounted) return;
+    _updateDismissed = false;
+    if (_lowData) return;
+    await _updates.download();
   }
 
   void _onNetwork() {
@@ -180,9 +219,11 @@ class _AppShellState extends State<AppShell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _network
       ..removeListener(_onNetwork)
       ..dispose();
+    _updates.dispose();
     super.dispose();
   }
 
@@ -205,6 +246,17 @@ class _AppShellState extends State<AppShell> {
             bottom: false,
             child: Column(
               children: [
+                // Autoupdate: banda no bloqueante, se oculta sola.
+                if (!_updateDismissed)
+                  ListenableBuilder(
+                    listenable: _updates,
+                    builder: (context, _) => UpdateBanner(
+                      state: _updates.state,
+                      onDownload: _updates.download,
+                      onInstall: _updates.install,
+                      onDismiss: () => setState(() => _updateDismissed = true),
+                    ),
+                  ),
                 // Sólo aparece con datos móviles: explica por qué la app se
                 // recorta, en vez de que el usuario adivine que anda lento.
                 LowDataBanner(
