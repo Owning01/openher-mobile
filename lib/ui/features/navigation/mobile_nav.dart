@@ -91,6 +91,14 @@ class MobileNav extends ChangeNotifier {
   /// En el chat, cerrar el destino **no** borra la sesion: `chatSession` se
   /// conserva para que al volver entre sea el mismo chat con su modelo y su
   /// agente, en vez de uno recien creado sin nada.
+
+  /// Si hay a donde volver. **Lectura pura**: se usa en `PopScope(canPop:)`,
+  /// que se evalúa durante el build, y llamar a `notifyListeners()` en esa
+  /// fase tira "phase only if one of its ancestors is currently building".
+  ///
+  /// Por eso existe separada de [handleBack]: una es la pregunta y la otra es
+  /// la acción. Preguntar no puede modificar nada.
+  bool get canHandleBack => _stack.length > 1;
   bool handleBack() {
     if (_stack.length > 1) {
       _stack.removeLast();

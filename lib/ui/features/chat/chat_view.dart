@@ -452,8 +452,11 @@ class _ChatViewState extends State<ChatView> {
           return Padding(
             padding: const EdgeInsets.only(bottom: AppSpacing.md),
             child: MessageBubble(
-            turnActivity: turns[messages[index].id],
-            absorbedActivity: turns.isAbsorbed(messages[index].id),
+              // offset ya descuenta las filas de encabezado (aviso de
+              // reintento y cargar-anteriores). Usar index aca tiraba
+              // RangeError en cuanto esas filas aparecian.
+              turnActivity: turns[message.id],
+              absorbedActivity: turns.isAbsorbed(message.id),
               key: ValueKey(message.id),
               message: message,
               working: _vm.working,
