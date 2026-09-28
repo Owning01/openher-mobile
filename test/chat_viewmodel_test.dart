@@ -224,7 +224,7 @@ void main() {
     );
 
     test(
-      'el cursor "previous" del server enciende "Cargar 30 anteriores"',
+      'el cursor "next" del server enciende "Cargar 30 anteriores"',
       () async {
         var call = 0;
         final vm = buildVm(
@@ -233,7 +233,7 @@ void main() {
             if (call == 1) {
               return {
                 'data': [userMessage('msg_u1', 'hola')],
-                'cursor': {'previous': 'eyJpZCI6Im1zZ19uMSJ9'},
+                'cursor': {'previous': 'eyJpZCI6Im1zZ19uMSJ9', 'next': 'eyJpZCI6Im1zZ19uMSJ9'},
               };
             }
             return {
@@ -949,15 +949,19 @@ void main() {
                 userMessage('msg_u3', 'tercero'),
                 userMessage('msg_u2', 'segundo'),
               ],
-              'cursor': {'previous': 'cur1'},
+              'cursor': {'previous': 'cur1', 'next': 'cur1'},
             };
           }
           if (call == 2) {
-            // `loadEarlier` en `asc`: la más vieja primero.
+            // Adjudicado 2026-09-28. El fixture decia que la pagina de
+            // loadEarlier llegaba en asc (mÃ¡s vieja primero). Medido contra
+            // :4098, la pagina con direction next llega como la primera:
+            // del MÃS NUEVO al mÃ¡s viejo. Por eso el codigo la invierte antes
+            // de insertarla, y este fixture lo tiene que reflejar.
             return {
               'data': [
-                userMessage('msg_u0', 'cero'),
                 userMessage('msg_u1', 'primero'),
+                userMessage('msg_u0', 'cero'),
               ],
             };
           }

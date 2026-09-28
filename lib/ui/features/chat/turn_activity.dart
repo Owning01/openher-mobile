@@ -1,52 +1,48 @@
 /// La caja de actividad del turno (`chat.activitybox.*`): una sola fila
-/// plegable que resume el razonamiento + las tools del assistant.
+/// plegable que resume el razonamiento + las tools **del turno entero**.
+///
+/// ## Quién la pinta
+/// La caja es una por TURNO, no una por mensaje de assistant, y la monta el
+/// primer mensaje del turno (justo debajo del prompt del usuario). El agrupado
+/// es de `domain/models/turn_activity.dart`; esta clase sólo la pinta. Sin
+/// `turnActivity` —uso suelto del widget, o una burbuja sin agrupado— el turno
+/// es el mensaje mismo.
+///
+/// ## El rótulo
+/// `Working` mientras el turno corre, con el barrido de brillo del cliente
+/// React (`.shimmer-text` de `chat.css`), y `Worked` cuando terminó. Es el
+/// rótulo que pidió el usuario, literal.
 ///
 /// ## La regla de auto-colapso (importante)
-/// El prototipo abre el turno mientras trabaja y lo cierra cuando termina. En
-/// Flutter eso NO puede ser "cada vez que se rebuilda", porque un rebuild que
-/// no tiene nada que ver (un delta de texto, la llegada de un mensaje) se
-/// comería el toggle manual del usuario. La regla exacta que se implementa:
+/// La caja **arranca siempre cerrada** y un rebuild no la abre. En Flutter eso
+/// no puede ser "cada vez que se rebuilda", porque un rebuild que no tiene nada
+/// que ver (un delta de texto, la llegada de un mensaje) se comería el toggle
+/// manual del usuario. La regla exacta que se implementa:
 ///
-/// * `_open` **sólo** se escribe en tres lugares: [initState],
-///   [didUpdateWidget] con un cambio de `working`, y [didUpdateWidget] con un
-///   cambio de `thinkingDefault`.
+/// * `_open` **sólo** se escribe en [initState] (y no en ningún otro lado).
 /// * Ningún otro camino lo toca, así que un abierto manual sobrevive todos los
 ///   rebuilds del turno.
 ///
-/// Un rebuild con los mismos `working`/`thinkingDefault` **no** escribe
-/// `_open`: ése es el punto entero del widget.
+/// Un rebuild con la misma [TurnActivity] **no** escribe `_open`: ése es el
+/// punto entero del widget.
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../../domain/models/message.dart';
+import '../../../domain/models/turn_activity.dart';
 import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
 import '../../core/tokens.dart';
 import 'tool_card.dart';
 
 class TurnActivityBox extends StatefulWidget {
-  const TurnActivityBox({
-    super.key,
-    required this.tools,
-    required this.working,
-    this.time,
-    this.thinkingDefault = true,
-    this.onOpenDiff,
-  });
+  const TurnActivityBox({super.key, required this.activity, this.onOpenDiff});
 
-  final List<AssistantTool> tools;
-
-  /// Hay un turno en curso sobre este assistant.
-  final bool working;
-
-  /// `message.time` del assistant. Sólo se usa para el resumen `N herramientas ·
-  /// X.Xs`: sin `time.completed` no hay duración que mentir.
-  final MessageTime? time;
-
-  /// Preferencia del usuario: "el razonamiento arranca abierto". Se lee desde
-  /// Ajustes; mientras working sea `true` manda `true`.
-  final bool thinkingDefault;
+  /// Lo que hizo el turno: su razonamiento, sus tools y si sigue vivo. Un
+  /// [TurnActivity] vacío no se pinta nunca (el agrupador ni siquiera lo
+  /// genera).
+  final TurnActivity activity;
 
   final ValueChanged<AssistantTool>? onOpenDiff;
 
@@ -60,11 +56,11 @@ class TurnActivityBox extends StatefulWidget {
 class _TurnActivityBoxState extends State<TurnActivityBox> {
   /// **Siempre cerrada.**
   ///
-  /// Antes se abría sola mientras el turno trabajan (`working &&
-  /// thinkingDefault`), y como hay una caja por mensaje de assistant, un chat
-  /// con 30 turnos acababa con 30 cajas abiertas de 180 px cada una: 5.400 px
-  /// de herramientas empujando la respuesta muy lejos del ojo. El usuario lo
-  /// reportó como "las herramientas me llenan todo el chat de más altura".
+  /// Antes se abría sola mientras el turno trabajan, y como hay una caja por
+  /// mensaje de assistant, un chat con 30 turnos acababa con 30 cajas abiertas
+  /// de 148 px cada una: 4.400 px de herramientas empujando la respuesta muy
+  /// lejos del ojo. El usuario lo reportó como "las herramientas me llenan todo
+  /// el chat de más altura".
   ///
   /// Ahora la regla es una sola: la caja es un resumen de una línea que se
   /// abre si el usuario la abre. El rótulo del encabezado ya dice si el turno
@@ -81,7 +77,7 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.tools.isEmpty) return const SizedBox.shrink();
+    if (widget.activity.isEmpty) return const SizedBox.shrink();
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final text = theme.textTheme;
@@ -109,7 +105,20 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
 
   Widget _head(ThemeData theme, TextTheme text) {
     final scheme = theme.colorScheme;
-    final label = turnCategoryLabel(widget.tools);
+    final working = widget.activity.working;
+    // El barrido del cliente React no va si el sistema pidió menos movimiento:
+    // ahí el rótulo es texto y nada más.
+    final shimmer = working && !MediaQuery.disableAnimationsOf(context);
+    final titleStyle = text.labelSmall?.copyWith(
+      fontWeight: FontWeight.w700,
+      letterSpacing: 0.66,
+      // `.actlabel` (:279) es `--muted-strong`: con `--text` el rótulo
+      // competía con la respuesta de arriba.
+      color: theme.brightness == Brightness.dark
+          ? AppColors.darkMutedStrong
+          : AppColors.lightMutedStrong,
+    );
+
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -118,55 +127,87 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
         borderRadius: AppRadius.mdAll,
         // `.acthead:hover{background:var(--surface-hover)}` (:276).
         hoverColor: scheme.surfaceContainerHigh,
-        child: SizedBox(
-          height: 32,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
-            child: Row(
-              children: [
-                LayerGate(
-                  'chat.activitybox.chevron',
-                  child: AnimatedRotation(
-                    turns: _open ? 1 : 0,
-                    duration: const Duration(milliseconds: 180),
-                    child: AppIcon(
-                      _open ? 'chevron-down' : 'chevron-right',
-                      size: 16,
-                      color: scheme.onSurfaceVariant,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.xs,
+            vertical: AppSpacing.xs,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  LayerGate(
+                    'chat.activitybox.chevron',
+                    child: AnimatedRotation(
+                      turns: _open ? 1 : 0,
+                      duration: const Duration(milliseconds: 180),
+                      child: AppIcon(
+                        _open ? 'chevron-down' : 'chevron-right',
+                        size: 16,
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: AppSpacing.sm),
-                Expanded(
-                  child: LayerGate(
-                    'chat.activitybox.label',
+                  const SizedBox(width: AppSpacing.sm),
+                  Expanded(
+                    child: LayerGate(
+                      'chat.activitybox.label',
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: shimmer
+                            ? ShimmerText(
+                                text: 'Working',
+                                style: titleStyle,
+                                highlight: scheme.onSurface,
+                              )
+                            : Text(
+                                working ? 'Working' : 'Worked',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: titleStyle,
+                              ),
+                      ),
+                    ),
+                  ),
+                  LayerGate(
+                    'chat.activitybox.summary',
+                    child: _summary(theme, text),
+                  ),
+                ],
+              ),
+              if (category.isNotEmpty) ...[
+                const SizedBox(height: AppSpacing.xs),
+                // Las categorías (`SHELL · READ · EDIT`) bajan a su propia línea:
+                // en una fila con el rótulo y el resumen no cabían en un
+                // teléfono angosto y se comían el uno al otro.
+                LayerGate(
+                  'chat.activitybox.label',
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: AppSpacing.xxl),
                     child: Text(
-                      label,
+                      category,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: text.labelSmall?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 0.66,
-                        // `.actlabel` (:279) es `--muted-strong`: con `--text`
-                        // el rótulo competía con la respuesta de arriba.
-                        color: theme.brightness == Brightness.dark
-                            ? AppColors.darkMutedStrong
-                            : AppColors.lightMutedStrong,
+                      style: text.bodySmall?.copyWith(
+                        fontSize: 11,
+                        color: scheme.onSurfaceVariant,
                       ),
                     ),
                   ),
                 ),
-                LayerGate(
-                  'chat.activitybox.summary',
-                  child: _summary(theme, text),
-                ),
               ],
-            ),
+            ],
           ),
         ),
       ),
     );
   }
+
+  /// `SHELL · READ · EDIT`: los nombres de las tools del turno, deduplicados y
+  /// en orden de aparición.
+  String get category => turnCategoryLabel(widget.activity.toolParts);
 
   /// Derecha de la fila: `N herramientas · X.Xs` si el turno terminó, o el
   /// spinner de 12 px **con el "· pensando"** del prototipo (:974) si sigue
@@ -178,7 +219,7 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
       fontSize: 12,
       color: scheme.onSurfaceVariant,
     );
-    if (widget.working) {
+    if (widget.activity.working) {
       return Row(
         mainAxisSize: MainAxisSize.min,
         // `.actsum{gap:6px}`.
@@ -196,19 +237,23 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
         ],
       );
     }
-    final count = widget.tools.length;
+    final count = widget.activity.toolParts.length;
     final tools = count == 1 ? '1 herramienta' : '$count herramientas';
-    final ms = widget.time?.completedMs;
-    final start = widget.time?.streamedMs ?? widget.time?.createdMs;
+    final time = widget.activity.time;
+    final ms = time?.completedMs;
+    final start = time?.streamedMs ?? time?.createdMs;
     final label = (ms != null && start != null && ms > start)
         ? '$tools · ${toolDurationMs(ms - start)}'
         : tools;
     return Text(label, style: style);
   }
 
-  /// `chat.activitybox.body`: alto máximo 180 px con scroll propio, borde
-  /// izquierdo como en el `.actbody` del prototipo.
+  /// `chat.activitybox.body`: alto máximo [kToolListMaxHeight] con scroll
+  /// propio, borde izquierdo como en el `.actbody` del prototipo.
   Widget _body() {
+    final thinking = widget.activity.thinkingParts
+        .where((part) => part.text.trim().isNotEmpty)
+        .toList();
     return LayerGate(
       'chat.activitybox.body',
       child: Container(
@@ -225,7 +270,19 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
-              for (final tool in widget.tools)
+              // El razonamiento va arriba de las tools: es lo que el modelo
+              // hizo antes de llamarlas.
+              for (final part in thinking)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: kToolRowSpacing),
+                  child: Text(
+                    part.text.trim(),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              for (final tool in widget.activity.toolParts)
                 Padding(
                   padding: const EdgeInsets.only(bottom: kToolRowSpacing),
                   child: ToolCard(
@@ -238,6 +295,80 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// El rótulo del turno con el barrido de brillo del cliente React
+/// (`.shimmer-text` de `chat.css`): una banda de luz que recorre el texto de
+/// izquierda a derecha cada 2.2 s.
+///
+/// El barrido es un degradado **enmascarado por el texto** (`ShaderMask`), no
+/// un `Text` con color animado: así el glifo no cambia de forma y el
+/// resultado es el mismo que el `background-clip: text` del CSS.
+class ShimmerText extends StatefulWidget {
+  const ShimmerText({
+    super.key,
+    required this.text,
+    required this.style,
+    required this.highlight,
+  });
+
+  final String text;
+  final TextStyle? style;
+
+  /// El color de la banda que pasa por encima. En el CSS es el acento del
+  /// chat; acá el `--text` del tema.
+  final Color highlight;
+
+  /// Un ciclo completo del barrido. Es el `2.2s` del `@keyframes
+  /// shimmer-text-sweep`.
+  static const Duration period = Duration(milliseconds: 2200);
+
+  @override
+  State<ShimmerText> createState() => _ShimmerTextState();
+}
+
+class _ShimmerTextState extends State<ShimmerText>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: ShimmerText.period,
+  )..repeat();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = widget.style;
+    final base = style?.color ?? Theme.of(context).colorScheme.onSurface;
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (context, _) {
+        // La banda viaja de `-1` a `1` en el eje horizontal del degradado: en
+        // 0 está fuera de la caja, en 1 al otro lado, como el `background
+        // -position: -220% 0` del CSS.
+        final x = -1.0 + 2.0 * _c.value;
+        return ShaderMask(
+          blendMode: BlendMode.srcIn,
+          shaderCallback: (bounds) => LinearGradient(
+            begin: Alignment(x - 0.6, 0),
+            end: Alignment(x + 0.6, 0),
+            colors: [base, widget.highlight, base],
+            stops: const [0.42, 0.5, 0.58],
+          ).createShader(bounds),
+          child: Text(
+            widget.text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: style,
+          ),
+        );
+      },
     );
   }
 }

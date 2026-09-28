@@ -8,6 +8,7 @@ import 'package:openher_mobile/core/network/api_client.dart';
 import 'package:openher_mobile/core/network/server_config.dart';
 import 'package:openher_mobile/data/repositories/session_repository.dart';
 import 'package:openher_mobile/domain/models/errors.dart';
+import 'package:openher_mobile/domain/models/message.dart';
 import 'package:openher_mobile/domain/models/session.dart';
 import 'package:openher_mobile/ui/core/layer_gate.dart';
 import 'package:openher_mobile/ui/core/theme.dart';
@@ -648,7 +649,10 @@ void main() {
         ),
         clock: () => kNow,
       );
-      await pumpView(tester, SessionsView(viewmodel: vm, onOpen: opened.add));
+      await pumpView(
+        tester,
+        SessionsView(viewmodel: vm, onOpen: (s) => opened.add(s.id)),
+      );
       await settle(tester);
 
       await tester.tap(find.byKey(SessionsView.addButtonKey));
@@ -673,7 +677,10 @@ void main() {
         ),
         clock: () => kNow,
       );
-      await pumpView(tester, SessionsView(viewmodel: vm, onOpen: opened.add));
+      await pumpView(
+        tester,
+        SessionsView(viewmodel: vm, onOpen: (s) => opened.add(s.id)),
+      );
       await settle(tester);
 
       await tester.tap(find.text('Diseña'));
@@ -791,3 +798,18 @@ Future<void> unmount(WidgetTester tester, SessionsViewModel vm) async {
   await tester.pumpWidget(const SizedBox.shrink());
   vm.dispose();
 }
+
+/// Una sesiÃ³n mÃ­nima para los tests que abren el chat.
+///
+/// `onOpen` pasÃ³ a llevar la sesiÃ³n **entera** (no sÃ³lo el id) para que el chat
+/// reciba su `agent` y su `model`: sin ellos, al reentrar los pills del
+/// composer volvÃ­an a decir "Elegir". Es un cambio de firma, no de
+/// comportamiento: lo que los tests afirman sigue siendo lo mismo.
+SessionInfo kTestSession(String id) => SessionInfo(
+  id: id,
+  projectID: 'prj_1',
+  title: 'test',
+  cost: 0,
+  tokens: const TokenUsage(),
+  time: const SessionTime(createdMs: 0, updatedMs: 0),
+);

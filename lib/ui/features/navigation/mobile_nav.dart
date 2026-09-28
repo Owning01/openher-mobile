@@ -1,5 +1,7 @@
 import 'package:flutter/widgets.dart';
 
+import '../../../domain/models/session.dart';
+
 /// Los 4 destinos del bottom-nav. Es la decisión D5 del plan: un pulgar, una
 /// tarea por pantalla. La activity-bar de 12 items del escritorio no es táctil.
 enum MobileTab {
@@ -34,6 +36,15 @@ class MobileNav extends ChangeNotifier {
   /// SessionID abierto en la pestaña Chat (null = sin sesión).
   String? chatSessionId;
 
+  /// La sesion abierta, con su `agent` y su `model`.
+  ///
+  /// Se guarda **entera** y no solo el id porque el server si trae esas dos
+  /// cosas en la lista (medido: las claves de una sesion en la lista son id,
+  /// projectID, agent, model, cost, tokens, time, location). Pasando solo el
+  /// id, el chat se abria sin modelo ni agente y los pills volvia a decir
+  /// "Elegir" aunque el usuario ya los hubiera elegido.
+  SessionInfo? chatSession;
+
   /// Si el usuario puede volver atrás (Android: botón atrás).
   bool get canPop => _stack.length > 1;
 
@@ -61,11 +72,33 @@ class MobileNav extends ChangeNotifier {
 
   /// Abre una sesión en el destino Chat. La lista la llama con el id que
   /// acaba de crear o de tocar; no hace falta un `openNewSession` aparte.
-  void openSession(String sessionId) {
-    chatSessionId = sessionId;
+  void openSession(SessionInfo session) {
+    chatSession = session;
+    chatSessionId = session.id;
     _tab = MobileTab.chat;
     _stack.add(MobileTab.chat);
     if (_stack.length > 16) _stack.removeAt(0);
     notifyListeners();
+  }
+
+  /// El boton atras del sistema. Devuelve `true` si el nav consumio el gesto.
+  ///
+  /// Antes no habia nada: el gesto cerraba la app desde cualquier pestana y
+  /// desde el chat ademas perdias la sesion. La regla es la de Android: el nav
+  /// recorre su propia pila ([_stack]); solo en la raiz devuelve `false`, que
+  /// es lo que le deja al sistema cerrar.
+  ///
+  /// En el chat, cerrar el destino **no** borra la sesion: `chatSession` se
+  /// conserva para que al volver entre sea el mismo chat con su modelo y su
+  /// agente, en vez de uno recien creado sin nada.
+  bool handleBack() {
+    if (_stack.length > 1) {
+      _stack.removeLast();
+      _tab = _stack.last;
+      if (_tab != MobileTab.chat) chatSessionId = null;
+      notifyListeners();
+      return true;
+    }
+    return false;
   }
 }

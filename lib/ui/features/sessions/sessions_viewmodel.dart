@@ -77,6 +77,17 @@ class SessionsViewModel extends ChangeNotifier {
   /// Todo lo que trajo el server, del más reciente al más viejo. Sin filtro.
   List<SessionInfo> get sessions => _sessions;
 
+  /// La sesiÃ³n con ese id, o `null`.
+  ///
+  /// Se usa al abrir un chat reciÃ©n creado para pasarle el `agent` y el
+  /// `model` que el server ya devolviÃ³, en vez de un `SessionInfo` vacÃ­o.
+  SessionInfo? findById(String id) {
+    for (final s in _sessions) {
+      if (s.id == id) return s;
+    }
+    return null;
+  }
+
   /// [sessions] con el filtro de [query] aplicado (por título).
   List<SessionInfo> get visible {
     final q = _query.trim().toLowerCase();

@@ -181,31 +181,47 @@ class ApiClient {
   /// `{"data":…}`. Por eso va por `postJson`, que ya tolera el 204, y no por
   /// _object, que leería un JSON de un cuerpo vacío.
 
-  /// `POST /api/session/{id}/compact` - resume la conversacion.
+  /// `POST /api/session/{id}/compact` - resume la conversación.
   ///
-  /// El server responde **204 sin cuerpo** (medido), asi que va por
-  /// [postJson] y no por [_object].
+  /// **Medido 2026-09-28**: sin body devuelve 400 con `InvalidRequestError:
+  /// Expected object`. Con `{}` responde **200** y devuelve el mensaje de
+  /// compactación que genera, así que no se tira el resultado: quien la llama
+  /// lo necesita para refrescar.
+  ///
+  /// También se midió que con la sesión ocupada el server contesta 409
+  /// `SessionBusyError`, que es transitorio y no un error de la app.
   Future<void> compactSession(String sessionId, {String? directory}) =>
       postJson(
         '/session/$sessionId/compact',
         query: _withLocation(const {}, directory),
+        body: const <String, dynamic>{},
       );
 
   /// `POST /api/session/{id}/revert/stage` - prepara un Deshacer.
   ///
   /// El dialecto v2 no tiene un "undo" de un solo paso: el revert es **por
-  /// etapas**. [stageRevert] prepara y [commitRevert] aplica; si se manda
-  /// [commitRevert] sin [stageRevert] el server no tiene nada que commitear.
-  Future<void> stageRevert(String sessionId, {String? directory}) => postJson(
+  /// etapas**. [stageRevert] prepara y [commitRevert] aplica; mandar el commit
+  /// sin el stage no tiene nada que commitear.
+  ///
+  /// **Medido 2026-09-28**: el body exige `messageID` (patrón `^msg_`). Con
+  /// `{}` devuelve 400 `InvalidRequestError: Missing key at [messageID]`, que
+  /// era de donde saltaba el `ApiError` que reportó el usuario.
+  Future<void> stageRevert(
+    String sessionId, {
+    required String messageId,
+    String? directory,
+  }) => postJson(
     '/session/$sessionId/revert/stage',
     query: _withLocation(const {}, directory),
+    body: <String, dynamic>{'messageID': messageId},
   );
 
   /// `POST /api/session/{id}/revert/commit` - aplica lo que preparó
-  /// [stageRevert].
+  /// [stageRevert]. También exige body (medido: `{}`).
   Future<void> commitRevert(String sessionId, {String? directory}) => postJson(
     '/session/$sessionId/revert/commit',
     query: _withLocation(const {}, directory),
+    body: const <String, dynamic>{},
   );
 
   Future<void> setSessionAgent(

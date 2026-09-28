@@ -15,6 +15,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../../domain/models/message.dart';
 import '../../../domain/models/session.dart';
 import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
@@ -32,7 +33,7 @@ class SessionsView extends StatefulWidget {
   final SessionsViewModel viewmodel;
 
   /// Abrir el chat de una sesión (fila tocada o `+` recién creada).
-  final void Function(String sessionId) onOpen;
+  final void Function(SessionInfo session) onOpen;
 
   /// Intención del swipe o del menú contextual. `null` = la pantalla todavía no
   /// conduce esos gestos a ninguna parte.
@@ -105,7 +106,21 @@ class _SessionsViewState extends State<SessionsView> {
   Future<void> _create() async {
     final id = await widget.viewmodel.create();
     if (!mounted || id == null || id.isEmpty) return;
-    widget.onOpen(id);
+    // Se pasa la sesiÃ³n **entera**, no sÃ³lo el id: el server trae
+    // `agent` y `model` en la lista, y sin ellos el chat se abrÃ­a
+    // sin modelo ni agente (los pills volvÃ­an a "Elegir").
+    final created = widget.viewmodel.findById(id);
+    widget.onOpen(
+      created ??
+          SessionInfo(
+            id: id,
+            projectID: '',
+            title: '',
+            cost: 0,
+            tokens: const TokenUsage(),
+            time: const SessionTime(createdMs: 0, updatedMs: 0),
+          ),
+    );
   }
 
   /// Swipe a la izquierda. El snap-back es **intencional**: archivar no existe
@@ -225,7 +240,7 @@ class _SessionsViewState extends State<SessionsView> {
                   attention: vm.needsAttention(session),
                   relativeTime: vm.relativeTime(session),
                   cost: vm.costOf(session),
-                  onTap: () => widget.onOpen(session.id),
+                  onTap: () => widget.onOpen(session),
                   onMenu: () => _openMenu(session),
                   onArchive: () => _swiped(session),
                 ),
