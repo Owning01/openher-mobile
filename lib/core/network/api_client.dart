@@ -140,6 +140,83 @@ class ApiClient {
     }
   }
 
+  /// `GET /api/model` — el catálogo de modelos del build.
+  ///
+  /// No es paginado: el server medido manda los 102 modelos del build en una
+  /// sola respuesta (`{location, data: […]}`, sin `cursor`). Se reusa [_page]
+  /// —el hermano de lista de [_object]— porque la forma del sobre es la misma
+  /// y así el `location` y el deadline son los de siempre.
+  ///
+  /// Devuelve los ítems crudos: mapearlos a `ModelInfo` es del repository. Un
+  /// ítem que no sea un mapa se descarta acá en vez de romperle el `cast` al
+  /// repository.
+  Future<List<Map<String, dynamic>>> listModels({String? directory}) async {
+    final page = await _page('/model', const <String, String?>{}, directory);
+    return [
+      for (final item in page.data)
+        if (item is Map<String, dynamic>) item,
+    ];
+  }
+
+  /// `GET /api/agent` - los agentes que el server conoce, 26 medidos
+  /// (2026-09-28: `build`, `plan`, `ask`, `general`, y los subagentes de cada
+  /// skill; más los internos ocultos `compaction`, `title` y `summary`).
+  ///
+  /// Cada uno trae `id`, `name`, `mode` (`primary` / `subagent`), `description`,
+  /// `hidden` y `permissions`. **Ninguno trae modelo**: el modelo es de la
+  /// sesión, no del agente.
+  ///
+  /// No es paginado, como [listModels].
+  Future<List<Map<String, dynamic>>> listAgents({String? directory}) async {
+    final page = await _page('/agent', const <String, String?>{}, directory);
+    return [
+      for (final item in page.data)
+        if (item is Map<String, dynamic>) item,
+    ];
+  }
+
+  /// `POST /api/session/{id}/agent` - cambia el agente de una sesión **viva**.
+  ///
+  /// Medido: responde **204 sin cuerpo** (igual que `interrupt`), no un
+  /// `{"data":…}`. Por eso va por `postJson`, que ya tolera el 204, y no por
+  /// _object, que leería un JSON de un cuerpo vacío.
+  Future<void> setSessionAgent(
+    String sessionId, {
+    required String agent,
+    String? directory,
+  }) => postJson(
+    '/session/$sessionId/agent',
+    query: _withLocation(const {}, directory),
+    body: <String, dynamic>{'agent': agent},
+  );
+
+  /// `POST /api/session/{id}/model` - cambia el modelo de una sesión **viva**,
+  /// incluido el nivel de pensamiento.
+  ///
+  /// El body es `{model: ModelRef}` con `id`, `providerID` y `variant`
+  /// opcional. También responde **204 sin cuerpo**, medido.
+  ///
+  /// Un `variantId` nulo manda la clave sin valor: el server interpreta la
+  /// ausencia como "el nivel por defecto del modelo", que es lo que quiere
+  /// decir "dejá el nivel que venga".
+  Future<void> setSessionModel(
+    String sessionId, {
+    required String providerId,
+    required String modelId,
+    String? variantId,
+    String? directory,
+  }) => postJson(
+    '/session/$sessionId/model',
+    query: _withLocation(const {}, directory),
+    body: <String, dynamic>{
+      'model': <String, dynamic>{
+        'id': modelId,
+        'providerID': providerId,
+        'variant': ?variantId,
+      },
+    },
+  );
+
   /// `GET /api/session` — lista paginada.
   Future<ApiPage> listSessions({
     int? limit,

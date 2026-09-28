@@ -215,6 +215,42 @@ class ChatViewModel extends ChangeNotifier {
   final ApiClient _api;
   final ChatEventSourceFactory _streamFactory;
 
+  /// El cliente con el que se habla con el server.
+  ///
+  /// Lo expone la vista para armar lo que necesita de la red sin que el shell
+  /// se lo pase por parámetro (la hoja de modelo usa su mismo `ApiClient`, y
+  /// así comparte la config y las credenciales de esta sesión).
+  ApiClient get api => _api;
+
+  /// Modelo y agente **elegidos en esta sesión de la UI**, con prioridad sobre
+  /// lo que dice el server.
+  ///
+  /// Hace falta porque los endpoints de cambio (`POST /api/session/{id}/model`
+  /// y `.../agent`) responden **204 sin cuerpo** —medido—: no hay nada que
+  /// deserializar, y `sessionInfo` además es `final`, entra por constructor y
+  /// no se puede re-asignar. Sin estos dos campos, después de elegir un modelo
+  /// los pills seguirían diciendo "Elegir modelo" hasta el próximo arranque, que
+  /// es exactamente el síntoma que reportó el usuario.
+  ModelRef? _pickedModel;
+  String? _pickedAgent;
+
+  /// El modelo en uso: lo elegido, y si no se eligió nada, el de la sesión.
+  ModelRef? get currentModel => _pickedModel ?? sessionInfo?.model;
+
+  /// El agente en uso: idem para el agente.
+  String? get currentAgent => _pickedAgent ?? sessionInfo?.agent;
+
+  /// Registra la elección sin volver a pedir la sesión al server.
+  ///
+  /// Un argumento `null` significa "no lo toco", nunca "borralo": borrar un
+  /// campo es otra operación y no se puede expresar por ausencia de valor.
+  void applySelection({ModelRef? model, String? agent}) {
+    if (model == null && agent == null) return;
+    if (model != null) _pickedModel = model;
+    if (agent != null) _pickedAgent = agent;
+    _safeNotify();
+  }
+
   /// Mensajes en orden cronológico. Incluye los optimistas (`local_…`) hasta
   /// que un re-fetch los reemplaza por los del server.
   final List<SessionMessage> _messages = [];
@@ -584,6 +620,17 @@ class ChatViewModel extends ChangeNotifier {
     _awaitingAssistant = false;
     _flushDeltas();
     _recomputeWorking();
+    _safeNotify();
+  }
+
+  /// Deja un error a la vista desde fuera del VM.
+  ///
+  /// Lo usan las acciones que el chat dispara por su cuenta (cambiar de
+  /// modelo o de agente): antes no había forma de que un fallo de esas
+  /// se viera, porque el error sólo lo ponían los pedidos de mensajes.
+  void reportError(String message) {
+    if (_disposed || message.isEmpty) return;
+    _error = message;
     _safeNotify();
   }
 

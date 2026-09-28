@@ -10,11 +10,15 @@
 /// (`docs/API_CONTRACT.md` §4.2). Un tool en `error` pinta borde izquierdo
 /// `danger` y el `errorMessage`: es el canal B de §5 y el turno puede seguir.
 ///
-/// ## El error usa `danger`, no el rojo de diff
-/// El chrome es monocromo y el color vive en los diffs: el rojo de `diffDel` es
-/// de diff, así que el error de un tool pintado con él y el error de assistant
-/// pintado con `danger` hacían ver dos errores distintos en el mismo chat.
-/// Acá va `AppColors.dangerOf`, igual que en `message_bubble.dart`.
+/// ## El color del error
+/// El prototipo usa `--danger` (rojo: `#E11D48` / `#FB7185`) para el borde
+/// `.toolcard.err`, el punto `.dot.err` y el texto de salida de una tool que
+/// falló. En `tokens.dart` ese rojo es el del scope de diffs
+/// (`AppColors.diffDelOf`), y ya lo usaba el botón Detener del composer: con el
+/// `danger` gris del chrome, el botón de detener era el único elemento de color
+/// de la pantalla y el error de una tool no se leía como error. Acá va el del
+/// prototipo, y el glifo y el subtítulo se quedan en `--muted-strong` como en
+/// `.toolglyph`.
 library;
 
 import 'dart:async';
@@ -71,26 +75,33 @@ class _ToolCardState extends State<ToolCard> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final text = Theme.of(context).textTheme;
-    final brightness = Theme.of(context).brightness;
-    // Chrome monocromo: el error usa `danger`, no el rojo de los diffs.
-    final danger = AppColors.dangerOf(brightness);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final text = theme.textTheme;
+    // `--danger` del prototipo: el mismo rojo que el botón Detener del
+    // composer y la card de error del assistant (ver el §"color del error" del
+    // doc de este archivo).
+    final danger = AppColors.diffDelOf(theme.brightness);
     final border = scheme.outline;
 
     return DecoratedBox(
-      // `.toolcard.err`: borde `danger` y **izquierdo** de 2px (no se nota si
-      // sólo se pinta el borde de 1px, que es el shim que la web descarta).
+      // `.toolcard.err` (:286): borde `danger` y **izquierdo** de 2 px (no se
+      // nota si sólo se pinta el borde de 1 px, que es el shim que la web
+      // descarta). `.toolcard` a secas es `--border` con `--r2`.
       decoration: BoxDecoration(
         color: scheme.surface,
         borderRadius: AppRadius.mdAll,
-        border: Border.all(color: _isError ? danger : border),
+        border: Border.fromBorderSide(
+          _isError
+              ? BorderSide(color: danger, width: 2)
+              : BorderSide(color: border),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
-          _head(context, text, brightness),
+          _head(context, text, theme.brightness),
           if (_expanded) _output(context, text),
         ],
       ),
@@ -99,7 +110,10 @@ class _ToolCardState extends State<ToolCard> {
 
   Widget _head(BuildContext context, TextTheme text, Brightness brightness) {
     final scheme = Theme.of(context).colorScheme;
-    final danger = AppColors.dangerOf(brightness);
+    final mutedStrong = brightness == Brightness.dark
+        ? AppColors.darkMutedStrong
+        : AppColors.lightMutedStrong;
+    final danger = AppColors.diffDelOf(brightness);
     final state = _state;
     final isError = _isError;
 
@@ -109,17 +123,17 @@ class _ToolCardState extends State<ToolCard> {
       child: InkWell(
         key: ToolCard.headKey,
         onTap: () => setState(() => _expanded = !_expanded),
+        // `.toolhead:hover{background:var(--surface-subtle)}` (:288).
+        hoverColor: scheme.surfaceContainerLow,
         child: SizedBox(
           height: 40,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
             child: Row(
               children: [
-                AppIcon(
-                  toolIcon(_tool.name),
-                  size: 18,
-                  color: isError ? danger : Theme.of(context).iconTheme.color,
-                ),
+                // `.toolglyph` es `--muted-strong` también en una tool que
+                // falló: lo que va en `danger` es el borde y el punto.
+                AppIcon(toolIcon(_tool.name), size: 18, color: mutedStrong),
                 const SizedBox(width: AppSpacing.sm),
                 Text(
                   _tool.name,
@@ -168,8 +182,10 @@ class _ToolCardState extends State<ToolCard> {
       _ => toolDurationLabel(state) ?? '',
     }, style: text.labelSmall?.copyWith(color: muted));
 
+    // `.dot.err` del prototipo es `--danger`, el resto del estado (`ok`,
+    // `warn`) también es color: el punto es el único acento de la fila.
     final dot = switch (state) {
-      ToolError() => _Dot(color: AppColors.dangerOf(brightness)),
+      ToolError() => _Dot(color: AppColors.diffDelOf(brightness)),
       ToolRunning() => const _Spinner(),
       ToolPending() => _Dot(color: AppColors.warnOf(brightness)),
       _ => _Dot(color: AppColors.diffAddOf(brightness)),
@@ -183,12 +199,20 @@ class _ToolCardState extends State<ToolCard> {
   /// tools también scrollea: son dos scrolls, como en el prototipo).
   Widget _output(BuildContext context, TextTheme text) {
     final code = _outputText();
+    final scheme = Theme.of(context).colorScheme;
+    final brightness = Theme.of(context).brightness;
+    final mutedStrong = brightness == Brightness.dark
+        ? AppColors.darkMutedStrong
+        : AppColors.lightMutedStrong;
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: Theme.of(context).brightness == Brightness.dark
+        color: brightness == Brightness.dark
             ? AppColors.darkCodeBg
             : AppColors.lightCodeBg,
-        border: const Border(top: BorderSide(color: AppColors.lightBorder)),
+        // `.toolexp{border-top:1px solid var(--border)}`: el borde del tema, no
+        // un color fijo — con `lightBorder` el filete quedaba claro sobre el
+        // fondo oscuro.
+        border: Border(top: BorderSide(color: scheme.outline)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -206,8 +230,8 @@ class _ToolCardState extends State<ToolCard> {
                     fontSize: 11.5,
                     height: 1.55,
                     color: _isError
-                        ? AppColors.dangerOf(Theme.of(context).brightness)
-                        : Theme.of(context).colorScheme.onSurfaceVariant,
+                        ? AppColors.diffDelOf(brightness)
+                        : mutedStrong,
                   ),
                 ),
               ),
@@ -399,7 +423,8 @@ class _Spinner extends StatelessWidget {
   );
 }
 
-/// Chip fantasma del pie (`.chipbtn`): 26 px de alto, borde 1 px, 11.5 px.
+/// Chip fantasma del pie (`.chipbtn`, `:307-308`): 26 px de alto, borde 1 px,
+/// 11.5 px y `--muted-strong` en el glifo y en el texto.
 class _ChipButton extends StatelessWidget {
   const _ChipButton({
     required this.icon,
@@ -413,7 +438,11 @@ class _ChipButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final mutedStrong = theme.brightness == Brightness.dark
+        ? AppColors.darkMutedStrong
+        : AppColors.lightMutedStrong;
     return Material(
       color: scheme.surface,
       shape: RoundedRectangleBorder(
@@ -429,14 +458,11 @@ class _ChipButton extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                AppIcon(icon, size: 12, color: scheme.onSurfaceVariant),
+                AppIcon(icon, size: 12, color: mutedStrong),
                 const SizedBox(width: 5),
                 Text(
                   label,
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    color: scheme.onSurfaceVariant,
-                  ),
+                  style: TextStyle(fontSize: 11.5, color: mutedStrong),
                 ),
               ],
             ),

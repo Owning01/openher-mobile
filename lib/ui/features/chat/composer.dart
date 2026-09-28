@@ -58,6 +58,7 @@ class ChatComposer extends StatefulWidget {
     this.onDictate,
     this.onRemoveAttachment,
     this.onPickModel,
+    this.onPickAgent,
   });
 
   /// Hay un turno en curso: el botón derecho pasa a Detener.
@@ -85,6 +86,11 @@ class ChatComposer extends StatefulWidget {
   final VoidCallback? onDictate;
   final ValueChanged<ComposerAttachment>? onRemoveAttachment;
   final VoidCallback? onPickModel;
+
+  /// Abrir la hoja de agente. Antes no existia: el pill de agente
+  /// usaba onPickModel y terminaba en la hoja de modelo, asi que no
+  /// habia forma de elegir un agente.
+  final VoidCallback? onPickAgent;
 
   /// Tope del campo. `20000` es el del prototipo; el server corta el prompt con
   /// 413 antes, así que es sólo una guarda visual.
@@ -254,7 +260,7 @@ class _ChatComposerState extends State<ChatComposer> {
                 onPressed: widget.onAttach,
                 size: 20,
                 tapSize: 32,
-                color: scheme.onSurfaceVariant,
+                color: _mutedStrong(context),
               ),
             ),
             Expanded(
@@ -292,7 +298,7 @@ class _ChatComposerState extends State<ChatComposer> {
                 onPressed: widget.onDictate,
                 size: 20,
                 tapSize: 32,
-                color: scheme.onSurfaceVariant,
+                color: _mutedStrong(context),
               ),
             ),
             _sendButton(scheme, hasText),
@@ -305,12 +311,16 @@ class _ChatComposerState extends State<ChatComposer> {
   /// `chat.composer.send`: 32 px, círculo. filled `primary` cuando hay algo que
   /// mandar, apagado cuando no, y `danger` + `stop` mientras el turno corre.
   Widget _sendButton(ColorScheme scheme, bool hasText) {
+    // `--danger` del prototipo: el botón de Detener es el único elemento de
+    // color de la pantalla, así que tiene que ser el rojo de la maqueta y no
+    // el gris del chrome.
     final danger = AppColors.diffDelOf(Theme.of(context).brightness);
     final background = widget.working
         ? danger
         : (_canSend ? scheme.primary : scheme.surfaceContainerHighest);
     final foreground = widget.working
-        ? const Color(0xFFFFFFFF)
+        // `.sendbtn.stop{color:#fff}`, también en oscuro.
+        ? AppColors.lightOnPrimary
         : (_canSend ? scheme.onPrimary : scheme.onSurfaceVariant);
     return Semantics(
       button: true,
@@ -343,55 +353,76 @@ class _ChatComposerState extends State<ChatComposer> {
 
   /// `chat.composer.modelbar`: pill de modelo, pill de agente, y el contexto a
   /// la derecha. El chip TSL y el contador de caracteres cuelgan acá, apagados.
+  ///
+  /// `.modelbar` (:364) mete 4 px de padding lateral: la barra se sangra 4 px
+  /// respecto de la caja de texto, y no se veía porque acá no había padding.
   Widget _modelBar(ColorScheme scheme) {
     return LayerGate(
       'chat.composer.modelbar',
       child: SizedBox(
         height: 26,
-        child: Row(
-          children: [
-            LayerGate(
-              'chat.composer.model',
-              child: _Pill(
-                pillKey: ChatComposer.modelPillKey,
-                icon: 'cpu',
-                label: widget.modelLabel ?? 'Elegir modelo',
-                onTap: widget.onPickModel,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
+          child: Row(
+            children: [
+              LayerGate(
+                'chat.composer.model',
+                child: _Pill(
+                  pillKey: ChatComposer.modelPillKey,
+                  icon: 'cpu',
+                  label: widget.modelLabel ?? 'Elegir modelo',
+                  onTap: widget.onPickModel,
+                ),
               ),
-            ),
-            const SizedBox(width: 6),
-            LayerGate(
-              'chat.composer.agent',
-              child: _Pill(
-                pillKey: ChatComposer.agentPillKey,
-                icon: 'user',
-                label: widget.agentLabel ?? 'Elegir agente',
-                onTap: widget.onPickModel,
+              const SizedBox(width: 6),
+              LayerGate(
+                'chat.composer.agent',
+                child: _Pill(
+                  pillKey: ChatComposer.agentPillKey,
+                  icon: 'user',
+                  label: widget.agentLabel ?? 'Elegir agente',
+                  onTap: widget.onPickAgent,
+                ),
               ),
-            ),
-            // Apagado en la spec aprobada: existe el widget para que el toggle
-            // de Ajustes lo pueda prender sin tocar el composer.
-            const LayerGate('chat.composer.tsl', child: _TslChip()),
-            const Spacer(),
-            LayerGate(
-              'chat.composer.counter',
-              child: _Counter(text: _controller.text),
-            ),
-            LayerGate(
-              'chat.composer.ctx',
-              child: Text(
-                widget.contextLabel,
-                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+              // Apagado en la spec aprobada: existe el widget para que el toggle
+              // de Ajustes lo pueda prender sin tocar el composer.
+              const LayerGate('chat.composer.tsl', child: _TslChip()),
+              const Spacer(),
+              LayerGate(
+                'chat.composer.counter',
+                child: _Counter(text: _controller.text),
               ),
-            ),
-          ],
+              LayerGate(
+                'chat.composer.ctx',
+                child: Text(
+                  widget.contextLabel,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
+/// `--muted-strong` del prototipo: un gris más oscuro que `--muted`, que es lo
+/// que usan `.cbtn`, `.mpill` y los rótulos en mayúsculas.
+Color _mutedStrong(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? AppColors.darkMutedStrong
+    : AppColors.lightMutedStrong;
+
 /// Pill de 24 px con glifo 12 (`chat.composer.model` / `.agent`).
+///
+/// `.mpill` (:365-370): 24 px de alto, 132 px como máximo, `--surface-strong`,
+/// borde `--border`, 11 px en `--muted-strong`. La altura fija es lo que
+/// faltaba: sin ella el pill medía lo que midiera su texto y la barra de modelo
+/// no alineaba con la fila de arriba.
 class _Pill extends StatelessWidget {
   const _Pill({
     required this.pillKey,
@@ -408,6 +439,7 @@ class _Pill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final mutedStrong = _mutedStrong(context);
     return Material(
       color: scheme.surfaceContainer,
       shape: RoundedRectangleBorder(
@@ -418,26 +450,26 @@ class _Pill extends StatelessWidget {
         key: pillKey,
         onTap: onTap,
         borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              AppIcon(icon, size: 12, color: scheme.onSurfaceVariant),
-              const SizedBox(width: 5),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 140),
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: scheme.onSurfaceVariant,
+        child: SizedBox(
+          height: 24,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AppIcon(icon, size: 12, color: mutedStrong),
+                const SizedBox(width: 5),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 132),
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: mutedStrong),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -461,9 +493,15 @@ class _TslChip extends StatelessWidget {
       border: Border.all(color: Theme.of(context).colorScheme.outline),
       color: Theme.of(context).colorScheme.surfaceContainer,
     ),
-    child: const Text(
+    // `.tsl` (:372): 11 px w700 en `--muted`. Sin color explícito heredaba el
+    // `--text` del tema y el chip apagado se leía como texto normal.
+    child: Text(
       'TSL',
-      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
+      style: TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w700,
+        color: _mutedStrong(context),
+      ),
     ),
   );
 }

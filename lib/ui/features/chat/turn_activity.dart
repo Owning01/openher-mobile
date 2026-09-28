@@ -78,13 +78,15 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
   @override
   Widget build(BuildContext context) {
     if (widget.tools.isEmpty) return const SizedBox.shrink();
-    final scheme = Theme.of(context).colorScheme;
-    final text = Theme.of(context).textTheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final text = theme.textTheme;
 
     return DecoratedBox(
       decoration: BoxDecoration(
+        // `.actbox` (:274): `--r3` (8), no `--r2`.
         color: scheme.surfaceContainerLow,
-        borderRadius: AppRadius.mdAll,
+        borderRadius: AppRadius.lgAll,
         border: Border.all(color: scheme.outline),
       ),
       child: Padding(
@@ -93,7 +95,7 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            _head(scheme, text),
+            _head(theme, text),
             if (_open) ...[const SizedBox(height: AppSpacing.xs), _body()],
           ],
         ),
@@ -101,13 +103,17 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
     );
   }
 
-  Widget _head(ColorScheme scheme, TextTheme text) {
+  Widget _head(ThemeData theme, TextTheme text) {
+    final scheme = theme.colorScheme;
     final label = turnCategoryLabel(widget.tools);
     return Material(
       color: Colors.transparent,
       child: InkWell(
         key: TurnActivityBox.headKey,
         onTap: () => setState(() => _open = !_open),
+        borderRadius: AppRadius.mdAll,
+        // `.acthead:hover{background:var(--surface-hover)}` (:276).
+        hoverColor: scheme.surfaceContainerHigh,
         child: SizedBox(
           height: 32,
           child: Padding(
@@ -137,14 +143,18 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
                       style: text.labelSmall?.copyWith(
                         fontWeight: FontWeight.w700,
                         letterSpacing: 0.66,
-                        color: scheme.onSurface,
+                        // `.actlabel` (:279) es `--muted-strong`: con `--text`
+                        // el rótulo competía con la respuesta de arriba.
+                        color: theme.brightness == Brightness.dark
+                            ? AppColors.darkMutedStrong
+                            : AppColors.lightMutedStrong,
                       ),
                     ),
                   ),
                 ),
                 LayerGate(
                   'chat.activitybox.summary',
-                  child: _summary(scheme, text),
+                  child: _summary(theme, text),
                 ),
               ],
             ),
@@ -155,17 +165,31 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
   }
 
   /// Derecha de la fila: `N herramientas · X.Xs` si el turno terminó, o el
-  /// spinner de 12 px si sigue trabajando (el prototipo escribe "pensando"
-  /// al lado; acá alcanza con el spinner, que es el dato que no miente).
-  Widget _summary(ColorScheme scheme, TextTheme text) {
+  /// spinner de 12 px **con el "· pensando"** del prototipo (:974) si sigue
+  /// trabajando. El texto no es adorno: dice que el turno vive, que el spinner
+  /// solo puede insinuar.
+  Widget _summary(ThemeData theme, TextTheme text) {
+    final scheme = theme.colorScheme;
+    final style = text.bodySmall?.copyWith(
+      fontSize: 12,
+      color: scheme.onSurfaceVariant,
+    );
     if (widget.working) {
-      return SizedBox(
-        width: 12,
-        height: 12,
-        child: CircularProgressIndicator(
-          strokeWidth: 1.5,
-          color: scheme.onSurfaceVariant,
-        ),
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        // `.actsum{gap:6px}`.
+        children: [
+          SizedBox(
+            width: 12,
+            height: 12,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.5,
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text('· pensando', style: style),
+        ],
       );
     }
     final count = widget.tools.length;
@@ -175,13 +199,7 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
     final label = (ms != null && start != null && ms > start)
         ? '$tools · ${toolDurationMs(ms - start)}'
         : tools;
-    return Text(
-      label,
-      style: text.bodySmall?.copyWith(
-        fontSize: 12,
-        color: scheme.onSurfaceVariant,
-      ),
-    );
+    return Text(label, style: style);
   }
 
   /// `chat.activitybox.body`: alto máximo 180 px con scroll propio, borde
