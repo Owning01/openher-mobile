@@ -48,6 +48,11 @@ dependencies:
   # Preferencia de tema/tamaño de texto y switch de capas por clave.
   shared_preferences: ^2.3.2
 
+  # Markdown real para el texto del asistente. Sin esto, un chat de agente
+  # pierde justo lo que más se ve: bloques de código, títulos y tablas.
+  # (`flutter_markdown` quedó discontinuado: éste es el sucesor mantenido.)
+  flutter_markdown_plus: ^1.0.0
+
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8

@@ -7,6 +7,8 @@ import 'core/storage/creds_store.dart';
 import 'core/storage/prefs_store.dart';
 import 'ui/core/layer_gate.dart';
 import 'ui/core/theme.dart';
+import 'ui/features/chat/chat_view.dart';
+import 'ui/features/chat/chat_viewmodel.dart';
 import 'ui/features/connect/connect_view.dart';
 import 'ui/features/files/files_view.dart';
 import 'ui/features/navigation/mobile_bottom_nav.dart';
@@ -152,7 +154,12 @@ class _AppShellState extends State<AppShell> {
               index: _nav.tab.index,
               children: [
                 _SessionsTab(config: widget.config, onOpen: _nav.openSession),
-                const _ChatTab(),
+                _ChatTab(
+                  sessionId: _nav.chatSessionId ?? '',
+                  config: widget.config,
+                  visible: _nav.tab == MobileTab.chat,
+                  onBack: _nav.leaveChat,
+                ),
                 _FilesTab(config: widget.config),
                 SettingsView(
                   config: widget.config,
@@ -215,13 +222,71 @@ class _SessionsTabState extends State<_SessionsTab> {
       SessionsView(viewmodel: _vm, onOpen: widget.onOpen);
 }
 
-/// El chat lo inyecta el worker de chat; acá va el hueco honesto mientras tanto.
-class _ChatTab extends StatelessWidget {
-  const _ChatTab();
+/// El chat de la sesión abierta.
+///
+/// El `IndexedStack` del shell lo mantiene montado: por eso el viewmodel
+/// nace una vez y **no** se reconstruye al cambiar de pestaña (si no, se
+/// perdería el scroll y se re-suscribiría el stream en cada viaje a Ajustes).
+/// `setVisible(false)` pausa el SSE cuando el chat no está al frente.
+class _ChatTab extends StatefulWidget {
+  const _ChatTab({
+    required this.sessionId,
+    required this.config,
+    required this.visible,
+    required this.onBack,
+  });
+
+  final String sessionId;
+  final ServerConfig config;
+  final bool visible;
+  final VoidCallback onBack;
 
   @override
-  Widget build(BuildContext context) =>
-      const Scaffold(body: Center(child: Text('Chat')));
+  State<_ChatTab> createState() => _ChatTabState();
+}
+
+class _ChatTabState extends State<_ChatTab> {
+  ChatViewModel? _vm;
+
+  @override
+  void initState() {
+    super.initState();
+    _openFor(widget.sessionId);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ChatTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.sessionId != widget.sessionId) _openFor(widget.sessionId);
+  }
+
+  void _openFor(String sessionId) {
+    // Una sesión por vez: se descarta la anterior (y su socket con ella).
+    _vm?.dispose();
+    _vm = ChatViewModel(ApiClient(config: widget.config), sessionId: sessionId)
+      ..load();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _vm?.setVisible(widget.visible);
+  }
+
+  @override
+  void dispose() {
+    _vm?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final vm = _vm;
+    if (vm == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    return ChatView(viewModel: vm, onBack: widget.onBack);
+  }
 }
 
 /// Archivos: explorar el workspace del server y mandar un path al chat.
