@@ -328,6 +328,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         config: widget.config,
                         visible: _nav.tab == MobileTab.chat,
                         onBack: _nav.handleBack,
+                        canBack: () => _nav.canHandleBack,
                         streamFactory: widget.chatStreamFactory,
                         policy: _policy,
                         // La política forma parte de la identidad del chat:
@@ -414,6 +415,7 @@ class _ChatTab extends StatefulWidget {
     required this.config,
     required this.visible,
     required this.onBack,
+    this.canBack = _neverBack,
     this.streamFactory,
     this.policy = const DataPolicy.normal(),
   });
@@ -432,6 +434,13 @@ class _ChatTab extends StatefulWidget {
 
   /// El boton atras: 	rue si la app debe cerrarse. El nav decide.
   final bool Function() onBack;
+
+  /// Si hay a donde volver. Lectura pura, para PopScope(canPop:):
+  /// preguntar no puede modificar el nav porque se evalua en el build.
+  final bool Function() canBack;
+
+  /// Default: no hay a donde volver, asi que el sistema cierra.
+  static bool _neverBack() => false;
 
   /// Lo inyecta el shell; ver [AppShell.chatStreamFactory].
   final ChatEventSourceFactory? streamFactory;
@@ -507,7 +516,7 @@ class _ChatTabState extends State<_ChatTab> {
     // sistema. La sesiÃ³n NO se borra: se conserva para volver a entrar al
     // mismo chat con su modelo y su agente.
     return PopScope(
-      canPop: widget.onBack(),
+      canPop: widget.canBack(),
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) widget.onBack();
       },
