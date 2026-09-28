@@ -9,6 +9,12 @@
 /// `SharedPreferences` directo, para que los tests usen [InMemoryPrefs] sin
 /// canal de plataforma y para que ninguna pantalla lea una clave cruda por su
 /// cuenta: las claves viven acá ([PrefsStore.themeKey] y familia).
+///
+/// ## Sin dependencias de la capa de UI
+/// [AppThemeMode] y [AppTextScale] son enums propios de este archivo y no sus
+/// equivalentes de Material, y la variante de color se guarda como id crudo
+/// ([PrefsStore.themeVariantId]) sin resolverla contra el catálogo: `core` no
+/// importa de `ui`.
 library;
 
 import 'dart:convert';
@@ -167,6 +173,7 @@ class InMemoryPrefs implements KeyValuePrefs {
 class PrefsSnapshot {
   const PrefsSnapshot({
     required this.themeMode,
+    required this.themeVariantId,
     required this.textScale,
     required this.animations,
     required this.translateEsEn,
@@ -177,6 +184,10 @@ class PrefsSnapshot {
   });
 
   final AppThemeMode themeMode;
+
+  /// Id de la variante de color; vacío = automática (ver [themeVariantId]).
+  final String themeVariantId;
+
   final AppTextScale textScale;
 
   /// Animaciones de la UI. Default **ON** (el diseño las da por activas).
@@ -229,6 +240,7 @@ class PrefsStore {
   // ───────────────────────────── claves ──────────────────────────────────────
 
   static const String themeKey = 'openher.theme';
+  static const String themeVariantKey = 'openher.theme_variant';
   static const String textScaleKey = 'openher.text_scale';
   static const String animationsKey = 'openher.animations';
   static const String translateKey = 'openher.translate_es_en';
@@ -244,6 +256,18 @@ class PrefsStore {
   // ───────────────────────────── lectura ─────────────────────────────────────
 
   AppThemeMode get themeMode => AppThemeMode.parse(_prefs.getString(themeKey));
+
+  /// Id de la variante de color elegida; vacío = la automática, o sea el
+  /// monocromo de `AppTheme.light()`/`AppTheme.dark()` según la preferencia del
+  /// sistema.
+  ///
+  /// Se guarda el **id** y no la paleta: el catálogo son 61 entradas fijas, así
+  /// que el dato es el id y serializar 16 colores por variante sería un formato
+  /// que nadie escribe. Acá no se resuelve contra el catálogo —eso es de la
+  /// capa de UI, igual que `AppThemeMode` es un enum propio de este archivo y no
+  /// un `ThemeMode` de Material—: un id desconocido (app vieja, catálogo
+  /// editado) se devuelve tal cual y el que lo pinte cae en automático.
+  String get themeVariantId => _prefs.getString(themeVariantKey) ?? '';
 
   AppTextScale get textScale =>
       AppTextScale.parse(_prefs.getDouble(textScaleKey));
@@ -297,6 +321,7 @@ class PrefsStore {
   /// Todo de una vez, para pintar el arranque sin `await` por fila.
   PrefsSnapshot snapshot() => PrefsSnapshot(
     themeMode: themeMode,
+    themeVariantId: themeVariantId,
     textScale: textScale,
     animations: animations,
     translateEsEn: translateEsEn,
@@ -310,6 +335,10 @@ class PrefsStore {
 
   Future<void> setThemeMode(AppThemeMode mode) =>
       _prefs.setString(themeKey, mode.wire);
+
+  /// Elige la variante de color por id. `''` vuelve a la automática.
+  Future<void> setThemeVariant(String id) =>
+      _prefs.setString(themeVariantKey, id);
 
   Future<void> setTextScale(AppTextScale scale) =>
       _prefs.setDouble(textScaleKey, scale.wire);

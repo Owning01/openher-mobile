@@ -1,6 +1,8 @@
-/// Tema Material3 monocromo del cliente Android. Traduce `tokens.dart` a un
-/// `ThemeData`: el CSS del prototipo ya está resuelto en tokens, así que acá
-/// solo se cablean superficies, tipografía y overlays.
+/// Tema Material3 del cliente Android. Traduce `tokens.dart` a un `ThemeData`:
+/// el CSS del prototipo ya está resuelto en tokens, así que acá solo se
+/// cablean superficies, tipografía y overlays. Es el tema monocromo
+/// (`light()`/`dark()`) y también la estructura que reutiliza cualquier
+/// variante de color de [ThemeVariants].
 ///
 /// Decisiones que vienen medidas del prototipo (`prototype/mobile.html`):
 /// - Base 13px / line-height 1.5 (:46); título de app bar 14/w600/1.25 (:121);
@@ -17,10 +19,19 @@
 /// de diffs, para que el tema no introduzca color donde el diseño no lo tiene.
 /// El color real (verde/rojo/ámbar) se pide siempre con `AppColors.diffAddOf`,
 /// `AppColors.diffDelOf` o `AppColors.warnOf`.
+///
+/// ## Las variantes de color
+/// [AppTheme.variantOf] mete una de las 61 paletas de
+/// [ThemeVariants.builtIn] en la misma estructura, y lo hace por el mismo
+/// camino: [_AppPalette] resuelve los slots y [_base] arma el `ThemeData` una
+/// sola vez para las tres fuentes (tokens claros, tokens oscuros y variante).
+/// Por eso elegir un tema no puede cambiar el layout ni el alto de las barras:
+/// sólo los colores, y sólo los que trae la paleta.
 library;
 
 import 'package:flutter/material.dart';
 
+import 'theme_variants.dart';
 import 'tokens.dart';
 
 /// Alturas de las dos barras fijas del cliente (`.appbar` y `.bottomnav`).
@@ -40,55 +51,37 @@ abstract final class AppTheme {
   static ThemeData light() => _light;
   static ThemeData dark() => _dark;
 
-  static final ThemeData _light = _base(Brightness.light);
-  static final ThemeData _dark = _base(Brightness.dark);
+  static final ThemeData _light = _base(
+    Brightness.light,
+    _AppPalette.tokens(Brightness.light),
+  );
+  static final ThemeData _dark = _base(
+    Brightness.dark,
+    _AppPalette.tokens(Brightness.dark),
+  );
 
-  /// `ColorScheme` a partir de una semilla neutra (gris) y luego sobrescrito
-  /// con los tokens, para que el color resuelto sea exactamente el del CSS en
-  /// vez de una paleta tonal derivada. `surfaceContainer*` se fija también:
-  /// Material3 las usa por defecto para cards, dialogs y menús, y saldrían
-  ///-deviates- si se dejaran generadas desde la semilla.
-  static ColorScheme _scheme(Brightness brightness) {
-    final dark = brightness == Brightness.dark;
-    return ColorScheme.fromSeed(
-      seedColor: dark ? AppColors.darkPrimary : AppColors.lightPrimary,
-      brightness: brightness,
-    ).copyWith(
-      primary: dark ? AppColors.darkPrimary : AppColors.lightPrimary,
-      onPrimary: dark ? AppColors.darkOnPrimary : AppColors.lightOnPrimary,
-      secondary: dark ? AppColors.darkSecondary : AppColors.lightSecondary,
-      onSecondary: dark ? AppColors.darkOnPrimary : AppColors.lightOnPrimary,
-      tertiary: dark ? AppColors.darkMuted : AppColors.lightMuted,
-      // `danger` del chrome: gris monocromo por diseño.
-      error: dark ? AppColors.darkDanger : AppColors.lightDanger,
-      onError: dark ? AppColors.darkOnPrimary : AppColors.lightOnPrimary,
-      surface: dark ? AppColors.darkSurface : AppColors.lightSurface,
-      onSurface: dark ? AppColors.darkText : AppColors.lightText,
-      onSurfaceVariant: dark ? AppColors.darkMuted : AppColors.lightMuted,
-      surfaceContainerLowest: dark ? AppColors.darkBg : AppColors.lightBg,
-      surfaceContainerLow: dark
-          ? AppColors.darkSurfaceSubtle
-          : AppColors.lightSurfaceSubtle,
-      surfaceContainer: dark
-          ? AppColors.darkSurfaceStrong
-          : AppColors.lightSurfaceStrong,
-      surfaceContainerHigh: dark
-          ? AppColors.darkSurfaceHover
-          : AppColors.lightSurfaceHover,
-      surfaceContainerHighest: dark
-          ? AppColors.darkSurfaceHover
-          : AppColors.lightSurfaceHover,
-      surfaceDim: dark ? AppColors.darkSurfaceSoft : AppColors.lightSurfaceSoft,
-      surfaceBright: dark ? AppColors.darkSurface : AppColors.lightSurface,
-      outline: dark ? AppColors.darkBorder : AppColors.lightBorder,
-      outlineVariant: dark
-          ? AppColors.darkBorderStrong
-          : AppColors.lightBorderStrong,
-      // El scrim del tema es el `--sheet-backdrop` del prototipo.
-      scrim: dark ? AppColors.darkSheetBackdrop : AppColors.lightSheetBackdrop,
-      shadow: const Color(0xFF000000),
+  /// Tema de una variante de [ThemeVariants]: la estructura de siempre con
+  /// otra paleta.
+  ///
+  /// Como la variante fija su propio brillo ([ThemeVariantKind.brightness]),
+  /// el mismo `ThemeData` va en los dos slots de `MaterialApp` y da igual cuál
+  /// sea el `themeMode` del sistema — igual que en el cliente desktop.
+  /// [brightness] fuerza el brillo del `ColorScheme` cuando el que se quiere no
+  /// es el del tipo de la variante.
+  ///
+  /// Se cachea por (id, brillo): `ThemeData` no tiene igualdad por valor, así
+  /// que reconstruirlo en cada build del `MaterialApp` lo haría creer que el
+  /// tema cambió y re-temaría el árbol entero en cada frame.
+  static ThemeData variantOf(ThemeVariant variant, {Brightness? brightness}) {
+    final resolved = brightness ?? variant.kind.brightness;
+    final cacheKey = '${variant.id}|${resolved.name}';
+    return _variantCache.putIfAbsent(
+      cacheKey,
+      () => _base(resolved, _AppPalette.ofVariant(variant.colors, resolved)),
     );
   }
+
+  static final Map<String, ThemeData> _variantCache = <String, ThemeData>{};
 
   /// Escala tipográfica del prototipo móvil (:46, :70-71, :121-122, :138,
   /// :176-180). Material3 por defecto arranca en 22px, así que display/headline
@@ -131,25 +124,17 @@ abstract final class AppTheme {
     );
   }
 
-  static ThemeData _base(Brightness brightness) {
+  static ThemeData _base(Brightness brightness, _AppPalette palette) {
     final dark = brightness == Brightness.dark;
-    final scheme = _scheme(brightness);
-    final text = dark ? AppColors.darkText : AppColors.lightText;
-    final muted = dark ? AppColors.darkMuted : AppColors.lightMuted;
-    final mutedStrong = dark
-        ? AppColors.darkMutedStrong
-        : AppColors.lightMutedStrong;
-    final border = dark ? AppColors.darkBorder : AppColors.lightBorder;
-    final borderStrong = dark
-        ? AppColors.darkBorderStrong
-        : AppColors.lightBorderStrong;
-    final surface = dark ? AppColors.darkSurface : AppColors.lightSurface;
-    final hover = dark
-        ? AppColors.darkSurfaceHover
-        : AppColors.lightSurfaceHover;
-    final sheetBackdrop = dark
-        ? AppColors.darkSheetBackdrop
-        : AppColors.lightSheetBackdrop;
+    final scheme = palette.scheme;
+    final text = palette.text;
+    final muted = palette.muted;
+    final mutedStrong = palette.mutedStrong;
+    final border = palette.border;
+    final borderStrong = palette.borderStrong;
+    final surface = palette.surface;
+    final hover = palette.surfaceHover;
+    final sheetBackdrop = palette.scrim;
     final textTheme = _textTheme(text, muted);
 
     OutlineInputBorder field(BorderSide side) =>
@@ -157,7 +142,7 @@ abstract final class AppTheme {
 
     return (dark ? ThemeData.dark() : ThemeData.light()).copyWith(
       colorScheme: scheme,
-      scaffoldBackgroundColor: dark ? AppColors.darkBg : AppColors.lightBg,
+      scaffoldBackgroundColor: palette.bg,
       textTheme: textTheme,
       primaryTextTheme: textTheme,
       dividerColor: border,
@@ -235,4 +220,177 @@ abstract final class AppTheme {
       hoverColor: hover,
     );
   }
+}
+
+/// Los slots que [AppTheme._base] cablea, resueltos para un tema concreto.
+///
+/// Hay dos fuentes y **una sola** forma de consumirlas: los tokens del chrome
+/// ([_AppPalette.tokens]) y la paleta de una variante
+/// ([_AppPalette.ofVariant]). Por eso `light()`, `dark()` y
+/// [AppTheme.variantOf] comparten la construcción del `ThemeData`: la
+/// estructura no puede derivar entre un tema y otro, y el `ColorScheme` se arma
+/// en un único lugar en vez de en dos que se van pareciendo cada vez menos.
+@immutable
+class _AppPalette {
+  const _AppPalette({
+    required this.brightness,
+    required this.bg,
+    required this.surface,
+    required this.surfaceSubtle,
+    required this.surfaceStrong,
+    required this.surfaceSoft,
+    required this.surfaceHover,
+    required this.border,
+    required this.borderStrong,
+    required this.text,
+    required this.muted,
+    required this.mutedStrong,
+    required this.primary,
+    required this.onPrimary,
+    required this.secondary,
+    required this.onSecondary,
+    required this.tertiary,
+    required this.error,
+    required this.onError,
+    required this.scrim,
+  });
+
+  /// Paleta monocroma del chrome: los tokens de `tokens.dart`, sin cambiar ni
+  /// uno. Es lo que pintan `light()` y `dark()`.
+  factory _AppPalette.tokens(Brightness brightness) {
+    final dark = brightness == Brightness.dark;
+    return _AppPalette(
+      brightness: brightness,
+      bg: dark ? AppColors.darkBg : AppColors.lightBg,
+      surface: dark ? AppColors.darkSurface : AppColors.lightSurface,
+      surfaceSubtle: dark
+          ? AppColors.darkSurfaceSubtle
+          : AppColors.lightSurfaceSubtle,
+      surfaceStrong: dark
+          ? AppColors.darkSurfaceStrong
+          : AppColors.lightSurfaceStrong,
+      surfaceSoft: dark
+          ? AppColors.darkSurfaceSoft
+          : AppColors.lightSurfaceSoft,
+      surfaceHover: dark
+          ? AppColors.darkSurfaceHover
+          : AppColors.lightSurfaceHover,
+      border: dark ? AppColors.darkBorder : AppColors.lightBorder,
+      borderStrong: dark
+          ? AppColors.darkBorderStrong
+          : AppColors.lightBorderStrong,
+      text: dark ? AppColors.darkText : AppColors.lightText,
+      muted: dark ? AppColors.darkMuted : AppColors.lightMuted,
+      mutedStrong: dark
+          ? AppColors.darkMutedStrong
+          : AppColors.lightMutedStrong,
+      primary: dark ? AppColors.darkPrimary : AppColors.lightPrimary,
+      onPrimary: dark ? AppColors.darkOnPrimary : AppColors.lightOnPrimary,
+      secondary: dark ? AppColors.darkSecondary : AppColors.lightSecondary,
+      onSecondary: dark ? AppColors.darkOnPrimary : AppColors.lightOnPrimary,
+      tertiary: dark ? AppColors.darkMuted : AppColors.lightMuted,
+      // `danger` del chrome: gris monocromo por diseño.
+      error: dark ? AppColors.darkDanger : AppColors.lightDanger,
+      onError: dark ? AppColors.darkOnPrimary : AppColors.lightOnPrimary,
+      scrim: dark ? AppColors.darkSheetBackdrop : AppColors.lightSheetBackdrop,
+    );
+  }
+
+  /// Paleta de una variante. Los slots que la variante no trae salen de su
+  /// propia paleta o de los tokens, nunca inventados:
+  ///
+  /// - `mutedStrong` → `muted`. La variante no tiene un muted "más fuerte" y
+  ///   su `muted` ya salió del `resolveTheme` con contraste garantizado, así que
+  ///   usarlo para el ícono del app bar no pierde legibilidad.
+  /// - `surfaceSubtle` → la mezcla de `bg` y `surfaceStrong` a mitades: es la
+  ///   misma interpolación con la que el escritorio armaba
+  ///   `surfaceContainerLow` de una paleta.
+  /// - `surfaceSoft` → igual que `surfaceSubtle`. Sólo alimenta `surfaceDim`, y
+  ///   no hacía falta traer un slot que ninguna de las 61 paletas tiene.
+  /// - `scrim` → el token `--sheet-backdrop`. Es negro con alfa en los tokens y
+  ///   en las 61 paletas: el scrim no lo define la variante.
+  factory _AppPalette.ofVariant(
+    ThemeVariantColors colors,
+    Brightness brightness,
+  ) {
+    final subtle =
+        Color.lerp(colors.bg, colors.surfaceStrong, 0.5) ?? colors.bg;
+    return _AppPalette(
+      brightness: brightness,
+      bg: colors.bg,
+      surface: colors.surface,
+      surfaceSubtle: subtle,
+      surfaceStrong: colors.surfaceStrong,
+      surfaceSoft: subtle,
+      surfaceHover: colors.surfaceHover,
+      border: colors.border,
+      borderStrong: colors.borderStrong,
+      text: colors.text,
+      muted: colors.muted,
+      mutedStrong: colors.muted,
+      primary: colors.primary,
+      onPrimary: ThemeVariantColors.onColor(colors.primary),
+      secondary: colors.secondary,
+      onSecondary: ThemeVariantColors.onColor(colors.secondary),
+      tertiary: colors.muted,
+      // Con variante el chrome deja de ser monocromo: `error` es el `danger`
+      // real de la paleta, como en el escritorio.
+      error: colors.danger,
+      onError: ThemeVariantColors.onColor(colors.danger),
+      scrim: brightness == Brightness.dark
+          ? AppColors.darkSheetBackdrop
+          : AppColors.lightSheetBackdrop,
+    );
+  }
+
+  final Brightness brightness;
+  final Color bg;
+  final Color surface;
+  final Color surfaceSubtle;
+  final Color surfaceStrong;
+  final Color surfaceSoft;
+  final Color surfaceHover;
+  final Color border;
+  final Color borderStrong;
+  final Color text;
+  final Color muted;
+  final Color mutedStrong;
+  final Color primary;
+  final Color onPrimary;
+  final Color secondary;
+  final Color onSecondary;
+  final Color tertiary;
+  final Color error;
+  final Color onError;
+  final Color scrim;
+
+  /// `ColorScheme` a partir de una semilla neutra (gris) y luego sobrescrito con
+  /// los slots, para que el color resuelto sea exactamente el de la paleta en
+  /// vez de una paleta tonal derivada. `surfaceContainer*` se fija también:
+  /// Material3 las usa por defecto para cards, dialogs y menús, y saldrían
+  /// desviadas si se dejaran generadas desde la semilla.
+  ColorScheme get scheme =>
+      ColorScheme.fromSeed(seedColor: primary, brightness: brightness).copyWith(
+        primary: primary,
+        onPrimary: onPrimary,
+        secondary: secondary,
+        onSecondary: onSecondary,
+        tertiary: tertiary,
+        error: error,
+        onError: onError,
+        surface: surface,
+        onSurface: text,
+        onSurfaceVariant: muted,
+        surfaceContainerLowest: bg,
+        surfaceContainerLow: surfaceSubtle,
+        surfaceContainer: surfaceStrong,
+        surfaceContainerHigh: surfaceHover,
+        surfaceContainerHighest: surfaceHover,
+        surfaceDim: surfaceSoft,
+        surfaceBright: surface,
+        outline: border,
+        outlineVariant: borderStrong,
+        scrim: scrim,
+        shadow: const Color(0xFF000000),
+      );
 }
