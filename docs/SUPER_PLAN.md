@@ -16,7 +16,7 @@
 |---|---|---|---|
 | D1 | **Sólo dialecto v2** (`/api/*`) | El server es v2; mantener los dos dialects duplica modelos, repos y tests | Portar el soporte dual del escritorio |
 | D2 | **Credenciales por UI** (`flutter_secure_storage`) | `service.json` no existe en opencode2 y en Android no hay disco del PC | Leer un archivo del desktop |
-| D3 | **Stream por sesión** `/api/session/{id}/event?after=` | Es durable y resumible: la app reconecta sin perder el turno | `/api/event` global (no resumible, caro) |
+| D3 | **Stream global** `/api/event` + filtro por sesión en el cliente | El stream por sesión **da 404 medido** en `:4098`; el global trae `durable.seq` y sirve para toda la app con un solo socket (ver API_CONTRACT §7.1) | `/api/session/{id}/event?after=` (404 en este build) |
 | D4 | **POST y después escuchar** | El POST del prompt no devuelve el turno; es el único patrón posible | Esperar el turno en el POST (bloquea la UI) |
 | D5 | **Bottom nav de 4 destinos** + hojas inferiores | Un pulgar, una tarea por pantalla; la activity-bar de 12 items no es táctil | Reusar la grilla de paneles del escritorio |
 | D6 | **Tokens del escritorio reusados** | `tokens.dart` es un espejo exacto de `tokens.css`; el HTML ya los usa | Diseñar una paleta nueva |

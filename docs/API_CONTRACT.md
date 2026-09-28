@@ -278,19 +278,41 @@ confirmar contra el server antes de implementar la fase de sheets).
 
 ## 7. Eventos en vivo (SSE)
 
-### 7.1 Cuál stream usar (decisión)
+### 7.1 Cuál stream usar (decisión, CORREGIDA por medición)
 
-| Stream | Ruta | Envoltura | Uso en móvil |
+| Stream | Ruta | Envoltura | Verificado en `:4098` |
 |---|---|---|---|
-| v1 global | `GET /event?directory=` | `{id, type, properties}` | ❌ no se usa (ver 7.3) |
-| v2 global | `GET /api/event` | `{id, type, data}` | ❌ no en el chat (broad, caro) |
-| **v2 por sesión** | **`GET /api/session/{id}/event?after=<seq>`** | `{id, event, data}` | ✅ **el del chat** |
-| busy de la lista | `GET /api/session/active` | `{data:{id:{type:"running"}}}` | ✅ polling 5 s (barato) |
+| v2 global | **`GET /api/event`** | `{id, type, data}` + `location` + `durable{aggregateID,seq,version}` | ✅ **200 `text/event-stream`** (947 frames capturados) |
+| v2 por sesión | `GET /api/session/{id}/event?after=` | `{id, event, data}` | ❌ **404** en este build |
+| v2 por sesión (historia) | `GET /api/session/{id}/history` | `{data, hasMore}` | ❌ **404** en este build |
+| v1 global | `GET /event?directory=` | `{id, type, properties}` | (dialecto v1, no usado) |
+| busy de la lista | `GET /api/session/active` | `{data:{id:{type:"running"}}}` | ✅ 200 |
 
-**Por qué el por-sesión:** es *durable* y acepta `?after=<seq>`, o sea que **sí se puede
-resumir** — a diferencia del `/event` v1, que manda `id: undefined` (sin Last-Event-ID) y
-obliga a re-snapshotear. En móvil eso es la diferencia entre "la app se reconecta sola" y
-"pierdo el turno al cambiar de app".
+> ⚠️ **Corrección 2026-09-28.** El plan original (D3) elegía el stream **por sesión**
+> `/api/session/{id}/event?after=` por ser durable y resumible. **Medido: da 404** en el
+> build de `:4098` (el spec lo declara, pero el build no lo sirve). El stream que funciona
+> es el **global `/api/event`**, que trae además `durable.seq` en cada frame.
+>
+> **D3bis (decisión vigente):** un solo stream **global** `/api/event` para toda la app, con
+> **filtro por sesión del lado del cliente** (el `sessionID` viene dentro del payload).
+> Se dedupea por `id` y se usa `durable.seq` para saber hasta dónde se leyó. Al reconectar:
+> re-snapshot con `GET /api/session/{id}/message` y seguir. Ventaja extra: **un solo socket
+> para toda la app** (también sirve el dot "En ejecución" de la lista), no uno por sesión.
+>
+> Prohibido mandar `?sessionID=` en el stream: es un query no declarado ⇒ **400**.
+
+### 7.1bis Nombres de evento: lo que emite ESTE build
+
+El spec más nuevo los llama `session.next.*.delta`; **medido en `:4098` el stream emite
+`session.text.delta`, `session.reasoning.delta`, `session.tool.input.delta`**
+(sin `next.`). Los predicados de `lib/domain/models/event.dart` aceptan **ambos**
+conjuntos (`kDeltaEvents` / `kSettledEvents`), así que la app no se rompe si el server
+cambia de generación.
+
+`assistant.error` medido: `{"type":"provider.auth","message":"…","status":401}` — o sea
+`type`, no `name`. `OcErrorInfo` resuelve `name ?? type` y
+`message ?? data.message ?? error ?? text`, con lo que cubre v1, v2 medido y el
+`{name:"APIError"}` del SDK.
 
 ### 7.2 Frames
 
