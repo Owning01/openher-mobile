@@ -4,8 +4,9 @@
 /// intercala en el mismo scroll y cada uno es una fracción de la misma caja:
 ///
 /// * [UserMessage] → burbuja a la derecha, `primary` sobre `on-primary`.
-/// * [AssistantMessage] → caja de actividad (razonamiento + tools), la card de
-///   pregunta si hay un `question` pendiente, la de error del proveedor si vino
+/// * [AssistantMessage] → caja de actividad del **turno** (la primera en
+///   [(prompt)] → [caja] → [mensajes del turno]), la card de pregunta si hay
+///   un `question` pendiente, la de error del proveedor si vino
 ///   `assistant.error`, y el texto.
 /// * [SystemMessage] / [SyntheticMessage] / [CompactionMessage] y los
 ///   `*-switched` → píldora centrada delgada.
@@ -36,6 +37,7 @@ import 'package:markdown/markdown.dart' as md;
 import '../../../domain/models/errors.dart';
 import '../../../domain/models/message.dart';
 import '../../../domain/models/tool.dart';
+import '../../../domain/models/turn_activity.dart';
 import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
 import '../../core/tokens.dart';
@@ -46,6 +48,8 @@ class MessageBubble extends StatelessWidget {
     super.key,
     required this.message,
     required this.working,
+    this.turnActivity,
+    this.absorbedActivity = false,
     this.thinkingDefault = true,
     this.onOpenDiff,
     this.onQuestionAnswer,
@@ -58,6 +62,22 @@ class MessageBubble extends StatelessWidget {
   /// escritura: un assistant terminado no parpadea.
   final bool working;
 
+  /// La caja del TURNO, si a este mensaje le toca pintarla.
+  ///
+  /// La calcula `buildTurnActivities` (`domain/models/turn_activity.dart`) con
+  /// los mensajes de la sesión y se pasa una vez por build: una caja por turno,
+  /// no una por mensaje de assistant, que es como el chat se llenaba de líneas
+  /// sueltas. Sin este parámetro la burbuja cae en su actividad propia (el
+  /// comportamiento viejo, y el que se usa al montar el widget suelto).
+  final TurnActivity? turnActivity;
+
+  /// La caja de este mensaje quedó en otro mensaje del mismo turno: no se
+  /// pinta ninguna acá.
+  final bool absorbedActivity;
+
+  /// Ya no decide nada: la caja arranca cerrada y sólo la abre el usuario
+  /// (adjudicado 2026-09-28, "las herramientas me llenan todo el chat de más
+  /// altura"). Se conserva porque `chat_view` lo sigue pasando.
   final bool thinkingDefault;
   final ValueChanged<AssistantTool>? onOpenDiff;
 
@@ -126,18 +146,10 @@ class MessageBubble extends StatelessWidget {
 
   Widget _assistant(BuildContext context, AssistantMessage assistant) {
     final children = <Widget>[];
-    final tools = assistant.toolItems;
+    final activity = _turnActivityOf(assistant);
 
-    if (tools.isNotEmpty) {
-      children.add(
-        TurnActivityBox(
-          tools: tools,
-          working: working && !assistant.isComplete,
-          time: assistant.time,
-          thinkingDefault: thinkingDefault,
-          onOpenDiff: onOpenDiff,
-        ),
-      );
+    if (activity != null) {
+      children.add(TurnActivityBox(activity: activity, onOpenDiff: onOpenDiff));
     }
 
     // Una pregunta pendiente tiene prioridad visual sobre el texto: es la
@@ -188,6 +200,29 @@ class MessageBubble extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: spaced,
+    );
+  }
+
+  /// La caja que le toca a este mensaje, o `null` si no le toca ninguna.
+  ///
+  /// Tres casos, en este orden:
+  ///
+  /// 1. **absorbido**: la caja de su turno la pintó el primer mensaje del
+  ///    turno, así que acá no se dibuja ninguna.
+  /// 2. **con agrupado**: `turnActivity` es la caja del turno entero (tools de
+  ///    todos los mensajes del turno), y se pinta en el dueño.
+  /// 3. **sin agrupado** (el widget montado suelto, o `chat_view` todavía sin
+  ///    cablear `buildTurnActivities`): el turno es este mensaje, que es el
+  ///    comportamiento viejo.
+  TurnActivity? _turnActivityOf(AssistantMessage assistant) {
+    if (absorbedActivity) return null;
+    final grouped = turnActivity;
+    if (grouped != null) return grouped;
+    return TurnActivity(
+      thinkingParts: assistant.reasoningItems,
+      toolParts: assistant.toolItems,
+      working: !assistant.isComplete,
+      time: assistant.time,
     );
   }
 

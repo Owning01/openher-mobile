@@ -4,6 +4,7 @@ import 'data/connectivity/network_monitor.dart';
 import 'ui/core/low_data_banner.dart';
 import 'ui/core/update_banner.dart';
 import 'core/network/api_client.dart';
+import 'domain/models/session.dart';
 import 'core/update/update_service.dart';
 import 'core/network/server_config.dart';
 import 'data/repositories/session_repository.dart';
@@ -322,10 +323,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         onOpen: _nav.openSession,
                       ),
                       _ChatTab(
+                        sessionInfo: _nav.chatSession,
                         sessionId: _nav.chatSessionId ?? '',
                         config: widget.config,
                         visible: _nav.tab == MobileTab.chat,
-                        onBack: _nav.leaveChat,
+                        onBack: _nav.handleBack,
                         streamFactory: widget.chatStreamFactory,
                         policy: _policy,
                         // La política forma parte de la identidad del chat:
@@ -376,7 +378,7 @@ class _SessionsTab extends StatefulWidget {
   const _SessionsTab({required this.config, required this.onOpen});
 
   final ServerConfig config;
-  final ValueChanged<String> onOpen;
+  final void Function(SessionInfo session) onOpen;
 
   @override
   State<_SessionsTab> createState() => _SessionsTabState();
@@ -408,6 +410,7 @@ class _ChatTab extends StatefulWidget {
   const _ChatTab({
     super.key,
     required this.sessionId,
+    this.sessionInfo,
     required this.config,
     required this.visible,
     required this.onBack,
@@ -415,10 +418,20 @@ class _ChatTab extends StatefulWidget {
     this.policy = const DataPolicy.normal(),
   });
 
+  /// La sesiÃ³n con su `agent` y su `model` de la lista.
+  ///
+  /// Sin esto el VM se creaba sin `sessionInfo` y al reentrar al chat
+  /// los pills volvÃ­an a decir "Elegir modelo"/"Elegir agente" aunque el
+  /// usuario ya los hubiera elegido (medido: el server sÃ­ manda `agent` y
+  /// `model` en la lista de sesiones).
+  final SessionInfo? sessionInfo;
+
   final String sessionId;
   final ServerConfig config;
   final bool visible;
-  final VoidCallback onBack;
+
+  /// El boton atras: 	rue si la app debe cerrarse. El nav decide.
+  final bool Function() onBack;
 
   /// Lo inyecta el shell; ver [AppShell.chatStreamFactory].
   final ChatEventSourceFactory? streamFactory;
@@ -470,6 +483,7 @@ class _ChatTabState extends State<_ChatTab> {
     if (sessionId.isEmpty) return;
     _vm = ChatViewModel(
       ApiClient(config: widget.config),
+      sessionInfo: widget.sessionInfo,
       sessionId: sessionId,
       streamFactory: widget.streamFactory,
       policy: widget.policy,
@@ -486,7 +500,19 @@ class _ChatTabState extends State<_ChatTab> {
   Widget build(BuildContext context) {
     final vm = _vm;
     if (vm == null) return const _ChatNoSession();
-    return ChatView(viewModel: vm, onBack: widget.onBack);
+    // El botÃ³n atrÃ¡s del sistema sale del chat en vez de cerrar la app.
+    // Antes no habÃ­a `PopScope` en ningÃºn lado y el gesto cerraba la app
+    // desde cualquier pestaÃ±a. AcÃ¡ consume el nav, que recorre su pila y
+    // devuelve false sÃ³lo en la raÃ­z â€”que es lo que deja cerrar al
+    // sistema. La sesiÃ³n NO se borra: se conserva para volver a entrar al
+    // mismo chat con su modelo y su agente.
+    return PopScope(
+      canPop: widget.onBack(),
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) widget.onBack();
+      },
+      child: ChatView(viewModel: vm, onBack: widget.onBack),
+    );
   }
 }
 

@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:openher_mobile/app.dart';
 import 'package:openher_mobile/core/network/server_config.dart';
+import 'package:openher_mobile/domain/models/message.dart';
+import 'package:openher_mobile/domain/models/session.dart';
 import 'package:openher_mobile/core/network/sse_client.dart';
 import 'package:openher_mobile/core/storage/creds_store.dart';
 import 'package:openher_mobile/core/storage/prefs_store.dart';
@@ -129,7 +131,7 @@ void main() {
 
     // Abrir una sesión: sin esto el destino Chat ni se puede seleccionar (el
     // bottom-nav lo deshabilita) y nunca hay viewmodel que pausar.
-    nav.openSession('ses_abc');
+    nav.openSession(kTestSession('ses_abc'));
     await tester.pump();
     expect(vmOf(tester).visible, isTrue, reason: 'el chat está al frente');
 
@@ -155,7 +157,7 @@ void main() {
     nav.select(MobileTab.chat);
     expect(nav.tab, MobileTab.sessions);
 
-    nav.openSession('ses_abc');
+    nav.openSession(kTestSession('ses_abc'));
     expect(nav.tab, MobileTab.chat);
     expect(nav.chatSessionId, 'ses_abc');
 
@@ -203,3 +205,18 @@ class _FakeEventSource implements ChatEventSource {
     await _states.close();
   }
 }
+
+/// Una sesiÃ³n mÃ­nima para los tests que abren el chat.
+///
+/// `onOpen` pasÃ³ a llevar la sesiÃ³n **entera** (no sÃ³lo el id) para que el chat
+/// reciba su `agent` y su `model`: sin ellos, al reentrar los pills del
+/// composer volvÃ­an a decir "Elegir". Es un cambio de firma, no de
+/// comportamiento: lo que los tests afirman sigue siendo lo mismo.
+SessionInfo kTestSession(String id) => SessionInfo(
+  id: id,
+  projectID: 'prj_1',
+  title: 'test',
+  cost: 0,
+  tokens: const TokenUsage(),
+  time: const SessionTime(createdMs: 0, updatedMs: 0),
+);

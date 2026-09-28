@@ -29,6 +29,7 @@ import 'package:flutter/material.dart';
 import '../../../data/repositories/catalog_repository.dart';
 import '../../../domain/models/agent_catalog.dart';
 import '../../../domain/models/message.dart';
+import '../../../domain/models/turn_activity.dart';
 import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
 import '../../core/theme.dart';
@@ -418,6 +419,12 @@ class _ChatViewState extends State<ChatView> {
     final lead = (notice != null ? 1 : 0) + (_vm.hasEarlier ? 1 : 0);
     final count = lead + messages.length;
 
+    // Una caja por TURNO, no por mensaje: es el diseno de
+    // 	urnActivity.ts del cliente React, al pie de la letra. Sin esto,
+    // MessageBubble cae en su fallback y cada mensaje del assistant
+    // vuelve a dibujar su propia caja -- que es lo que llenaba el chat.
+    final turns = buildTurnActivities(messages);
+
     return LayerGate(
       'chat.scroll',
       child: ListView.builder(
@@ -445,6 +452,8 @@ class _ChatViewState extends State<ChatView> {
           return Padding(
             padding: const EdgeInsets.only(bottom: AppSpacing.md),
             child: MessageBubble(
+            turnActivity: turns[messages[index].id],
+            absorbedActivity: turns.isAbsorbed(messages[index].id),
               key: ValueKey(message.id),
               message: message,
               working: _vm.working,
@@ -622,6 +631,20 @@ class _ChatViewState extends State<ChatView> {
   /// Antes el menú llamaba a `widget.onAction`, y **`onAction` no lo pasaba
   /// nadie**: la hoja cerraba y no pasaba nada. Las cinco acciones que quedaron
   /// se ejecutan acá, con el `ApiClient` de esta sesión.
+  /// El id del ultimo mensaje del usuario: el punto al que vuelve el
+  /// Deshacer.
+  ///
+  /// El revert/stage lo exige en el body (medido: sin messageID devuelve
+  /// 400 Missing key at [messageID]), y no es cualquier mensaje: tiene que
+  /// ser un prompt, porque deshacer un turno entero empieza por su prompt.
+  String? _lastUserMessageId() {
+    final messages = _vm.messages;
+    for (var i = messages.length - 1; i >= 0; i--) {
+      if (messages[i] is UserMessage) return messages[i].id;
+    }
+    return null;
+  }
+
   Future<void> _runAction(ChatSessionAction action) async {
     switch (action) {
       case ChatSessionAction.compact:
@@ -637,7 +660,16 @@ class _ChatViewState extends State<ChatView> {
           // `stage` prepara y `commit` lo aplica (medido en el spec). Mandar los
           // dos es lo que hace que el Deshacer sea un Deshacer y no un cambio
           // de hipótesis a medias si falla el segundo.
-          await _vm.api.stageRevert(_vm.sessionId, directory: _vm.directory);
+          final anchor = _lastUserMessageId();
+          if (anchor == null) {
+            _vm.reportError('No hay ningun mensaje al que volver.');
+            return;
+          }
+          await _vm.api.stageRevert(
+            _vm.sessionId,
+            messageId: anchor,
+            directory: _vm.directory,
+          );
           await _vm.api.commitRevert(_vm.sessionId, directory: _vm.directory);
           await _vm.refresh();
         } catch (e) {

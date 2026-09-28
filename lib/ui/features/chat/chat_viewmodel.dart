@@ -290,14 +290,29 @@ class ChatViewModel extends ChangeNotifier {
   /// `false` = terminado, `null` = nunca llegó.
   bool? _busyStatus;
 
-  /// Enviamos un prompt y todavía no llegó ningún assistant.
+  /// La pÃ¡gina siguiente para el botÃ³n "Cargar N anteriores".
+  ///
+  /// **Medido 2026-09-28** contra `:4098` con una sesiÃ³n de 200 mensajes:
+  ///
+  ///   order=desc&limit=3   ->  los 3 MÃS NUEVOS, del mÃ¡s nuevo al mÃ¡s viejo
+  ///     cursor.previous   ->  {id: <el primero de la pÃ¡gina>, direction:"previous"}
+  ///     cursor.next       ->  {id: <el Ãºltimo de la pÃ¡gina>,  direction:"next"}
+  ///   cursor=previous     ->  0 Ã­tems  (va hacia lo NUEVO: ya no hay)
+  ///   cursor=next         ->  los siguientes 50 hacia ATRÃS
+  ///
+  /// O sea que `previous` es el cursor "hacia adelante en el tiempo" y
+  /// `next` es el cursor "hacia atrÃ¡s". Leer `previous` para cargar mensajes
+  /// anteriores no daba error: daba una pÃ¡gina **vacÃ­a**. Por eso el botÃ³n
+  /// no cargaba nada y daba la impresiÃ³n de que estaba roto.
+  String? _earlierCursor;
+  StreamState? _streamState;
+
+  /// Enviamos un prompt y todavia no llego ningun assistant.
   bool _awaitingAssistant = false;
 
   String? _error;
   bool _loading = false;
   bool _loadingEarlier = false;
-  String? _earlierCursor;
-  StreamState? _streamState;
   bool _visible = true;
 
   /// ese caso la vista no lo vuelve a prender al montar: la intencion del
@@ -472,10 +487,14 @@ class ChatViewModel extends ChangeNotifier {
       // responde primero no es necesariamente el que arrancó después.
       if (_disposed || seq < _appliedFetch) return;
       _appliedFetch = seq;
+      _applyTurnEndFromPage(page.data);
       _ingest(page.data.reversed.toList(growable: false));
-      // El cursor de "anteriores" sólo retrocede: un re-fetch de la última
-      // página no puede devolver el cursor hacia atrás de lo ya cargado.
-      _earlierCursor ??= page.previous;
+      // El cursor de "anteriores" sÃ³lo retrocede: un re-fetch de la
+      // Ãºltima pÃ¡gina no puede devolver el cursor hacia atrÃ¡s de lo
+      // ya cargado. Se guarda `next` (el que avanza hacia atrÃ¡s,
+      // medido) y no `previous`, que va hacia lo nuevo y siempre
+      // venÃ­a vacÃ­o.
+      _earlierCursor ??= page.next;
     } on OchError catch (e) {
       if (_disposed || seq < _appliedFetch) return;
       _error = e.message;
@@ -487,6 +506,19 @@ class ChatViewModel extends ChangeNotifier {
   }
 
   /// La página anterior, para el botón "Cargar 30 anteriores".
+  /// La página anterior, para el botón "Cargar N anteriores".
+  ///
+  /// Tres cosas que se習得aron midiendo, y las tres costaban un botón muerto:
+  ///
+  /// 1. Con cursor **no** se manda `order` (medido: `InvalidCursorError:
+  ///    Cursor cannot be combined with order`).
+  /// 2. El cursor para ir hacia atrás es **`next`**, no `previous`. Con
+  ///    `previous` la respuesta venía **vacía** y sin error, que es la peor
+  ///    forma de fallar: parecía que el botón no hacía nada.
+  /// 3. La página con `direction:"next"` llega del más nuevo al más viejo,
+  ///    igual que la primera, así que hay que **invertirla** antes de
+  ///    insertarla al frente. Sin invertir, el bloque de mensajes viejos
+  ///    quedaba al revés y el chat se leía desordenado.
   Future<void> loadEarlier() async {
     final cursor = _earlierCursor;
     if (cursor == null || _loadingEarlier) return;
@@ -496,18 +528,23 @@ class ChatViewModel extends ChangeNotifier {
       final page = await _api.listMessages(
         sessionId,
         limit: _policy.pageSize,
-        // `order` se omite a proposito: hay cursor y el server rechaza
-        // los dos juntos (medido: `InvalidCursorError: Cursor cannot be
-        // combined with order`). El cursor ya trae `order` y
-        // `direction` adentro.
         order: null,
         cursor: cursor,
         directory: directory,
       );
-      final older = _parseAll(page.data);
-      _earlierCursor = page.previous;
-      if (older.isNotEmpty) _messages.insertAll(0, older);
+      if (_disposed) return;
+      final older = _parseAll(page.data.reversed.toList(growable: false));
+      if (older.isEmpty) {
+        // Se terminó el historial. **Hay que cortar acá**: si se deja el cursor
+        // puesto, el botón queda habilitado para siempre y cada toque vuelve
+        // a pegarle al server por una página vacía.
+        _earlierCursor = null;
+        return;
+      }
+      _earlierCursor = page.next;
+      _messages.insertAll(0, older);
     } on OchError catch (e) {
+      if (_disposed) return;
       _error = e.message;
     } finally {
       _loadingEarlier = false;
@@ -1114,6 +1151,36 @@ class ChatViewModel extends ChangeNotifier {
   /// Los optimistas (`local_…`) se caen recién cuando el server trae un mensaje
   /// del usuario con ese mismo texto: el prompt se persiste al admitirlo, pero
   /// hasta que aparezca no tiene por qué parpadear.
+  /// Borra el estado de "trabajando" si la página trae un cierre de turno.
+  ///
+  /// **Medido 2026-09-28**: el endpoint de mensajes inserta un
+  /// `{"type":"idle","time":{…},"outcome":…}` al cerrar cada turno. Ese mensaje
+  /// no se pinta (ver [_parseAll]), pero es la **única** señal de fin de turno
+  /// que existe en modo de bajo consumo, donde no hay SSE y por lo tanto nunca
+  /// llega `session.execution.succeeded`.
+  ///
+  /// Sin esto, el botón se quedaba en Detener y la línea "Working" con spinner
+  /// seguía girando después de que la tarea había terminado: el mensaje
+  /// assistant del último paso todavía venía sin `finish` en la página que el
+  /// poll había alcanzado.
+  void _applyTurnEndFromPage(List<dynamic> raw) {
+    var closed = false;
+    for (final item in raw) {
+      final m = asMap(item);
+      if (m == null) continue;
+      if (asStr(m['type']) == kIdleMessageType) {
+        closed = true;
+        break;
+      }
+    }
+    if (!closed) return;
+    _busyStatus = false;
+    _awaitingAssistant = false;
+    _retryNotice = null;
+    _closeOpenAssistant();
+    _recomputeWorking();
+  }
+
   void _ingest(List<dynamic> raw) {
     final fresh = _parseAll(raw);
     if (fresh.isEmpty) return;
