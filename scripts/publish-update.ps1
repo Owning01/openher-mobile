@@ -63,8 +63,16 @@ foreach ($entry in $assets.GetEnumerator()) {
   $tag  = $entry.Value
   Write-Host "Publicando en $repo / $tag"
 
+  # `gh release view` escribe "release not found" en stderr cuando no existe, y
+  # con `$ErrorActionPreference = 'Stop'` eso corta el script antes de poder
+  # crear la release. Por eso la sonda va con la preferencia relajada y decide
+  # por el exit code, que es lo unico fiable para un comando nativo.
+  $ErrorActionPreference = 'Continue'
   & gh release view $tag -R $repo *> $null
-  if ($LASTEXITCODE -ne 0) {
+  $exists = ($LASTEXITCODE -eq 0)
+  $ErrorActionPreference = 'Stop'
+
+  if (-not $exists) {
     & gh release create $tag --repo $repo --title "OpenHer $versionName" --notes $Notes --latest
     if ($LASTEXITCODE -ne 0) { throw "No se pudo crear la release $tag en $repo" }
   }
@@ -107,7 +115,7 @@ foreach ($attempt in 1..5) {
     $seen = (Invoke-RestMethod -Uri $latest -TimeoutSec 20)
     break
   } catch {
-    Write-Host "  intento $attempt: $($_.Exception.Message)"
+    Write-Host "  intento ${attempt}: $($_.Exception.Message)"
   }
 }
 if (-not $seen) { throw "El manifiesto no responde en $latest" }
