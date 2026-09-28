@@ -65,16 +65,16 @@
             <action android:name="android.intent.action.VIEW"/>
             <data android:mimeType="application/vnd.android.package-archive"/>
         </intent>
-    </queries>
-        <!-- Android 11+ (API 30) exige declarar el servicio de google para poder
+        <!-- Android 11+ (API 30) exige declarar el servicio de voz para poder
              siquiera VERLO. Sin esta query, `speech_to_text` responde que no
              hay servicio de dictado y el boton queda muerto sin error visible. -->
         <intent>
             <action android:name="android.speech.RecognitionService"/>
         </intent>
-        <!-- El modelo de idioma es-ES instalado en el dispositivo, para que el
-             service de voz de Android lo use y elija la voz. -->
+        <!-- El servicio de voz del sistema, que es el que elige la voz es-ES
+             cuando el modelo de idioma esta instalado en el dispositivo. -->
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE"/>
         </intent>
+    </queries>
 </manifest>
