@@ -84,3 +84,68 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
 - **Pendiente:** Chat (worker) y Archivos (worker) → tribunal → APK release → push único →
   APK a `Owning01/mis-apps`.
 
+## 2026-09-28 — Serie de bugs vivos: siete correcciones, todas medidas
+
+- **El envío fallaba por tres bugs encadenados**, y ninguno era de Flutter. `Content-Type:
+  application/json` nunca se mandaba en los POST (415); el prompt exigía `text` en la **raíz**
+  (`Missing key at ["text"]`, 400); y `createSession` mandaba `location` como string donde el
+  schema v2 quiere `{directory}`. El 2 y el 3 explican el "se borra del chat": el POST fallaba
+  y la burbuja optimista se descartaba en silencio. Verificado punta a punta contra `:4098`.
+- **Botones muertos, todos del mismo tipo:** `onDictate`, `onPickAgent`, `onAction` y `onAttach`
+  existían en el composer y en la vista y **nadie los pasaba**. Los cuatro eran controles
+  dibujados sin nada detrás. El patrón se repitió cinco veces: un callback declarado en el
+  widget y nunca conectado. Queda como regla: un `onX` sin su `call` en el constructor es un bug.
+- **Cargar mensajes anteriores no fallaba: devolvía una página vacía.** `cursor.previous` va hacia
+  lo **nuevo** y `cursor.next` hacia lo **atrás** (medido con 200 mensajes). Además la página
+  llega de más nuevo a más viejo y se insertaba sin invertir, así que el bloque quedaba al revés.
+- **`session.status` e `session.idle` no existen en v2.** El botón Detener se quedaba pegado
+  porque el flag de turno nunca se cerraba. Lo real es `session.execution.started/succeeded`, y
+  en modo polling el cierre llega en el mensaje `{"type":"idle"}` de la página.
+- **Compactar y Deshacer:** faltaban los bodies. `compact` sin body da 400 `Expected object`; con
+  `{}` da 200. `revert/stage` exige `messageID`.
+- **Herramientas agrupadas por turno**, al pie de la letra de
+  `opencode-remote-android/web/src/utils/turnActivity.ts` (leído, 107 líneas): una caja por turno,
+  montada en el primer assistant, con los resultados de shell fuera de la propiedad. Antes había
+  una caja por mensaje y se abría sola mientras el turno trabajaba.
+- **Un spinner eterno:** un tool en `running` con el turno ya cerrado es uno interrumpido que el
+  server dejó colgado. Ahora el `ToolCard` sabe si el turno vive.
+- **Auditoría del stream:** de 24 tipos de evento que manda el server, la app atendía 11. Faltaban
+  los dos que se ven: `session.usage.updated` (el costo y el contexto quedaban congelados) y
+  `session.renamed` (el server titula solo y el chat mostraba `ses_0acd172…`).
+- **Un RangeError real de la app** lo encontró un test: `messages[index]` sin descontar las filas de
+  encabezado reventaba la pantalla con el aviso de reintento visible.
+- **Evidencia:** 686 tests en verde, `analyze lib` en cero. APK 1.2.0+7 publicado y verificado con
+  `aapt2`; releases anteriores borradas en ambos repos. Commits `5dbc557`, `72c9661`.
+
+## 2026-09-28 — Autoupdate, modo de datos móviles, modelos, agentes y 61 temas
+
+- **Autoupdate silencioso** contra `releases/latest/download/latest.json`, comparado por
+  `versionCode` leído del paquete instalado (Android rechaza un code igual o menor). Banda no
+  bloqueante, sin diálogos. Con datos móviles no baja solo: son 53 MB y la decisión es del usuario.
+  Plataforma: `REQUEST_INSTALL_PACKAGES`, `FileProvider` y canal `ai.openher/install`.
+- **Modo de bajo consumo automático sólo con red celular** (`connectivity_plus`): sin streaming,
+  polling de 2 s a 12 s, página de 30 a 15, imágenes apagadas. La red manda; el override solo
+  puede **bajar**.
+- **102 modelos y 20 agentes** conectados a la sesión viva. Los niveles de pensamiento son las
+  `variants` del modelo, no un campo aparte; 75 de 102 modelos las tienen. De las 12 acciones del
+  menú, 7 se fueron: el dialecto v2 no expone endpoint para ninguna y un botón inerte promete
+  algo que no se puede cumplir.
+- **61 temas de color** portados del escritorio (33 oscuros + 28 claros), con selector en Ajustes.
+  `light()`/`dark()` pasan por el mismo `_base(palette)`: una variante cambia colores y no puede
+  cambiar layout.
+- **Pendiente que se dejó anotado:** el scope de código no se recolorea con la variante
+  (`message_bubble` lee `AppColors.*CodeBg` de los tokens). Es del owner de chat.
+
+## 2026-09-28 — Enseña: medir contra el server, no contra el spec
+
+- El módulo entero falló en vivo por haber escrito el cliente **leyendo el spec**. Los tres
+  content-type/body/location, el cursor al revés, `order`+`cursor`, el 204 sin cuerpo, los
+  `variants` como niveles de pensamiento: todos salieron de medir, ninguno de leer.
+- Regla que queda: **toda afirmación sobre el server se mide con un comando antes de escribirla**,
+  y cuando aparece un bug cuya premisa contradice un test, se adjudica en el lugar con la
+  evidencia escrita en el archivo.
+- El test que afirmaba "`session.execution.*` no está en el protocolo" era el que ocultaba el
+  botón Detener. Editar tests para que pasen está prohibido; corregir una premisa que la
+  medición desmentió es lo contrario, siempre que quede escrito por qué.
+- Trampa de proceso que costó trabajo: `dart format lib test` reescribió archivos de otro agente.
+  La causa fue correr el formateo global con trabajo sin commitear en el árbol.
