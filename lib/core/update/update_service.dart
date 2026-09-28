@@ -225,6 +225,8 @@ class UpdateService extends ChangeNotifier {
 
   /// Baja el APK a la carpeta que el `FileProvider` declara compartida.
   Future<bool> download() async {
+    // Idempotente: si ya terminÃ³, no se vuelve a bajar nada.
+    if (_state.phase == UpdatePhase.ready) return true;
     final info = _state.info;
     if (info == null) return false;
     _emit(
@@ -236,6 +238,19 @@ class UpdateService extends ChangeNotifier {
       ),
     );
     try {
+      // Si el APK de esta version YA esta en el disco, se saltea la
+      // descarga entera y aparece directo el boton Instalar.
+      final existing = await _alreadyDownloaded(info);
+      if (existing != null) {
+        _emit(
+          UpdateState(
+            phase: UpdatePhase.ready,
+            info: info,
+            received: existing.lengthSync(),
+          ),
+        );
+        return true;
+      }
       final dir = await _updatesDir();
       if (dir == null) {
         _emit(
@@ -294,6 +309,47 @@ class UpdateService extends ChangeNotifier {
     } catch (e) {
       _emit(_state.copyWith(phase: UpdatePhase.failed, error: '$e'));
       return false;
+    }
+  }
+
+  /// Si el APK de esta version **ya esta en el disco**, lo da por descargado
+  /// sin volver a pegarle al server.
+  ///
+  /// Sin esto la app se bajaba 53 MB en cada arranque y en cada vuelta a
+  /// primer plano: el chequeo encuentra la version nueva y la baja otra vez.
+  /// El instalador de Android, una vez que tiene el archivo, no lo necesita.
+  ///
+  /// El piso de tamano no es paranoia: un corte de red a mitad deja un
+  /// archivo de pocos KB con el nombre correcto, y sin el piso la app lo
+  /// daria por bueno y el instalador fallaria sin explicar nada.
+  Future<File?> _alreadyDownloaded(UpdateInfo info) async {
+    final dir = await _updatesDir();
+    if (dir == null) return null;
+    final file = File('$dir/openher-${info.version}.apk');
+    try {
+      if (!file.existsSync()) return null;
+      if (file.lengthSync() < _minApkBytes) return null;
+      return file;
+    } on FileSystemException {
+      return null;
+    }
+  }
+
+  /// Tamano minimo creible para un APK. El release real pesa 53 MB, asi que el
+  /// margen es enorme y un archivo truncado no lo pasa.
+  static const int _minApkBytes = 2 * 1024 * 1024;
+
+  /// Borra los APK viejos de cacheDir: son 53 MB que el sistema puede limpiar
+  /// solo, pero mientras tanto ocupan cache que el usuario ve en Ajustes.
+  Future<void> discardApks() async {
+    final dir = await _updatesDir();
+    if (dir == null) return;
+    try {
+      for (final f in Directory(dir).listSync().whereType<File>()) {
+        if (f.path.endsWith('.apk')) f.deleteSync();
+      }
+    } on FileSystemException {
+      // Borrar es limpieza: si falla, no es un error de la app.
     }
   }
 

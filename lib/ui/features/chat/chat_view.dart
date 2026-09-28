@@ -25,6 +25,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../../data/repositories/catalog_repository.dart';
 import '../../../domain/models/agent_catalog.dart';
@@ -597,11 +598,18 @@ class _ChatViewState extends State<ChatView> {
         modelLabel: _modelLabel,
         agentLabel: _agentLabel,
         contextLabel: contextLabel(_vm.serverTokens, _vm.serverCost),
-        onSend: (text, files) =>
-            _vm.send(text, files: [for (final f in files) f.toPromptFile()]),
+        // Los adjuntos van con el prompt y se vacian recien cuando el envio
+        // se admite: si falla, el usuario los conserva y reintenta sin
+        // volver a elegirlos.
+        onSend: (text, files) {
+          final all = [..._pending, ...files];
+          _vm.send(text, files: [for (final f in all) f.toPromptFile()]);
+          if (_vm.error == null) setState(() => _pending = []);
+        },
         onStop: _vm.abort,
         onPickModel: _openModelSheet,
         onPickAgent: _openAgentSheet,
+        onAttach: _pickAttachment,
       ),
     );
   }
@@ -793,6 +801,55 @@ class _ChatViewState extends State<ChatView> {
 
   /// El rótulo del pill de agente, con el mismo criterio.
   String get _agentLabel => AgentCatalog.labelFor(_agents, _vm.currentAgent);
+
+  /// Elige una imagen y la deja como adjunto pendiente.
+  ///
+  /// El boton existia desde el primer dia pero `onAttach` **no lo pasaba
+  /// nadie**, igual que el microfono: el clip se apretaba y no pasaba nada.
+  /// El prompt las acepta (`files: [{uri, name, mime}]` en la raiz del
+  /// body, medido).
+  Future<void> _pickAttachment() async {
+    try {
+      final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+      if (picked == null) return;
+      final mime = _mimeOf(picked.path);
+      if (mime == null) {
+        _vm.reportError('Ese archivo no es una imagen.');
+        return;
+      }
+      if (!mounted) return;
+      setState(() {
+        _pending = [
+          ..._pending,
+          ComposerAttachment(name: picked.name, mime: mime, uri: picked.path),
+        ];
+      });
+    } catch (e) {
+      _vm.reportError('No se pudo adjuntar la imagen: $e');
+    }
+  }
+
+  /// El mime por extension: la galeria de Android devuelve jpg, png, webp,
+  /// gif o heic. Cualquier otra extension se rechaza con un mensaje claro en
+  /// vez de mandarle al server un mime inventado.
+  static String? _mimeOf(String path) {
+    final lower = path.toLowerCase();
+    for (final e in <String, String>{
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+      '.gif': 'image/gif',
+      '.heic': 'image/heic',
+    }.entries) {
+      if (lower.endsWith(e.key)) return e.value;
+    }
+    return null;
+  }
+
+  /// Los adjuntos aun no enviados. Los elige el usuario con el clip y se van
+  /// con el proximo prompt.
+  List<ComposerAttachment> _pending = [];
 
   Future<void> _openModelSheet() async {
     final picked = await showModelSheet(

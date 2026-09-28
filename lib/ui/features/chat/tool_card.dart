@@ -34,9 +34,20 @@ import '../../core/layer_gate.dart';
 import '../../core/tokens.dart';
 
 class ToolCard extends StatefulWidget {
-  const ToolCard({super.key, required this.tool, this.onOpenDiff, this.onCopy});
+  const ToolCard({
+    super.key,
+    required this.tool,
+    this.onOpenDiff,
+    this.onCopy,
+    this.live = true,
+  });
 
   final AssistantTool tool;
+
+  /// El turno sigue vivo. Un tool en `running` con el turno ya cerrado es
+  /// un tool interrumpido que el server dejÃ³ colgado: se muestra como
+  /// error, no como un spinner que gira para siempre.
+  final bool live;
 
   /// Se dispara con el tool cuando el usuario pide "Abrir diff". El shell (o el
   /// `files`) decide qué hacer: el chat no abre archivos.
@@ -186,7 +197,11 @@ class _ToolCardState extends State<ToolCard> {
     // `warn`) también es color: el punto es el único acento de la fila.
     final dot = switch (state) {
       ToolError() => _Dot(color: AppColors.diffDelOf(brightness)),
-      ToolRunning() => const _Spinner(),
+      // Con el turno ya cerrado no hay nada corriendo: un tool en
+      // `running` ahi es uno interrumpido que el server dejo colgado,
+      // y el spinner se quedaba girando para siempre (lo reporto el
+      // usuario). Se ve solo el rotulo.
+      ToolRunning() => widget.live ? const _Spinner() : const SizedBox.shrink(),
       ToolPending() => _Dot(color: AppColors.warnOf(brightness)),
       _ => _Dot(color: AppColors.diffAddOf(brightness)),
     };
