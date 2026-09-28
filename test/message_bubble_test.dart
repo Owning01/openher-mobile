@@ -427,8 +427,12 @@ $longLine
       );
       expect(find.text('· pensando'), findsOneWidget);
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
-      // Y con el turno vivo la caja arranca abierta: se ve trabajar.
-      expect(find.byType(ToolCard), findsOneWidget);
+      // La caja **arranca comprimida** (adjudicado 2026-09-28: abrirla
+      // sola mientras el turno trabaja llenaba el chat de altura, y hay
+      // una caja por mensaje de assistant). Se abre a mano:
+      await tester.tap(find.byKey(TurnActivityBox.headKey));
+      await tester.pump();
+      expect(find.byType(ToolCard), findsOneWidget, reason: 'abierta a mano');
     });
 
     testWidgets('el error del proveedor se pinta con el color de la maqueta', (
@@ -498,6 +502,11 @@ $longLine
           assistantMessage('Parcial.', content: [failed], complete: false),
           working: true,
         );
+
+        // La caja arranca comprimida (adjudicado 2026-09-28): hace
+        // falta abrirla para poder medir la ToolCard de adentro.
+        await tester.tap(find.byKey(TurnActivityBox.headKey));
+        await tester.pump();
 
         final card = boxesWithColor(tester, AppColors.lightSurface);
         expect(card, hasLength(1));

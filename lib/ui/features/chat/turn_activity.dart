@@ -58,21 +58,25 @@ class TurnActivityBox extends StatefulWidget {
 }
 
 class _TurnActivityBoxState extends State<TurnActivityBox> {
-  late bool _open = widget.working && widget.thinkingDefault;
+  /// **Siempre cerrada.**
+  ///
+  /// Antes se abría sola mientras el turno trabajan (`working &&
+  /// thinkingDefault`), y como hay una caja por mensaje de assistant, un chat
+  /// con 30 turnos acababa con 30 cajas abiertas de 180 px cada una: 5.400 px
+  /// de herramientas empujando la respuesta muy lejos del ojo. El usuario lo
+  /// reportó como "las herramientas me llenan todo el chat de más altura".
+  ///
+  /// Ahora la regla es una sola: la caja es un resumen de una línea que se
+  /// abre si el usuario la abre. El rótulo del encabezado ya dice si el turno
+  /// está trabajando, así que no se pierde el feedback de "está haciendo algo".
+  late bool _open = false;
 
   @override
   void didUpdateWidget(TurnActivityBox old) {
     super.didUpdateWidget(old);
-    if (widget.working != old.working) {
-      // El turno arrancó ⇒ se abre para que se vea trabajar; terminó ⇒ se
-      // cierra para dejar lugar a la respuesta.
-      _open = widget.working ? widget.thinkingDefault : false;
-      return;
-    }
-    if (widget.thinkingDefault != old.thinkingDefault) {
-      _open = widget.working && widget.thinkingDefault;
-    }
-    // Cualquier otro rebuild deja `_open` como está.
+    // Un rebuild (un delta más, un poll) no la abre ni la cierra: si el
+    // usuario la plegó, se queda plegada aunque el turno siga corriendo. Era
+    // justo el otro motivo por el que las cajas se acumulaban.
   }
 
   @override
@@ -208,7 +212,7 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
     return LayerGate(
       'chat.activitybox.body',
       child: Container(
-        constraints: const BoxConstraints(maxHeight: 180),
+        constraints: const BoxConstraints(maxHeight: kToolListMaxHeight),
         margin: const EdgeInsets.only(left: 10),
         padding: const EdgeInsets.only(left: AppSpacing.sm),
         decoration: BoxDecoration(
@@ -223,7 +227,7 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
             children: [
               for (final tool in widget.tools)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+                  padding: const EdgeInsets.only(bottom: kToolRowSpacing),
                   child: ToolCard(
                     key: ValueKey('tool-${tool.id}'),
                     tool: tool,
@@ -253,3 +257,15 @@ String turnCategoryLabel(List<AssistantTool> tools) {
   }
   return out.join(' · ');
 }
+
+/// Altura fija de la lista de herramientas cuando la caja está abierta.
+///
+/// Es un tope, no un mínimo: con 40 llamadas a herramientas el chat no crece 40
+/// filas, crece **esta** caja y adentro scrollea. Un número con nombre en vez
+/// de un `180` suelto porque es el que define la altura del chat y cualquier
+/// cambio tiene que ser deliberado.
+const double kToolListMaxHeight = 148;
+
+/// Padding de la fila de herramientas, para que la última no quede pegada al
+/// borde de la caja.
+const double kToolRowSpacing = 6;

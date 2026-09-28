@@ -22,6 +22,7 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
@@ -44,29 +45,38 @@ import 'model_sheet.dart';
 /// El glifo de cada una es el SVG que usa el prototipo; los nombres del diseño
 /// en Material (`hub`, `undo`, `redo`, `compress`, `call_split`, `eye`, `tune`,
 /// `query_stats`, `bolt_outlined`) no existen en `assets/icons/`, y la regla del
-/// repo es no agregar assets: se usa el equivalente real de la lista.
+/// Acciones del menú de la sesión.
+///
+/// **Cada entrada acá tiene algo detrás.** Antes había 12 y ninguna hacía nada:
+/// `onAction` nunca lo pasaba nadie, así que el menú abría, se elegía algo y
+/// no pasaba absolutamente nada. Ese es el bug que reportó el usuario.
+///
+/// Se sacaron las 7 sin respaldo en el dialecto v2 —medido contra
+/// `openapi.json` y el server real— porque un botón inerte es peor que un
+/// botón que no existe: promete una función que no se puede fulfillar.
+///
+/// Se quedan las 5 con Implementation:
+/// * [compact] → `POST /api/session/{id}/compact` (medido)
+/// * [undo] → `POST /api/session/{id}/revert/stage` + `/revert/commit` (medido)
+/// * [exportMarkdown] → local, arma el markdown en el disco
+/// * [readMode] → local, cambia cómo se pinta el chat
+/// * [stats] → local, con lo que ya está en memoria
+///
+/// Lo que se sacó y por qué (para no volver a agregarlo a ciegas):
+/// `rename`, `hub`, `redo`, `prompts`, `fork`, `promptHistory`, `chatSettings`.
+/// Los siete existen en el cliente de escritorio o en la maqueta, pero el
+/// dialecto v2 no expone endpoint para ninguno.
 enum ChatSessionAction {
-  rename('edit', 'Renombrar'),
-  hub('layers', 'OpenCode Hub'),
-  undo('arrow-upward', 'Deshacer'),
-  redo('arrow-downward', 'Rehacer'),
   compact('scale', 'Compactar'),
+  undo('arrow-upward', 'Deshacer'),
   exportMarkdown('download', 'Exportar markdown'),
-  prompts('sparkles', 'Prompts'),
-  fork('git-branch', 'Fork de la sesión'),
   readMode('book', 'Modo lectura'),
-  promptHistory('history', 'Historial de prompts'),
-  chatSettings('settings', 'Ajustes del chat'),
-  stats('coins', 'Estadísticas de la sesión');
+  stats('coins', 'Estadísticas');
 
   const ChatSessionAction(this.icon, this.label);
 
   final String icon;
   final String label;
-
-  /// `Deshacer`/`Rehacer` no tienen historia de undo en el chat móvil: se
-  /// muestran apagados, igual que en el prototipo.
-  bool get enabled => this != undo && this != redo;
 }
 
 class ChatView extends StatefulWidget {
@@ -93,13 +103,17 @@ class ChatView extends StatefulWidget {
 
   /// Una de las 12 filas de la hoja de acciones. La ejecuta el shell: el chat
   /// no decide ni renombra ni exporta.
-  final ValueChanged<ChatSessionAction>? onAction;
 
   /// Se eligió modelo (y nivel de pensamiento) en la hoja `surfaces.sheet.model`.
   ///
   /// El chat **no** crea la sesión ni guarda la preferencia: elige y avisa. El
   /// shell es el que sabe abrir la sesión con ese modelo y ese nivel
   /// (`ApiClient.createSession` arma `model: {id, providerID, variant}`).
+  /// Avisa al shell qué acción se eligió. La acción **también** se
+  /// ejecuta acá (antes no lo hacía y el menú no servía para nada), así
+  /// que este callback es para el shell, no el mecanismo.
+  final ValueChanged<ChatSessionAction>? onAction;
+
   final ValueChanged<ModelPick>? onPickModel;
 
   /// Catálogo de modelos para la hoja. Si no viene, el chat arma el suyo contra
@@ -596,9 +610,133 @@ class _ChatViewState extends State<ChatView> {
       ),
     );
     if (action == null) return;
-    final handler = widget.onAction;
-    if (handler != null) handler(action);
+    await _runAction(action);
+    widget.onAction?.call(action);
   }
+
+  /// Modo lectura: la misma conversación sin la chrome de las tools.
+  bool _readMode = false;
+
+  /// Corre la acción elegida en el menú de la sesión.
+  ///
+  /// Antes el menú llamaba a `widget.onAction`, y **`onAction` no lo pasaba
+  /// nadie**: la hoja cerraba y no pasaba nada. Las cinco acciones que quedaron
+  /// se ejecutan acá, con el `ApiClient` de esta sesión.
+  Future<void> _runAction(ChatSessionAction action) async {
+    switch (action) {
+      case ChatSessionAction.compact:
+        try {
+          await _vm.api.compactSession(_vm.sessionId, directory: _vm.directory);
+          await _vm.refresh();
+        } catch (e) {
+          _vm.reportError('No se pudo compactar: $e');
+        }
+      case ChatSessionAction.undo:
+        try {
+          // El server no tiene "undo": tiene un revert **por etapas** —
+          // `stage` prepara y `commit` lo aplica (medido en el spec). Mandar los
+          // dos es lo que hace que el Deshacer sea un Deshacer y no un cambio
+          // de hipótesis a medias si falla el segundo.
+          await _vm.api.stageRevert(_vm.sessionId, directory: _vm.directory);
+          await _vm.api.commitRevert(_vm.sessionId, directory: _vm.directory);
+          await _vm.refresh();
+        } catch (e) {
+          _vm.reportError('No se pudo deshacer: $e');
+        }
+      case ChatSessionAction.exportMarkdown:
+        try {
+          final path = await _exportMarkdown();
+          if (!mounted) return;
+          ScaffoldMessenger.maybeOf(
+            context,
+          )?.showSnackBar(SnackBar(content: Text('Exportado en $path')));
+        } catch (e) {
+          _vm.reportError('No se pudo exportar: $e');
+        }
+      case ChatSessionAction.readMode:
+        setState(() => _readMode = !_readMode);
+      case ChatSessionAction.stats:
+        await _showStats();
+    }
+  }
+
+  /// Escribe la conversación en un `.md` y devuelve dónde quedó.
+  ///
+  /// Se arma a mano y no con un paquete de markdown: el formato es cuatro
+  /// encabezados por mensaje y una línea de metadatos, y una dependencia de
+  /// 2 MB para eso es sólo peso.
+  Future<String> _exportMarkdown() async {
+    final buffer = StringBuffer()
+      ..writeln('# ${_title}')
+      ..writeln()
+      ..writeln('- Sesión: `${_vm.sessionId}`')
+      ..writeln('- Exportado: ${DateTime.now().toIso8601String()}')
+      ..writeln();
+    for (final m in _vm.messages) {
+      switch (m) {
+        case UserMessage(:final text):
+          buffer
+            ..writeln('## Usuario')
+            ..writeln()
+            ..writeln(text)
+            ..writeln();
+        case AssistantMessage(:final content):
+          buffer
+            ..writeln('## Asistente')
+            ..writeln();
+          for (final part in content) {
+            if (part is AssistantText) buffer.writeln(part.text);
+          }
+          buffer.writeln();
+        default:
+          break;
+      }
+    }
+    final dir = Directory.systemTemp;
+    final file = File(
+      '${dir.path}${Platform.pathSeparator}openher-${_vm.sessionId}.md',
+    );
+    await file.writeAsString(buffer.toString());
+    return file.path;
+  }
+
+  /// Costo y tokens de la sesión, de lo que ya está en memoria.
+  Future<void> _showStats() => showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    builder: (sheetContext) => LayerGate(
+      'surfaces.sheet.actions',
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.lg),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Estadísticas', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: AppSpacing.sm),
+            _Stat(label: 'Mensajes', value: '${_vm.messages.length}'),
+            _Stat(
+              label: 'Costo',
+              value: '\$${_vm.serverCost.toStringAsFixed(4)}',
+            ),
+            _Stat(label: 'Tokens de entrada', value: '${_vm.serverTokens}'),
+            _Stat(
+              label: 'Contexto',
+              value: contextLabel(_vm.serverTokens, _vm.serverCost),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: () => Navigator.of(sheetContext).pop(),
+                child: const Text('Cerrar'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 
   /// Elige modelo **y** nivel de pensamiento, y lo aplica a la sesión viva.
   ///
@@ -762,7 +900,7 @@ class _ActionSheet extends StatelessWidget {
                   for (final action in ChatSessionAction.values)
                     _ActionRow(
                       action: action,
-                      onTap: action.enabled ? () => onPick(action) : null,
+                      onTap: () => onPick(action),
                       scheme: scheme,
                     ),
                   const SizedBox(height: AppSpacing.sm),
@@ -855,4 +993,30 @@ class _WorkingLineState extends State<_WorkingLine>
       ),
     );
   }
+}
+
+/// Una fila de las Estadísticas: rótulo a la izquierda, valor a la derecha.
+class _Stat extends StatelessWidget {
+  const _Stat({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      children: [
+        Expanded(
+          child: Text(label, style: Theme.of(context).textTheme.bodySmall),
+        ),
+        Text(
+          value,
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        ),
+      ],
+    ),
+  );
 }

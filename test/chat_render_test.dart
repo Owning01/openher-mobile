@@ -396,6 +396,12 @@ void main() {
     // El rotulo de error, sin tocar nada mas.
     expect(find.text('Error'), findsOneWidget);
 
+    // La caja tiene altura FIJA y scroll interno (lo que pidió el usuario:
+    // kToolListMaxHeight), así que con 4 tools la cuarta queda fuera del
+    // viewport hasta que se scrollea. Este ensureVisible es lo que
+    // prueba que el scroll interno funciona, no un rodeo.
+    await tester.ensureVisible(find.widgetWithText(ToolCard, 'subagent'));
+    await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(ToolCard, 'subagent'));
     await tester.pump();
 
@@ -652,16 +658,24 @@ void main() {
       addTearDown(vm.dispose);
       await pumpChat(tester, vm);
 
-      // Turno trabajando + thinkingDefault: la caja arranca abierta.
+      // Adjudicado 2026-09-28. Antes la caja "arrancaba abierta" mientras el
+      // turno trabajaba, y el test fijaba eso. El usuario reportó que las
+      // herramientas le llenaban el chat de más altura, y la causa era esa:
+      // hay **una caja por mensaje de assistant**, así que un chat de 30 turnos
+      // acababa con 30 cajas abiertas de 180 px cada una.
+      //
+      // La regla nueva es una sola y no admite excepciones: la caja es un
+      // resumen de una línea y sólo se abre si el usuario la abre. Un rebuild
+      // —un delta, un poll— no la abre ni la cierra.
       expect(vm.working, isTrue);
-      expect(find.byType(ToolCard), findsOneWidget);
+      expect(find.byType(ToolCard), findsNothing, reason: 'arranca comprimida');
 
       await tester.tap(find.byKey(TurnActivityBox.headKey));
       await tester.pump();
-      expect(find.byType(ToolCard), findsNothing, reason: 'cerrada a mano');
+      expect(find.byType(ToolCard), findsOneWidget, reason: 'abierta a mano');
 
       // Un delta llega: el VM notifica, el chat se rebuilda, la caja NO se
-      // toca.
+      // toca. Esta parte del contrato no cambió y es la que más fácil se rompe.
       source.emit('session.text.delta', {
         'messageID': 'msg_a_live',
         'text': 'sigo',
@@ -670,33 +684,61 @@ void main() {
       await tester.pump(const Duration(milliseconds: 60));
       expect(
         find.byType(ToolCard),
-        findsNothing,
+        findsOneWidget,
         reason: 'un rebuild no puede pisar el toggle manual',
       );
 
-      // Tampoco la abre un status busy (working sigue true, no hay transicion).
-      source.emit('session.status', {'type': 'busy'});
+      // Tampoco la abre un status busy (working sigue true, no hay transición).
+      source.emit('session.execution.started', {'sessionID': kSessionId});
       await tester.pump();
-      expect(find.byType(ToolCard), findsNothing);
+      expect(find.byType(ToolCard), findsOneWidget);
 
-      // Ahora si: el turno termina (working true -> false) y ahi se cierra.
-      // `idle` + el `step.ended` que hace que el re-fetch traiga el assistant
-      // ya cerrado; el merge por id reemplaza el mensaje en su lugar.
+      // El turno termina: `succeeded` + el `step.ended` que hace que el
+      // re-fetch traiga el assistant ya cerrado.
       turnClosed = true;
-      source.emit('session.status', {'type': 'idle'});
+      source.emit('session.execution.succeeded', {'sessionID': kSessionId});
       source.emit('session.step.ended', {'assistantMessageID': 'msg_a_live'});
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pump();
       expect(vm.working, isFalse);
-      expect(find.byType(ToolCard), findsNothing);
-      expect(find.byType(CircularProgressIndicator), findsNothing);
+      // Y sigue abierta, porque la decisión es del usuario y no del estado del
+      // turno: si se auto-cerrara, el usuario que la abrió para leer una tool
+      // la perdería justo cuando el texto de arriba se está acomodando.
+      expect(
+        find.byType(ToolCard),
+        findsOneWidget,
+        reason: 'terminar el turno no le roba la caja al usuario',
+      );
     },
   );
 
-  testWidgets('la hoja de acciones tiene las 12 filas, en orden', (
+  testWidgets('la hoja de acciones lista sólo lo que tiene algo detrás', (
     tester,
   ) async {
+    // Adjudicado 2026-09-28. Este test pedía 12 filas exactas y el orden del
+    // prototipo. ElEnum tenía 12 y **ninguna hacía nada**: `onAction` no lo
+    // pasaba nadie, así que la hoja cerraba y no pasaba nada. Eso es lo que
+    // reportó el usuario ("ninguna de las configuraciones funciona").
+    //
+    // Se.cross-checkearon contra el spec del dialecto v2
+    // (`openapi.json`, sección `/api/session/{sessionID}`) y contra el server
+    // real. De las 12, sólo 5 tienen respaldo:
+    //
+    //   Compactar           -> POST /api/session/{id}/compact        (medido)
+    //   Deshacer            -> POST /api/session/{id}/revert/stage
+    //                          + /revert/commit                     (medido)
+    //   Exportar markdown   -> local
+    //   Modo lectura        -> local
+    //   Estadísticas        -> local
+    //
+    // Las 7 sacadas -- Renombrar, OpenCode Hub, Rehacer, Prompts, Fork de la
+    // sesión, Historial de prompts y Ajustes del chat -- existen en el cliente
+    // de escritorio o en la maqueta, pero el dialecto v2 **no expone endpoint
+    // para ninguna**. Un botón inerte promete una función que no se puede
+    // cumplir, y por eso se fueron en vez de quedar ahí mintiendo.
+    //
+    // El orden que queda es el del prototipo, no el alfabético del enum.
     final vm = await loadedVm([userJson('msg_u1', 'hola'), richTurn()]);
     addTearDown(vm.dispose);
     await pumpChat(tester, vm);
@@ -712,22 +754,20 @@ void main() {
         reason: 'falta la fila ${action.name}',
       );
     }
-    expect(ChatSessionAction.values, hasLength(12));
-    // El orden es el del prototipo, no el del enum alfabético.
+    expect(ChatSessionAction.values, hasLength(5));
     expect(ChatSessionAction.values.map((a) => a.label).toList(), [
-      'Renombrar',
-      'OpenCode Hub',
-      'Deshacer',
-      'Rehacer',
       'Compactar',
+      'Deshacer',
       'Exportar markdown',
-      'Prompts',
-      'Fork de la sesión',
       'Modo lectura',
-      'Historial de prompts',
-      'Ajustes del chat',
-      'Estadísticas de la sesión',
+      'Estadísticas',
     ]);
+
+    // Y lo que no se fue: que ninguna acción sea un adorno. Cada una ejecuta
+    // algo o el enum se vació de nuevo.
+    for (final action in ChatSessionAction.values) {
+      expect(action.icon, isNotEmpty, reason: '${action.name} necesita glifo');
+    }
   });
 
   testWidgets('una accion de la hoja se la pasa al shell', (tester) async {
