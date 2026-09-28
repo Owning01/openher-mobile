@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Rutas que el FileProvider puede compartir. Sólo el directorio de descargas
+  internas de la app: es el único lugar donde se guarda el APK que se instala.
+-->
+<paths>
+    <cache-path name="updates" path="updates/" />
+    <files-path name="updates_files" path="updates/" />
+</paths>

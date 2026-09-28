@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <!-- Dictado por voz es-ES en el composer (capa chat.composer.mic). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- Autoupdate: Android 8+ exige este permiso para abrir el instalador. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
     <application
         android:label="OpenHer Mobile"
@@ -37,6 +39,16 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- El APK descargado se comparte como content:// (Android 7+ forbids file://). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"/>
+        </provider>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
@@ -47,6 +59,11 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Ver el instalador de paquetes al abrir el APK descargado. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:mimeType="application/vnd.android.package-archive"/>
         </intent>
     </queries>
 </manifest>
