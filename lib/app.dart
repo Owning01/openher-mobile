@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'core/network/api_client.dart';
 import 'core/network/server_config.dart';
+import 'data/repositories/session_repository.dart';
 import 'core/storage/creds_store.dart';
 import 'core/storage/prefs_store.dart';
 import 'ui/core/layer_gate.dart';
@@ -10,6 +11,7 @@ import 'ui/features/connect/connect_view.dart';
 import 'ui/features/navigation/mobile_bottom_nav.dart';
 import 'ui/features/navigation/mobile_nav.dart';
 import 'ui/features/sessions/sessions_view.dart';
+import 'ui/features/sessions/sessions_viewmodel.dart';
 import 'ui/features/settings/settings_view.dart';
 
 /// Raíz de la app.
@@ -79,6 +81,7 @@ class _OpenHerMobileAppState extends State<OpenHerMobileApp> {
                       config: snap.data!,
                       prefs: prefs,
                       creds: widget.creds,
+                      onProbe: _probe,
                       onLoggedOut: () =>
                           setState(() => _config = _readConfig()),
                     ),
@@ -106,12 +109,18 @@ class AppShell extends StatefulWidget {
     required this.config,
     required this.prefs,
     required this.creds,
+    required this.onProbe,
     required this.onLoggedOut,
   });
 
   final ServerConfig config;
   final PrefsStore prefs;
   final CredsStore creds;
+
+  /// El mismo probe que usa la pantalla Conectar, para que la fila
+  /// `Probar conexión` de Ajustes no dependa de la capa de red por su cuenta.
+  final ServerProbe onProbe;
+
   final VoidCallback onLoggedOut;
 
   @override
@@ -120,6 +129,15 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   final MobileNav _nav = MobileNav();
+
+  /// Las 94 claves de la spec aprobada, con su default de diseño.
+  Future<Map<String, bool>> _loadLayerSpec() async => {
+    for (final spec in LayerCatalog.instance.all) spec.key: spec.defaultOn,
+  };
+
+  /// El toggle del usuario: el catálogo persiste vía `PrefsStore.setLayers`.
+  Future<void> _onLayerToggle(String key, bool value) =>
+      LayerCatalog.instance.toggle(key, value);
 
   @override
   Widget build(BuildContext context) {
@@ -139,7 +157,12 @@ class _AppShellState extends State<AppShell> {
                   config: widget.config,
                   prefs: widget.prefs,
                   creds: widget.creds,
+                  onProbe: widget.onProbe,
                   onLoggedOut: widget.onLoggedOut,
+                  // Las 94 claves de la spec aprobada salen del catálogo que
+                  // ya está cargado; el toggle persiste vía PrefsStore.
+                  loadLayerSpec: _loadLayerSpec,
+                  onLayerToggle: _onLayerToggle,
                 ),
               ],
             ),
@@ -176,13 +199,19 @@ class _SessionsTab extends StatefulWidget {
 }
 
 class _SessionsTabState extends State<_SessionsTab> {
-  late final SessionsView view = SessionsView(
-    config: widget.config,
-    onOpen: widget.onOpen,
+  late final SessionsViewModel _vm = SessionsViewModel(
+    repository: SessionRepository(ApiClient(config: widget.config)),
   );
 
   @override
-  Widget build(BuildContext context) => view;
+  void dispose() {
+    _vm.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      SessionsView(viewmodel: _vm, onOpen: widget.onOpen);
 }
 
 /// El chat lo inyecta el worker de chat; acá va el hueco honesto mientras tanto.
