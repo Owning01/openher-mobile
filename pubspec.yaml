@@ -74,6 +74,14 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  # Iconografía formal (Lucide 1.5px, 24x24, currentColor) extraída del
+  # prototipo aprobado: cero emojis en la UI. `AppIcon` los carga por nombre.
+  assets:
+    - assets/icons/
+    # La spec aprobada de capas viaja en el bundle: la app lee la misma config
+    # que el prototipo y el usuario puede apagar capas en runtime.
+    - assets/spec/layers.json
+
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg
