@@ -143,7 +143,10 @@ Map<String, Object?> assistantJson({
   'agent': 'build',
   'model': {'id': 'deepseek-v4.1-flash', 'providerID': 'opencode-go'},
   'content': content,
-  'finish': 'stop',
+  // 7.4: el turno termino si hay `time.completed` **o** `finish`. Un turno
+  // `complete: false` tiene que omitir las dos, si no el fixture dice
+  // "terminado" y los tests que esperan un turno vivo mienten.
+  if (complete) 'finish': 'stop',
   'cost': 0.011,
   'tokens': {'input': 14200, 'output': 300, 'reasoning': 0},
 };
@@ -214,6 +217,7 @@ class SilentSource implements ChatEventSource {
 class ControllableSource implements ChatEventSource {
   final _events = StreamController<OcEvent>.broadcast();
   final _states = StreamController<StreamState>.broadcast();
+  int _seq = 0;
 
   @override
   Stream<OcEvent> get events => _events.stream;
@@ -238,7 +242,10 @@ class ControllableSource implements ChatEventSource {
 
   void emit(String type, Map<String, Object?> data) => _events.add(
     OcEvent(
-      id: 'evt_$type',
+      // Un id por frame, como el server: el viewmodel dedupea por `id`
+      // (§7.1) y dos frames del mismo tipo con el mismo id se comen el
+      // segundo.
+      id: 'evt_${++_seq}_$type',
       type: type,
       data: {'sessionID': kSessionId, ...data},
     ),
@@ -362,7 +369,14 @@ void main() {
 
     expect(find.textContaining('-   return ListView();'), findsOneWidget);
     expect(find.text('Copiar'), findsOneWidget);
-    expect(find.text('Abrir diff'), findsOneWidget);
+    // Sin `onOpenDiff` el chip no se pinta: antes aparecia siempre y
+    // contestaba con un Snackbar que promete "lo abre la vista de archivos"
+    // sin que hubiera nada conectado detras. Sin handler, no hay accion.
+    expect(
+      find.text('Abrir diff'),
+      findsNothing,
+      reason: 'una accion sin handler no se ofrece',
+    );
 
     // El `shell` no tiene diff: su pie solo ofrece Copiar.
     await tester.tap(find.widgetWithText(ToolCard, 'shell'));
@@ -596,22 +610,45 @@ void main() {
     (tester) async {
       // Es la regla que mas fácil se rompe: si `_open` se recalculara en cada
       // build, un delta de texto se comería el toggle del usuario.
+      //
+      // El server de este test cierra el assistant en el re-fetch que dispara
+      // el `step.ended`: por §7.4 el turno termina con `idle` **y** el último
+      // assistant cerrado, y los dos llegan juntos.
       final source = ControllableSource();
-      final vm = await liveVm([
-        userJson('msg_u1', 'hola'),
-        assistantJson(
-          id: 'msg_a_live',
-          complete: false,
-          content: [
-            toolJson(
-              id: 'call_1',
-              name: 'shell',
-              output: 'ok',
-              input: {'command': 'ls'},
+      var turnClosed = false;
+      final vm = ChatViewModel(
+        ApiClient(
+          config: kConfig,
+          client: MockClient(
+            (_) async => http.Response(
+              jsonEncode({
+                'data': [
+                  userJson('msg_u1', 'hola'),
+                  assistantJson(
+                    id: 'msg_a_live',
+                    complete: turnClosed,
+                    content: [
+                      toolJson(
+                        id: 'call_1',
+                        name: 'shell',
+                        output: 'ok',
+                        input: {'command': 'ls'},
+                      ),
+                    ],
+                  ),
+                ],
+              }),
+              200,
+              headers: const {'content-type': 'application/json'},
             ),
-          ],
+          ),
         ),
-      ], source);
+        sessionId: kSessionId,
+        sessionInfo: kSession,
+        streamFactory: (config, directory) => source,
+      );
+      await vm.load();
+      vm.connectStream();
       addTearDown(vm.dispose);
       await pumpChat(tester, vm);
 
@@ -643,7 +680,13 @@ void main() {
       expect(find.byType(ToolCard), findsNothing);
 
       // Ahora si: el turno termina (working true -> false) y ahi se cierra.
+      // `idle` + el `step.ended` que hace que el re-fetch traiga el assistant
+      // ya cerrado; el merge por id reemplaza el mensaje en su lugar.
+      turnClosed = true;
       source.emit('session.status', {'type': 'idle'});
+      source.emit('session.step.ended', {'assistantMessageID': 'msg_a_live'});
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       await tester.pump();
       expect(vm.working, isFalse);
       expect(find.byType(ToolCard), findsNothing);
@@ -709,5 +752,299 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(picked, [ChatSessionAction.compact]);
+  });
+
+  // ───────────────────────── helpers de la card de pregunta ────────────────
+
+  /// Un tool `question` con el `input` como **string crudo**, que es la forma
+  /// real de v2 (`tool.dart`: en `pending` el `input` es un `String`, no un
+  /// mapa). Antes la card leía sólo el mapa y quedaba siempre vacía.
+  Map<String, Object?> questionStringInput() => toolJson(
+    id: 'call_q',
+    name: 'question',
+    status: 'pending',
+    input: jsonEncode({
+      'questions': [
+        {
+          'header': 'Arquitectura',
+          'question': 'Donde vive la lista de sesiones?',
+          'options': [
+            {'label': 'App Flutter mobile nueva', 'description': 'Android/iOS'},
+            {'label': 'Modulo dentro de OpenHer'},
+          ],
+        },
+      ],
+    }),
+  );
+
+  Map<String, Object?> questionTurn() => assistantJson(
+    id: 'msg_a_q',
+    complete: false,
+    content: [questionStringInput()],
+  );
+
+  /// ViewModel con un server de laboratorio: contesta la lista, el
+  /// `POST /prompt` y el `POST …/question/{id}/reply` con el status que se le
+  /// pida (404 = el build medido en `:4098`, donde ese path no existe).
+  Future<ChatViewModel> questionVm({
+    required List<Map<String, Object?>> messages,
+    required int replyStatus,
+    required void Function(String method, String path, String body) onCall,
+    ChatEventSource? source,
+  }) async {
+    final vm = ChatViewModel(
+      ApiClient(
+        config: kConfig,
+        client: MockClient((request) async {
+          final path = request.url.path;
+          onCall(request.method, path, request.body);
+          if (path.endsWith('/reply')) {
+            if (replyStatus != 204) {
+              return http.Response(
+                jsonEncode({'message': 'not found'}),
+                replyStatus,
+                headers: const {'content-type': 'application/json'},
+              );
+            }
+            return http.Response('', 204);
+          }
+          if (path.endsWith('/prompt')) {
+            return http.Response(
+              jsonEncode({
+                'data': {'id': 'msg_1'},
+              }),
+              200,
+              headers: const {'content-type': 'application/json'},
+            );
+          }
+          return http.Response(
+            jsonEncode({'data': messages}),
+            200,
+            headers: const {'content-type': 'application/json'},
+          );
+        }),
+      ),
+      sessionId: kSessionId,
+      sessionInfo: kSession,
+      streamFactory: (config, directory) => source ?? SilentSource(),
+    );
+    await vm.load();
+    if (source != null) vm.connectStream();
+    return vm;
+  }
+
+  testWidgets('una question con input en STRING pinta la card y sus opciones', (
+    tester,
+  ) async {
+    final vm = await loadedVm([userJson('msg_u1', 'hola'), questionTurn()]);
+    addTearDown(vm.dispose);
+    await pumpChat(tester, vm);
+
+    // El `input` crudo es un JSON en string: si sólo se leyera el mapa, la
+    // card saldría vacía y el turno quedaría trabado detrás del botón Detener.
+    expect(find.byType(QuestionCard), findsOneWidget);
+    expect(find.text('Arquitectura'), findsOneWidget);
+    expect(find.text('Donde vive la lista de sesiones?'), findsOneWidget);
+    expect(find.text('App Flutter mobile nueva'), findsOneWidget);
+    expect(find.text('Android/iOS'), findsOneWidget);
+    expect(find.text('Modulo dentro de OpenHer'), findsOneWidget);
+    // Y no miente "pensando": con una pregunta esperando no hay puntos.
+    expect(
+      find.byType(TypingDots),
+      findsNothing,
+      reason: 'el modelo esta esperando al usuario, no escribiendo',
+    );
+  });
+
+  testWidgets('un input de question que no es JSON no rompe la card', (
+    tester,
+  ) async {
+    final vm = await loadedVm([
+      userJson('msg_u1', 'hola'),
+      assistantJson(
+        id: 'msg_a_q',
+        complete: false,
+        content: [
+          toolJson(
+            id: 'call_q',
+            name: 'question',
+            status: 'pending',
+            input: 'a medio escribir',
+          ),
+        ],
+      ),
+    ]);
+    addTearDown(vm.dispose);
+    await pumpChat(tester, vm);
+
+    // Sin preguntas que pintar: el header genérico y el "Ahora no" (que siempre
+    // funciona) siguen ahí. La lista de mensajes no se rompe.
+    expect(find.byType(QuestionCard), findsOneWidget);
+    expect(find.text('Pregunta del agente'), findsOneWidget);
+    expect(find.byKey(QuestionCard.skipKey), findsOneWidget);
+  });
+
+  testWidgets('la card contesta por el endpoint de reply cuando existe', (
+    tester,
+  ) async {
+    final calls = <String>[];
+    final source = ControllableSource();
+    final vm = await questionVm(
+      messages: [userJson('msg_u1', 'hola'), questionTurn()],
+      replyStatus: 204,
+      onCall: (method, path, body) => calls.add('$method $path $body'),
+      source: source,
+    );
+    addTearDown(vm.dispose);
+    await pumpChat(tester, vm);
+
+    // El `requestID` vive en el evento, no en el mensaje.
+    source.emit('question.asked', {
+      'id': 'que_42',
+      'questions': <Object?>[],
+      'tool': {'messageID': 'msg_a_q', 'callID': 'call_q'},
+    });
+    await tester.pump();
+    // El re-fetch del `question.asked` (250 ms) es lo que hace que la card
+    // vuelva a construirse con el `requestID` pegado.
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump();
+    expect(vm.requestIdFor('call_q'), 'que_42');
+
+    await tester.tap(find.text('App Flutter mobile nueva'));
+    await tester.pump();
+    await tester.tap(find.byKey(QuestionCard.submitKey));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      calls.any(
+        (c) =>
+            c.startsWith('POST /api/session/$kSessionId/question/que_42/reply'),
+      ),
+      isTrue,
+      reason: 'la card tiene que pegarle al endpoint del protocolo',
+    );
+    expect(
+      calls.where(
+        (c) => c.contains('"answers":[["App Flutter mobile nueva"]]'),
+      ),
+      isNotEmpty,
+      reason: 'el body es {answers:[[…]]}: un array por pregunta',
+    );
+    expect(
+      calls.where((c) => c.contains('/prompt')),
+      isEmpty,
+      reason: 'si el endpoint existe no se manda un prompt de más',
+    );
+    expect(vm.questionReplyViaApi, isTrue);
+  });
+
+  testWidgets('si el endpoint da 404 la respuesta va como prompt y se avisa', (
+    tester,
+  ) async {
+    final calls = <String>[];
+    final vm = await questionVm(
+      messages: [userJson('msg_u1', 'hola'), questionTurn()],
+      replyStatus: 404,
+      onCall: (method, path, body) => calls.add('$method $path $body'),
+    );
+    addTearDown(vm.dispose);
+    await pumpChat(tester, vm);
+
+    await tester.tap(find.text('Modulo dentro de OpenHer'));
+    await tester.pump();
+    await tester.tap(find.byKey(QuestionCard.submitKey));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      calls.any((c) => c.contains('POST /api/session/$kSessionId/prompt')),
+      isTrue,
+      reason: 'el fallback es un prompt normal: siempre funciona',
+    );
+    expect(
+      calls.any((c) => c.contains('"text":"Modulo dentro de OpenHer"')),
+      isTrue,
+    );
+    // Y no se oculta: el usuario tiene que saber por dónde se contestó.
+    expect(
+      find.textContaining('no expone el endpoint de preguntas'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('un status retry se muestra como "Reintentando en Ns"', (
+    tester,
+  ) async {
+    final source = ControllableSource();
+    final vm = await liveVm([userJson('msg_u1', 'hola'), richTurn()], source);
+    addTearDown(vm.dispose);
+    await pumpChat(tester, vm);
+
+    expect(find.textContaining('Reintentando'), findsNothing);
+
+    source.emit('session.status', {
+      'status': {
+        'type': 'retry',
+        'attempt': 1,
+        'message': 'rate limited',
+        'next': 8000,
+        'action': {
+          'reason': 'rate_limit',
+          'provider': 'opencode-go',
+          'title': 'Cuota del provider agotada',
+          'message': 'Se reintenta solo.',
+          'label': 'Ver limites',
+        },
+      },
+    });
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.text('Reintentando en 8s — Cuota del provider agotada'),
+      findsOneWidget,
+      reason: 'un retry dice el motivo y la cuenta, no sólo "ocupado"',
+    );
+
+    source.emit('session.status', {
+      'status': {'type': 'idle'},
+    });
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining('Reintentando'), findsNothing);
+  });
+
+  testWidgets('con onOpenDiff el chip existe y le pasa el tool al shell', (
+    tester,
+  ) async {
+    final opened = <AssistantTool>[];
+    final vm = await loadedVm([userJson('msg_u1', 'hola'), richTurn()]);
+    addTearDown(vm.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: Scaffold(
+          body: ChatView(viewModel: vm, onOpenDiff: opened.add),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(TurnActivityBox.headKey));
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ToolCard, 'edit'));
+    await tester.pump();
+
+    expect(find.text('Abrir diff'), findsOneWidget);
+    // El chip queda debajo del pliegue de la lista: hay que traerlo a la
+    // pantalla antes de tocarlo.
+    await tester.ensureVisible(find.text('Abrir diff'));
+    await tester.pump();
+    await tester.tap(find.text('Abrir diff'));
+    await tester.pump();
+
+    expect(opened, hasLength(1));
+    expect(opened.single.name, 'edit');
   });
 }

@@ -12,15 +12,15 @@
 /// * [ShellMessage] → píldora con el comando (un comando del server no es una
 ///   respuesta del modelo, pero tampoco puede desaparecer).
 ///
-/// ## Markdown: renderer mínimo, sin dependencia
-/// No hay `flutter_markdown` en el `pubspec` y agregarlo por esto sería una
-/// dependencia grande para tres casos: párrafos, listas con `-` y `` `código` ``
-/// en línea. Eso es exactamente lo que usa el prototipo (`.ai p`, `.ai li`,
-/// `code.chip`). Lo que **no** se soporta (tablas, anidado, HTML) se muestra
-/// como texto plano, que es el mismo resultado visual que un parser que
-/// descarta lo que no entiende.
+/// ## Markdown
+/// El texto del asistente se renderiza con `flutter_markdown_plus` (el sucesor
+/// mantenido de `flutter_markdown`, que quedó discontinuado): párrafos, listas
+/// anidadas, tablas, citas y **bloques de código**, que en un chat de agente es
+/// lo que más se ve. `MarkdownText` (abajo) es el wrapper que memoiza por
+/// firma: si el texto no cambió, se devuelve el mismo subtree.
 library;
 
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -42,6 +42,7 @@ class MessageBubble extends StatelessWidget {
     this.thinkingDefault = true,
     this.onOpenDiff,
     this.onQuestionAnswer,
+    this.questionRequestId,
   });
 
   final SessionMessage message;
@@ -53,10 +54,31 @@ class MessageBubble extends StatelessWidget {
   final bool thinkingDefault;
   final ValueChanged<AssistantTool>? onOpenDiff;
 
-  /// Responde una pregunta del tool `question` (`chat.msg.question`). La
-  /// respuesta vuelve como un prompt del usuario, que es lo que el server
-  /// espera (`API_CONTRACT.md` §4.3 y §6).
-  final void Function(List<String> answers)? onQuestionAnswer;
+  /// Responde una pregunta del tool `question` (`chat.msg.question`).
+  ///
+  /// Recibe el `requestID` (el `id` del `question.asked`, que puede ser `null`
+  /// si el evento todavía no llegó) y las opciones elegidas. El viewmodel
+  /// decide el camino: `POST …/question/{requestID}/reply` o, si ese endpoint no
+  /// existe, un prompt (§6 de `API_CONTRACT.md`).
+  final void Function(String? requestId, List<String> answers)?
+  onQuestionAnswer;
+
+  /// `requestID` de la pregunta pendiente, si el `question.asked` de este chat
+  /// corresponde a este tool (lo resuelve `ChatViewModel.requestIdFor`).
+  final String? questionRequestId;
+
+  /// El tool `question` en `pending` de este mensaje, o `null`.
+  ///
+  /// Vive acá porque es **lo que decide** si se pinta la card, y el chat lo
+  /// consulta para pasarle el `requestID` a la burbuja.
+  static AssistantTool? pendingQuestionTool(SessionMessage message) {
+    if (message case final AssistantMessage assistant) {
+      for (final tool in assistant.toolItems) {
+        if (tool.name == 'question' && tool.state is ToolPending) return tool;
+      }
+    }
+    return null;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -112,13 +134,10 @@ class MessageBubble extends StatelessWidget {
     }
 
     // Una pregunta pendiente tiene prioridad visual sobre el texto: es la
-    // única forma de desbloquear el turno.
-    for (final tool in tools) {
-      if (tool.name == 'question' && tool.state is ToolPending) {
-        children.add(_question(context, tool));
-        break;
-      }
-    }
+    // única forma de desbloquear el turno (y sin ella el botón Detener era la
+    // única salida).
+    final pending = pendingQuestionTool(assistant);
+    if (pending != null) children.add(_question(context, pending));
 
     // Canal A de §5: el turno murió. Va antes del texto porque es lo que hay
     // que leer primero; el texto parcial que quedó sigue debajo.
@@ -133,8 +152,10 @@ class MessageBubble extends StatelessWidget {
     );
 
     // Los puntos sólo mientras el texto aún no llegó: si hay algo escrito, el
-    // texto ES el indicador.
-    if (working && assistant.textContent.trim().isEmpty) {
+    // texto ES el indicador. Y con una pregunta esperando tampoco: el modelo no
+    // está escribiendo, está esperando que el usuario conteste, y parpadear
+    // "pensando" en ese estado es mentir.
+    if (working && pending == null && assistant.textContent.trim().isEmpty) {
       children.add(const LayerGate('chat.typing', child: TypingDots()));
     }
 
@@ -327,10 +348,11 @@ class MessageBubble extends StatelessWidget {
 
   /// `chat.msg.question`: la card de la tool `question` en `pending`.
   Widget _question(BuildContext context, AssistantTool tool) {
-    final questions = tool.questionsRaw;
+    final questions = questionItems(tool);
     final first = questions.isEmpty
         ? const <String, Object?>{}
         : questions.first;
+    final requestId = questionRequestId;
     return LayerGate(
       'chat.msg.question',
       child: QuestionCard(
@@ -345,10 +367,41 @@ class MessageBubble extends StatelessWidget {
         ],
         // Se lee el campo, no `widget.x`: mismo valor, y no depende de que el
         // analyzer resuelva el getter `widget` de `StatelessWidget` acá.
-        onSubmit: onQuestionAnswer,
-        onSkip: onQuestionAnswer,
+        onSubmit: (answers) => onQuestionAnswer?.call(requestId, answers),
+        onSkip: (answers) => onQuestionAnswer?.call(requestId, answers),
       ),
     );
+  }
+}
+
+/// Los `QuestionInfo[]` de un tool `question`, leyendo las **dos** formas del
+/// `input`.
+///
+/// En v2 el `input` de un tool en `pending` es un **string crudo** —el JSON que
+/// el modelo está armando, todavía sin parsear—, no un mapa
+/// (`lib/domain/models/tool.dart` lo dice explícito). Por eso leer sólo
+/// `asMap(input)` dejaba la card siempre vacía: no había pregunta, no había
+/// opciones y el turno quedaba trabado hasta que el usuario apretara Detener.
+/// Algunos builds mandan el input ya parseado, así que se leen las dos formas.
+List<Map<String, Object?>> questionItems(AssistantTool tool) {
+  final input = switch (tool.state.input) {
+    null => null,
+    final String raw => _jsonObject(raw),
+    final Object other => asMap(other),
+  };
+  return asMapList(input?['questions']);
+}
+
+/// `{...}` de un JSON serializado, o `null` si no es un objeto válido.
+Map<String, Object?>? _jsonObject(String raw) {
+  final body = raw.trim();
+  if (!body.startsWith('{')) return null;
+  try {
+    return asMap(jsonDecode(body));
+  } on FormatException {
+    // El `input` crudo todavía no es JSON: no hay nada que pintar. La card
+    // muestra el header genérico y "Ahora no", que siempre funciona.
+    return null;
   }
 }
 
@@ -378,7 +431,7 @@ class MarkdownText extends StatefulWidget {
 
 class _MarkdownTextState extends State<MarkdownText> {
   /// Firma de lo renderizado (texto + estilo). Si no cambia, se reutiliza el
-  /// subtree entero. El separador   evita que dos textos distintos den la
+  /// subtree entero. El separador \u0000 evita que dos textos distintos den la
   /// misma firma al concatenarse.
   String? _signature;
   Widget? _cached;
@@ -387,7 +440,8 @@ class _MarkdownTextState extends State<MarkdownText> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final style = theme.textTheme.bodyMedium!;
-    final signature = '${widget.text} ${style.color} ${style.fontSize}';
+    final signature =
+        '${widget.text}\u0000${style.color}\u0000${style.fontSize}';
     if (signature != _signature) {
       _signature = signature;
       _cached = _render(context, style);
@@ -454,8 +508,11 @@ class QuestionOption {
 /// La card de la tool `question` (`chat.msg.question`).
 ///
 /// Sólo se muestra con el tool en `pending`, que es el único estado en el que
-/// se puede contestar. Al enviar, las respuestas vuelven como un prompt del
-/// usuario con el formato que el server ya entiende (una línea por respuesta).
+/// se puede contestar. La card **no** manda nada: entrega las opciones elegidas
+/// (o la lista vacía del "Ahora no") a `MessageBubble.onQuestionAnswer`, y de
+/// ahí al viewmodel, que las manda al endpoint de reply del protocolo y —si ese
+/// endpoint no existe en el build— las manda como prompt. Ver
+/// `ChatViewModel.answerQuestion`.
 class QuestionCard extends StatefulWidget {
   const QuestionCard({
     super.key,
@@ -472,7 +529,7 @@ class QuestionCard extends StatefulWidget {
 
   final void Function(List<String> answers)? onSubmit;
 
-  /// "Ahora no": contesta con la lista vacía (el server lo trata como *skip*).
+  /// "Ahora no": lista vacía. El server lo trata como un *skip*.
   final void Function(List<String> answers)? onSkip;
 
   static const Key submitKey = Key('question-submit');
