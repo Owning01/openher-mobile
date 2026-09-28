@@ -43,6 +43,15 @@ Todavía **no** hay código Dart. El proyecto Flutter arranca en la fase M0.
 - **Tool completed** usa `content[]`, no `output:string`; `error` es objeto, no string.
 - **Fin de turno:** `session.status` + `time.completed`/`finish`; nunca por tiempo.
 - **Orden de precedencia de auth:** `?auth_token` (query) gana sobre el header Basic.
+- **Trampa (2):** un **5xx con cuerpo HTML es error de server**, no el catch-all: se
+  clasifica el 5xx antes del sniff de HTML, o se pierde el retry.
+- **Tool pending:** manda input como **string**, no como mapa (hay que parsearlo).
+- **Stream:** el global /api/event es el único que responde (el por sesión da 404).
+  Los frames traen durable.seq y created; el filtro por sesión es del cliente.
+- **Preguntas:** no existe endpoint listable (/api/question/request → 404). Se
+  responde por POST /api/session/{id}/question/{requestID}/reply, con fallback a
+  prompt. Permisos sí existen: /api/permission/request → 200.
+- **Deltas:** se enrutan por ssistantMessageID del evento, no "al último mensaje".
 
 ## Server de desarrollo
 

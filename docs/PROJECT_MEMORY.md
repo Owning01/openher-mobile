@@ -60,3 +60,27 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   camino muestra errores transitorios (p.ej. `tokens.dart` a medio importar). No corregir
   archivos de otro worker: se verifican al final.
 - **Pendiente:** tribunal sobre M1/M2 (critic/challenger/auditor) antes de M3.
+
+## 2026-09-28 — M0–M3 construidos, repo en GitHub, enjambre de UI en marcha
+
+- **Qué:** `flutter create` + tokens/tema (M1) + modelos y cliente REST/SSE (M2) + shell
+  con bottom-nav, Conectar, Ajustes y lista de Sesiones (M3). Todo commiteado por fase.
+  Repo creado: `Owning01/openher-mobile` (público, sin push todavía — el push es uno solo
+  al final). Workers de Chat y Archivos en paralelo.
+- **Decisión corregida por medición (D3):** el stream por sesión `/api/session/{id}/event`
+  **da 404** en `:4098`. El que funciona es el **global `/api/event`** (con `durable.seq`).
+  El probe real es `/api/location`, no `/api/health`.
+- **Por qué las capas importan:** la spec de 94 capas congelada hace que "saqué lo que no
+  quiero" sea un test (`layer_contract_test.dart`) y un toggle en vivo en Ajustes, no una
+  promesa. `LayerGate` implementa `PreferredSizeWidget` para poder apagar un AppBar entero.
+- **Evidencia:** 152 tests en verde tras M2; el arranque de la app (sin credenciales ⇒
+  pantalla Conectar) verificado con `test/widget_test.dart`. El worker Connect/Settings
+  entregó 52 tests. M3 commiteado (`cc82efd`).
+- **Worker de red cancelado a mitad:** dejó api_client/sse_client/tests escritos pero con
+  la API de errores adivinada. Los alineé a `errors.dart` real y corregí 3 tests que
+  asumían v1. El modelo de errores ahora incluye `UnsupportedServerError` (para el probe).
+- **Trampa de integración:** el viewmodel de sessions importaba `sessionrepository.dart`
+  (sin underscore): en Windows no falla, pero rompe el build case-sensitive. Corregido.
+- **Pendiente:** Chat (worker) y Archivos (worker) → tribunal → APK release → push único →
+  APK a `Owning01/mis-apps`.
+
