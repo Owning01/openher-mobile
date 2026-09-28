@@ -85,6 +85,34 @@ class ServerConfig {
     query: buildQuery(query),
   );
 
+  /// La URL directa de un archivo del workspace: `GET /api/fs/read/<path>`.
+  ///
+  /// **Medido 2026-09-28**: este endpoint no devuelve texto, devuelve los
+  /// **bytes crudos** con el `Content-Type` correcto. Verificado con un APK de
+  /// 56 MB (`application/vnd.android.package-archive`, 56.318.889 bytes) y con
+  /// un SVG (`image/svg+xml`, 284 bytes). Esa medicion es la que habilita el
+  /// visor de imagenes, video, audio y PDF: sin ella no hay de donde sacar los
+  /// bytes de un binario.
+  ///
+  /// No existe otra via: `/api/fs/raw/*`, `/api/fs/download/*` y `/api/file/*`
+  /// dan **404**, y cualquier ruta sin prefijo cae en el catch-all del SPA que
+  /// devuelve HTML 200.
+  ///
+  /// [directory] `null` = la raiz del `location` del server, que es lo mismo
+  /// que hace `GET /api/fs/list` cuando no se le pasa.
+  Uri fileUrl(String path, {String? directory}) => api(
+    '/fs/read/${path.startsWith('/') ? path.substring(1) : path}',
+    query: <String, String?>{'location[directory]': directory},
+  );
+
+  /// Los headers que necesitan los cargadores de red del visor de archivos
+  /// (`Image.network`, `SvgPicture.network`, `video_player`, `PdfViewer.uri`).
+  ///
+  /// Sin esto el server responde 401: la imagen aparece con un error de
+  /// autenticacion en vez del archivo.
+  Map<String, String> get binaryHeaders =>
+      hasAuth ? <String, String>{'authorization': basicAuthHeader!} : const {};
+
   /// Serializa [query] a `k=v&k2=v2`, omitiendo los `null` y escapando valores.
   static String buildQuery(Map<String, String?> query) {
     final parts = <String>[];

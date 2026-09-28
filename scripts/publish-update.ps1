@@ -59,8 +59,19 @@ $versionCode = [int]$Version.Split('+')[1]
 $apk = Join-Path $root 'build\app\outputs\flutter-apk\app-release.apk'
 
 if (-not $SkipBuild) {
-  Write-Host 'Compilando el APK de release...'
-  & flutter build apk --release
+  Write-Host 'Compilando el APK de release (solo arm64)...'
+  # **Medido 2026-09-28**: el APK universal pesa 73,6 MB y el de arm64 26,8 MB.
+  # La diferencia son 3 copias de `libflutter.so`, `libapp.so` y `libpdfium.so`
+  # (el motor de `pdfrx` son 16,4 MB solo). Un APK que baja el celular por datos
+  # moviles tiene que ser el chico.
+  #
+  # Costo real (medido en el APK publicado): `arm64-v8a` pesa 24,8 MB y en
+  # `armeabi-v7a` / `x86_64` quedan 0,1 MB de restos (`libdartjni.so` y el
+  # helper de pdfrx). El manifest igual los declara, asi que un dispositivo
+  # de SOLO 32 bits instalaria y reventaria al arrancar. En la practica no
+  # pasa: Android 15+ es 64 bits y el target es 36. Para 32 bits de verdad:
+  # `--split-per-abi` con un manifiesto por ABI, no volver al universal.
+  & flutter build apk --release --target-platform android-arm64
   if ($LASTEXITCODE -ne 0) { throw "flutter build falló ($LASTEXITCODE)" }
 }
 if (-not (Test-Path $apk)) { throw "No existe el APK en $apk" }

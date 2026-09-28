@@ -78,8 +78,17 @@
         </intent>
         <!-- El selector de imagenes de Android 13+ es una Activity: sin esta
              query el modulo no puede resolverla y el clip no abre nada. -->
+        <!-- **Un <intent> admite UN SOLO <action>.** El parser de Android
+             rechaza el APK entero con `INSTALL_PARSE_FAILED_MANIFEST_MALFORMED:
+             intent tag may have at most one action` (medido 2026-09-28 al
+             instalar sobre un Xiaomi con Android 16). Por eso son dos
+             <intent> y no uno con dos <action>: unirlos rompe la
+             instalacion entera, no solo el clip. -->
         <intent>
             <action android:name="android.intent.action.PICK"/>
+            <data android:mimeType="image/*"/>
+        </intent>
+        <intent>
             <action android:name="android.intent.action.GET_CONTENT"/>
             <data android:mimeType="image/*"/>
         </intent>

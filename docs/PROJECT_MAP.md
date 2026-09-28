@@ -59,10 +59,11 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 | D4 | POST del prompt y después escuchar; el POST no devuelve el turno |
 | D5 | Bottom nav de 4 destinos + hojas inferiores |
 | D6 | Tokens y **variantes de tema** reusados del escritorio (espejo de `tokens.css`) |
-| D7 | Deps directos: `http`, `flutter_secure_storage`, `speech_to_text`, `flutter_svg`, `shared_preferences`, `flutter_markdown_plus`, `connectivity_plus`, `image_picker` |
+| D7 | Deps directos: `http`, `flutter_secure_storage`, `speech_to_text`, `flutter_svg`, `shared_preferences`, `flutter_markdown_plus`, `connectivity_plus`, `image_picker`, `video_player`, `pdfrx` |
 | D8 | Los 3 canales de error visibles (el escritorio se come `session.error`) |
 | D9 | Modo de bajo consumo **automático** sólo con red celular; el usuario puede desactivarlo a mano |
 | D10 | Autoupdate contra el manifiesto de la release, sin diálogos ni bloqueos |
+| D11 | El visor de archivos decide **por extensión**, no por el botón que se apretó: `domain/models/file_type.dart` + `ui/features/files/file_preview.dart` |
 
 ## Contrato: lo que hay que no olvidar
 
@@ -95,6 +96,16 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
   Un agente **no** trae modelo.
 - **Herramientas agrupadas:** una caja por **turno**, montada en el primer assistant del turno
   (los resultados de shell nunca la poseen). Dueño y absorciones: `lib/domain/models/turn_activity.dart`.
+- **Visor de archivos:** los bytes salen de **`GET /api/fs/read/<path>`**, que **medido**
+  devuelve los bytes **crudos** con el `Content-Type` correcto (verificado con un APK de
+  56 MB = `application/vnd.android.package-archive`, y con PNG, SVG, PDF y `.md`). No hay otra
+  vía: `/api/fs/raw/*`, `/api/fs/download/*` y `/api/file/*` dan **404**, y cualquier ruta sin
+  prefijo cae en el catch-all del SPA (HTML 200). Acepta `\` y `/` en el path (probado).
+- **`GET /api/fs/list` devuelve solo `path` y `type`** (medido): ni mime, ni tamaño, ni nombre.
+  Por eso la clasificación va por extensión, y una extensión desconocida sale `binary` con un
+  aviso, en vez de renderizar bytes como texto.
+- Los cargadores de red del visor (imagen, svg, video, pdf) necesitan el header Basic
+  explícito; sin él el server responde 401. Lo arma `ServerConfig.binaryHeaders`.
 
 ## Server de desarrollo
 
@@ -117,6 +128,13 @@ Build de Android: `ANDROID_HOME=G:\Android\SDK`, `JAVA_HOME=G:\Android\Android S
 ## Trampas conocidas
 
 - `/api/health` no existe ⇒ `/api/location`.
+- Un control dibujado sin destino es un bug, no un TODO. `FileAction.diff` sigue sin destino
+  y **lo dice** con un toast; `FileAction.open` ya no.
+- El APK se compila **arm64-only** (`publish-update.ps1`): 26,8 MB contra 73,6 MB del universal.
+  Medido en el publicado: `arm64-v8a` 24,8 MB y 0,1 MB de restos en las otras dos ABIs.
+- `flutter build apk` compila **feliz** un manifest inválido. El parser de Android solo avisa al
+  instalar (`INSTALL_PARSE_FAILED_MANIFEST_MALFORMED`). Antes de publicar: `aapt2 dump xmltree
+  --file AndroidManifest.xml <apk>` y mirá que no haya dos `action` seguidos.
 - PowerShell 5.1 devuelve **500** contra el redirect de assets de GitHub aunque la URL responda
   200: toda verificación de red por script va con `curl.exe`, no con `Invoke-RestMethod`.
 - Windows PowerShell 5.1 **no se puede desinstalar**: es componente del SO y su binario está en
