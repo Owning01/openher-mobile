@@ -1,0 +1,605 @@
+/// Archivos: repositorio, viewmodel y pantalla.
+///
+/// No hay server: todo el HTTP va por `MockClient`, con la forma medida de
+/// `/api/fs/list` (`FileSystemEntry` de `packages/sdk/openapi.json`: `path` +
+/// `type`, y las carpetas con el separador al final).
+library;
+
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:openher_mobile/core/network/server_config.dart';
+import 'package:openher_mobile/data/repositories/file_repository.dart';
+import 'package:openher_mobile/domain/models/errors.dart';
+import 'package:openher_mobile/ui/core/layer_gate.dart';
+import 'package:openher_mobile/ui/core/theme.dart';
+import 'package:openher_mobile/ui/features/files/files_view.dart';
+import 'package:openher_mobile/ui/features/files/files_viewmodel.dart';
+
+const ServerConfig kConfig = ServerConfig(
+  host: '127.0.0.1',
+  port: 4098,
+  username: 'opencode',
+  password: 'hunter2',
+);
+
+/// Un directorio con una carpeta y un archivo, como lo manda el server.
+const String kListDir = '''
+{"data":[{"path":"lib","type":"directory"},
+         {"path":"pubspec.yaml","type":"file"}],
+ "cursor":{"previous":"eyJpZCI6Imx5XzAifQ=="}}
+''';
+
+/// El fallback del catch-all del SPA: 200 con `text/html` (`API_CONTRACT` §1.6).
+const String kSpaHtml =
+    '<!doctype html><html><head><title>opencode</title></head><body></body>'
+    '</html>';
+
+/// Captura las requests y responde siempre lo mismo.
+class _FakeFs {
+  _FakeFs(this.body, {this.type = 'application/json'});
+
+  String body;
+  final String type;
+  final List<Uri> requests = <Uri>[];
+
+  MockClient get client => MockClient((request) async {
+    requests.add(request.url);
+    return http.Response(
+      body,
+      200,
+      headers: <String, String>{'content-type': type},
+    );
+  });
+}
+
+FileRepository _repo(_FakeFs fake) =>
+    FileRepository(config: kConfig, client: fake.client);
+
+void main() {
+  setUp(() {
+    // Todas las capas de Archivos encendidas: es el default de la spec.
+    LayerCatalog.debugSetInstance(
+      LayerCatalog.forTest(<String, bool>{
+        for (final key in <String>[
+          FilesView.layerAppBar,
+          FilesView.layerTitle,
+          FilesView.layerSearch,
+          FilesView.layerOverflow,
+          FilesView.layerBreadcrumb,
+          FilesView.layerRowEntry,
+          FilesView.layerRowName,
+          FilesView.layerRowExt,
+          FilesView.layerRowGit,
+          FilesView.layerRowDiff,
+          FilesView.layerSheet,
+        ])
+          key: true,
+      }),
+    );
+  });
+  tearDown(() => LayerCatalog.debugSetInstance(null));
+
+  group('FileRepository: mapeo de /api/fs/list', () {
+    test('dos entradas: la carpeta y el yaml', () async {
+      final repository = _repo(_FakeFs(kListDir));
+      addTearDown(repository.close);
+
+      final nodes = await repository.listDirectory();
+
+      expect(nodes, hasLength(2));
+      expect(nodes[0].name, 'lib');
+      expect(nodes[0].isDirectory, isTrue);
+      expect(nodes[0].extension, isEmpty, reason: 'una carpeta no tiene ext');
+      expect(nodes[1].name, 'pubspec.yaml');
+      expect(nodes[1].isDirectory, isFalse);
+      expect(nodes[1].extension, 'yaml');
+    });
+
+    test('el separador final del server marca la carpeta', () async {
+      // Forma real de un server Windows: `path.relative(...) + path.sep`.
+      final repository = _repo(
+        _FakeFs('{"data":[{"path":"lib\\\\","type":"directory"}]}'),
+      );
+      addTearDown(repository.close);
+
+      final node = (await repository.listDirectory(path: 'lib')).single;
+
+      expect(node.isDirectory, isTrue);
+      expect(node.name, 'lib');
+      expect(node.path, 'lib', reason: 'el path sale normalizado');
+    });
+
+    test('el `name` explícito gana sobre el path', () async {
+      // El build viejo mandaba `name`; si viene, es la fuente de verdad.
+      final repository = _repo(
+        _FakeFs('{"data":[{"name":"lib","path":"lib"}]}'),
+      );
+      addTearDown(repository.close);
+
+      final node = (await repository.listDirectory()).single;
+
+      expect(node.name, 'lib');
+      expect(node.isDirectory, isFalse, reason: 'sin `type` no inventa nada');
+    });
+
+    test('lo que no es un mapa se descarta sin romper la lista', () async {
+      final repository = _repo(
+        _FakeFs(
+          '{"data":["basura", 3, null, {"path":"a.dart","type":"file"}]}',
+        ),
+      );
+      addTearDown(repository.close);
+
+      final nodes = await repository.listDirectory();
+
+      expect(nodes, hasLength(1));
+      expect(nodes.single.extension, 'dart');
+    });
+
+    test(
+      'la raíz se pide sin `path=` (el server no quiere un vacío)',
+      () async {
+        final fake = _FakeFs(kListDir);
+        final repository = _repo(fake);
+        addTearDown(repository.close);
+
+        await repository.listDirectory();
+
+        expect(fake.requests.single.queryParameters, isEmpty);
+      },
+    );
+
+    test('findFiles manda la query y devuelve paths completos', () async {
+      final fake = _FakeFs(
+        '{"data":[{"path":"lib/core/x.dart","type":"file"}]}',
+      );
+      final repository = _repo(fake);
+      addTearDown(repository.close);
+
+      final nodes = await repository.findFiles('x.dart');
+
+      expect(fake.requests.single.query, contains('query=x.dart'));
+      expect(nodes.single.path, 'lib/core/x.dart');
+    });
+
+    test('el HTML del catch-all sale como HtmlFallbackError', () async {
+      final repository = _repo(_FakeFs(kSpaHtml, type: 'text/html'));
+      addTearDown(repository.close);
+
+      await expectLater(
+        repository.listDirectory(),
+        throwsA(isA<HtmlFallbackError>()),
+      );
+    });
+  });
+
+  group('FileNode: path y extensión', () {
+    test('la extensión es la del último punto, en minúsculas', () {
+      expect(FileNode.extensionOf('main.dart'), 'dart');
+      expect(FileNode.extensionOf('README.MD'), 'md');
+      expect(FileNode.extensionOf('.gitignore'), isEmpty);
+      expect(FileNode.extensionOf('Makefile'), isEmpty);
+      expect(FileNode.extensionOf('build.'), isEmpty);
+    });
+
+    test('la aritmética de rutas es la del server', () {
+      expect(FileNode.basename('lib/ui/'), 'ui');
+      expect(FileNode.basename(''), isEmpty);
+      expect(FileNode.parentOf('lib/ui/core'), 'lib/ui');
+      expect(FileNode.parentOf('lib'), isEmpty);
+      expect(FileNode.parentOf(''), isEmpty);
+      expect(FileNode.join('lib', 'ui'), 'lib/ui');
+      expect(FileNode.join('', 'lib'), 'lib');
+      expect(FileNode.join('lib\\', 'ui'), 'lib/ui');
+      expect(FileNode.segmentsOf('lib\\ui/core'), <String>[
+        'lib',
+        'ui',
+        'core',
+      ]);
+    });
+
+    test('lee el estado de git si un build futuro lo manda', () {
+      final node = FileNode.fromJson(<String, Object?>{
+        'path': 'pubspec.yaml',
+        'type': 'file',
+        'isDirty': true,
+        'additions': 12,
+        'deletions': 4,
+      });
+
+      expect(node.gitMarked, isTrue);
+      expect(node.hasDiffCount, isTrue);
+      expect(node.toString(), contains('+12 -4'));
+    });
+
+    test('sin git, el nodo no inventa marcadores', () {
+      final node = FileNode.fromJson(<String, Object?>{
+        'path': 'pubspec.yaml',
+        'type': 'file',
+      });
+
+      expect(node.gitMarked, isFalse);
+      expect(node.hasDiffCount, isFalse);
+      expect(node.size, isNull);
+    });
+  });
+
+  group('FilesViewModel', () {
+    test('carga la raíz y deja los nodos', () async {
+      final repository = _repo(_FakeFs(kListDir));
+      final model = FilesViewModel(repository: repository);
+      addTearDown(model.dispose);
+
+      await model.load(FileRepository.rootPath);
+
+      expect(model.nodes, hasLength(2));
+      expect(model.path, isEmpty);
+      expect(model.error, isNull);
+      expect(model.loading, isFalse);
+    });
+
+    test('un HTML deja error, lista vacía y ningún crash', () async {
+      final repository = _repo(_FakeFs(kSpaHtml, type: 'text/html'));
+      final model = FilesViewModel(repository: repository);
+      addTearDown(model.dispose);
+
+      await model.load(FileRepository.rootPath);
+
+      expect(model.error, contains('HTML'));
+      expect(model.nodes, isEmpty);
+      expect(model.isEmpty, isFalse, reason: 'con error no se dice "vacía"');
+    });
+
+    test('navegar, subir y volver a la raíz arman bien el path', () async {
+      final fake = _FakeFs(kListDir);
+      final repository = _repo(fake);
+      final model = FilesViewModel(repository: repository);
+      addTearDown(model.dispose);
+
+      await model.navigateTo('lib');
+      expect(model.path, 'lib');
+      await model.navigateTo('core');
+      expect(model.path, 'lib/core');
+      await model.up();
+      expect(model.path, 'lib');
+      await model.up();
+      expect(model.path, isEmpty);
+
+      final before = fake.requests.length;
+      await model.up(); // en la raíz no hay padre: no se pide nada
+      expect(model.path, isEmpty);
+      expect(
+        fake.requests,
+        hasLength(before),
+        reason: 'subir en la raíz no I/O',
+      );
+
+      // Cada request lleva el path pedido; la raíz no lleva ninguno.
+      expect(
+        fake.requests.map((uri) => uri.queryParameters['path']).toList(),
+        <String?>['lib', 'lib/core', 'lib', null],
+      );
+    });
+
+    test(
+      'la búsqueda deja el path donde estaba y se va con una vacía',
+      () async {
+        // Un solo cliente que responde distinto según venga `query`: el mismo
+        // server, el mismo directorio.
+        final model = FilesViewModel(
+          repository: FileRepository(
+            config: kConfig,
+            client: MockClient((request) async {
+              final isSearch = request.url.queryParameters.containsKey('query');
+              return http.Response(
+                isSearch
+                    ? '{"data":[{"path":"lib/main.dart","type":"file"}]}'
+                    : kListDir,
+                200,
+                headers: <String, String>{'content-type': 'application/json'},
+              );
+            }),
+          ),
+        );
+        addTearDown(model.dispose);
+
+        await model.load('lib');
+        expect(model.nodes, hasLength(2));
+
+        await model.search('main');
+        expect(model.query, 'main');
+        expect(model.path, 'lib', reason: 'buscar no navega');
+        expect(model.nodes.single.name, 'main.dart');
+
+        await model.search('  ');
+        expect(model.query, isEmpty);
+        expect(model.path, 'lib');
+        // Volvió al listado, no a la raíz.
+        expect(model.nodes, hasLength(2));
+      },
+    );
+
+    test('los crumbs son la raíz más cada segmento', () {
+      final crumbs = FilesViewModel.buildCrumbs('lib/ui/core');
+      expect(crumbs.map((c) => c.label).toList(), <String>[
+        '/',
+        'lib',
+        'ui',
+        'core',
+      ]);
+      expect(crumbs.map((c) => c.path).toList(), <String>[
+        '',
+        'lib',
+        'lib/ui',
+        'lib/ui/core',
+      ]);
+      expect(crumbs.last.isTail, isTrue);
+      expect(crumbs.first.isTail, isFalse);
+    });
+
+    test('en la raíz el único crumb es la raíz', () {
+      final crumbs = FilesViewModel.buildCrumbs('');
+      expect(crumbs, hasLength(1));
+      expect(crumbs.single.label, '/');
+      expect(crumbs.single.isTail, isTrue);
+    });
+
+    test('la respuesta lenta de una carpeta no pisa la nueva', () async {
+      final gate = Completer<void>();
+      var call = 0;
+      final model = FilesViewModel(
+        repository: FileRepository(
+          config: kConfig,
+          client: MockClient((request) async {
+            call++;
+            if (call == 1) {
+              await gate.future;
+              return http.Response(
+                '{"data":[{"path":"lento.dart","type":"file"}]}',
+                200,
+                headers: <String, String>{'content-type': 'application/json'},
+              );
+            }
+            return http.Response(
+              '{"data":[{"path":"rapido.dart","type":"file"}]}',
+              200,
+              headers: <String, String>{'content-type': 'application/json'},
+            );
+          }),
+        ),
+      );
+      addTearDown(model.dispose);
+
+      final slow = model.load('lento');
+      final fast = model.load('rapido');
+      await fast;
+      gate.complete();
+      await slow;
+
+      expect(model.path, 'rapido');
+      expect(model.nodes.single.name, 'rapido.dart');
+    });
+
+    test('dispose con una request en vuelo no tira', () async {
+      final gate = Completer<void>();
+      final model = FilesViewModel(
+        repository: FileRepository(
+          config: kConfig,
+          client: MockClient((_) async {
+            await gate.future;
+            return http.Response('{"data":[]}', 200);
+          }),
+        ),
+      );
+
+      final pending = model.load('lib');
+      model.dispose();
+      gate.complete();
+
+      await expectLater(pending, completes);
+    });
+  });
+
+  group('FilesView', () {
+    /// Pump de la pantalla con un viewmodel dado. Superficie alta: la lista y
+    /// la hoja entran en un solo viewport.
+    Future<void> pumpView(
+      WidgetTester tester,
+      FilesViewModel model, {
+      void Function(String path)? onAddToChat,
+    }) async {
+      tester.view.physicalSize = const Size(500, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: FilesView(
+            config: kConfig,
+            onAddToChat: onAddToChat ?? (_) {},
+            viewModel: model,
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    /// Pump de la pantalla con un viewmodel ya cargado (sin red en el test).
+    Future<FilesViewModel> pumpFiles(
+      WidgetTester tester, {
+      String body = kListDir,
+      String contentType = 'application/json',
+      void Function(String path)? onAddToChat,
+    }) async {
+      final model = FilesViewModel(
+        repository: _repo(_FakeFs(body, type: contentType)),
+      );
+      addTearDown(model.dispose);
+      await model.load(FileRepository.rootPath);
+      await pumpView(tester, model, onAddToChat: onAddToChat);
+      return model;
+    }
+
+    testWidgets('el app bar, el breadcrumb y la extensión del archivo', (
+      tester,
+    ) async {
+      await pumpFiles(
+        tester,
+        body:
+            '{"data":[{"path":"lib","type":"directory"},'
+            '{"path":"lib/main.dart","type":"file"}]}',
+      );
+
+      expect(find.text('Archivos'), findsOneWidget);
+      // El breadcrumb muestra el directorio actual: raíz ⇒ `/`.
+      expect(_crumbsText(tester), '/');
+      expect(find.text('main.dart'), findsOneWidget);
+      expect(find.text('dart'), findsOneWidget, reason: 'files.row.ext');
+      // La carpeta se muestra con la barra del prototipo.
+      expect(find.text('lib/'), findsOneWidget);
+    });
+
+    testWidgets('el breadcrumb muestra el directorio con sus segmentos', (
+      tester,
+    ) async {
+      final model = FilesViewModel(
+        repository: _repo(
+          _FakeFs('{"data":[{"path":"a.dart","type":"file"}]}'),
+        ),
+      );
+      addTearDown(model.dispose);
+      await model.load('lib/ui/core');
+      await pumpView(tester, model);
+
+      expect(_crumbsText(tester), '/lib/ui/core');
+    });
+
+    testWidgets('una carpeta vacía lo dice', (tester) async {
+      await pumpFiles(tester, body: '{"data":[]}');
+
+      expect(find.byKey(FilesView.emptyKey), findsOneWidget);
+      expect(find.text('Esta carpeta está vacía.'), findsOneWidget);
+    });
+
+    testWidgets('tocar una carpeta entra a ella', (tester) async {
+      final model = await pumpFiles(tester);
+
+      await tester.tap(find.byKey(FilesView.rowKey('lib')));
+      await tester.pumpAndSettle();
+
+      expect(model.path, 'lib');
+      expect(_crumbsText(tester), '/lib');
+    });
+
+    testWidgets('tocar largo abre la hoja y "Añadir al chat" avisa', (
+      tester,
+    ) async {
+      final added = <String>[];
+      await pumpFiles(
+        tester,
+        body: '{"data":[{"path":"lib/main.dart","type":"file"}]}',
+        onAddToChat: added.add,
+      );
+
+      await tester.longPress(find.byKey(FilesView.rowKey('lib/main.dart')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Añadir al chat'), findsOneWidget);
+      expect(find.text('Copiar ruta'), findsOneWidget);
+      // Sin visor ni diff todavía: se muestran pero no se pueden apretar.
+      expect(find.text('Abrir'), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(FilesView.sheetActionKey(FileAction.addToChat.name)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(added, <String>['lib/main.dart']);
+      expect(
+        find.text('Añadir al chat'),
+        findsNothing,
+        reason: 'la hoja cerró',
+      );
+    });
+
+    testWidgets('el error del server se muestra y reintenta', (tester) async {
+      await pumpFiles(tester, body: kSpaHtml, contentType: 'text/html');
+
+      expect(find.byKey(FilesView.errorKey), findsOneWidget);
+      expect(find.text('Reintentar'), findsOneWidget);
+      expect(find.text('Esta carpeta está vacía.'), findsNothing);
+    });
+
+    testWidgets('el buscador pide una vez por búsqueda, no una por tecla', (
+      tester,
+    ) async {
+      final fake = _FakeFs(
+        '{"data":[{"path":"lib","type":"directory"},'
+        '{"path":"lib/main.dart","type":"file"}]}',
+      );
+      final model = FilesViewModel(repository: _repo(fake));
+      addTearDown(model.dispose);
+      await pumpView(tester, model);
+
+      await _tapIcon(tester, 'Buscar archivos');
+      expect(find.byKey(FilesView.searchFieldKey), findsOneWidget);
+
+      await tester.enterText(find.byKey(FilesView.searchFieldKey), 'main');
+      // El debounce todavía no venció: no se buscó nada.
+      expect(fake.requests, isEmpty);
+      await tester.pump(FilesView.searchDebounce);
+      await tester.pumpAndSettle();
+
+      expect(fake.requests, hasLength(1));
+      expect(fake.requests.single.query, contains('query=main'));
+      expect(model.query, 'main');
+      // En una búsqueda se ve el path completo, no el nombre suelto.
+      expect(find.text('lib/main.dart'), findsOneWidget);
+
+      // Tocar una carpeta del resultado abre ésa, no una con el path pegado al
+      // directorio de arriba.
+      await tester.tap(find.byKey(FilesView.rowKey('lib')));
+      await tester.pumpAndSettle();
+
+      expect(model.path, 'lib');
+      expect(model.query, isEmpty, reason: 'navegar sale de la búsqueda');
+      expect(_crumbsText(tester), '/lib');
+    });
+
+    testWidgets('el overflow ofrece Actualizar e Ir a la raíz', (tester) async {
+      await pumpFiles(tester);
+
+      await _tapIcon(tester, 'Más acciones');
+
+      expect(find.text('Actualizar'), findsOneWidget);
+      expect(find.text('Ir a la raíz'), findsOneWidget);
+    });
+  });
+}
+
+/// Apretar el `AppIconButton` del app bar por su etiqueta de accesibilidad: los
+/// iconos son SVG y no tienen texto.
+Future<void> _tapIcon(WidgetTester tester, String label) async {
+  await tester.tap(
+    find.byWidgetPredicate(
+      (widget) => widget is Semantics && widget.properties.label == label,
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
+/// El breadcrumb tal como se lee en pantalla: todos los textos de la fila, en
+/// orden (las migas y los `/` que las separan).
+String _crumbsText(WidgetTester tester) => tester
+    .widgetList<Text>(
+      find.descendant(
+        of: find.byKey(FilesView.breadcrumbKey),
+        matching: find.byType(Text),
+      ),
+    )
+    .map((text) => text.data ?? '')
+    .join();
