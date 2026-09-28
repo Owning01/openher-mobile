@@ -76,6 +76,52 @@ void main() {
     expect(() => catalog.toggle('no.existe', true), throwsArgumentError);
   });
 
+  testWidgets('apagada, la appBar no reserva altura', (tester) async {
+    final catalog = LayerCatalog.forTest(defaults);
+    LayerCatalog.debugSetInstance(catalog);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          // El contrato del gate: apagada, la altura preferida es 0. Antes
+          // devolvía la del hijo y el Scaffold reservaba 56px de barra vacía.
+          appBar: LayerGate(
+            'chat.appbar.subtitle',
+            child: AppBar(title: const Text('NO DEBE OCUPAR')),
+          ),
+          body: const Text('CUERPO'),
+        ),
+      ),
+    );
+    expect(
+      tester.widget<LayerGate>(find.byType(LayerGate)).preferredSize,
+      Size.zero,
+    );
+    expect(tester.getSize(find.byType(Scaffold).first).height, greaterThan(0));
+    // Y el texto de la app bar apagada no existe en el árbol pintado.
+    expect(find.text('NO DEBE OCUPAR'), findsNothing);
+  });
+
+  testWidgets('encendida, la appBar conserva la altura del hijo', (
+    tester,
+  ) async {
+    LayerCatalog.debugSetInstance(LayerCatalog.forTest(defaults));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          appBar: LayerGate(
+            'chat.appbar.title',
+            child: AppBar(title: const Text('T')),
+          ),
+          body: const Text('CUERPO'),
+        ),
+      ),
+    );
+    expect(
+      tester.widget<LayerGate>(find.byType(LayerGate)).preferredSize.height,
+      kToolbarHeight,
+    );
+  });
+
   test('el asset de la spec tiene las 94 capas y las 4 apagadas', () {
     final f = File('assets/spec/layers.json');
     expect(f.existsSync(), isTrue, reason: 'falta assets/spec/layers.json');

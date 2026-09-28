@@ -228,6 +228,9 @@ class SessionsViewModel extends ChangeNotifier {
 
   @override
   void dispose() {
+    // Doble dispose (un rebuild que descarta la vista y el cierre del shell a
+    // la vez) reventaba con el assert de `ChangeNotifier`. Ahora es idempotente.
+    if (_disposed) return;
     _disposed = true;
     stopPolling();
     super.dispose();

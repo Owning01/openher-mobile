@@ -132,39 +132,41 @@ class _SessionsViewState extends State<SessionsView> {
 
   @override
   Widget build(BuildContext context) {
-    final vm = widget.viewmodel;
-    return Scaffold(
-      appBar: LayerGate(
-        'sessions.appbar',
-        child: AppBar(
-          title: const Text('Sesiones'),
-          actions: [
-            LayerGate(
-              'sessions.appbar.search',
-              child: AppIconButton(
-                key: SessionsView.searchButtonKey,
-                icon: 'search',
-                tooltip: 'Buscar sesiones',
-                selected: _searchOpen,
-                onPressed: _toggleSearch,
+    // El `ListenableBuilder` envuelve **todo** el Scaffold, app bar incluido:
+    // el botón `+` se deshabilita mientras carga, y si el builder sólo cubriera
+    // el body el app bar quedaría congelado con el `loading` del primer frame.
+    return ListenableBuilder(
+      listenable: widget.viewmodel,
+      builder: (context, _) => Scaffold(
+        appBar: LayerGate(
+          'sessions.appbar',
+          child: AppBar(
+            title: const Text('Sesiones'),
+            actions: [
+              LayerGate(
+                'sessions.appbar.search',
+                child: AppIconButton(
+                  key: SessionsView.searchButtonKey,
+                  icon: 'search',
+                  tooltip: 'Buscar sesiones',
+                  selected: _searchOpen,
+                  onPressed: _toggleSearch,
+                ),
               ),
-            ),
-            LayerGate(
-              'sessions.appbar.add',
-              child: AppIconButton(
-                key: SessionsView.addButtonKey,
-                icon: 'plus',
-                tooltip: 'Nueva sesión',
-                onPressed: vm.loading ? null : _create,
+              LayerGate(
+                'sessions.appbar.add',
+                child: AppIconButton(
+                  key: SessionsView.addButtonKey,
+                  icon: 'plus',
+                  tooltip: 'Nueva sesión',
+                  onPressed: widget.viewmodel.loading ? null : _create,
+                ),
               ),
-            ),
-            const SizedBox(width: AppSpacing.xs),
-          ],
+              const SizedBox(width: AppSpacing.xs),
+            ],
+          ),
         ),
-      ),
-      body: ListenableBuilder(
-        listenable: vm,
-        builder: (context, _) => Column(
+        body: Column(
           children: [
             if (_searchOpen)
               LayerGate(
@@ -172,12 +174,12 @@ class _SessionsViewState extends State<SessionsView> {
                 child: _SearchBar(
                   controller: _query,
                   focusNode: _queryFocus,
-                  onChanged: vm.search,
+                  onChanged: widget.viewmodel.search,
                   onClose: _toggleSearch,
                 ),
               ),
-            if (vm.error != null) _ErrorBanner(vm),
-            Expanded(child: _body(vm)),
+            if (widget.viewmodel.error != null) _ErrorBanner(widget.viewmodel),
+            Expanded(child: _body(widget.viewmodel)),
           ],
         ),
       ),

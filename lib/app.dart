@@ -5,8 +5,10 @@ import 'core/network/server_config.dart';
 import 'data/repositories/session_repository.dart';
 import 'core/storage/creds_store.dart';
 import 'core/storage/prefs_store.dart';
+import 'ui/core/app_icon.dart';
 import 'ui/core/layer_gate.dart';
 import 'ui/core/theme.dart';
+import 'ui/core/tokens.dart';
 import 'ui/features/chat/chat_view.dart';
 import 'ui/features/chat/chat_viewmodel.dart';
 import 'ui/features/connect/connect_view.dart';
@@ -114,6 +116,8 @@ class AppShell extends StatefulWidget {
     required this.creds,
     required this.onProbe,
     required this.onLoggedOut,
+    this.nav,
+    this.chatStreamFactory,
   });
 
   final ServerConfig config;
@@ -126,12 +130,25 @@ class AppShell extends StatefulWidget {
 
   final VoidCallback onLoggedOut;
 
+  /// La pila de navegación. Por defecto es una nueva; se inyecta para que un
+  /// test pueda llevar el shell a un chat abierto sin levantar un server (el
+  /// camino normal, tocar la fila de la lista, necesita datos que no hay).
+  final MobileNav? nav;
+
+  /// Cómo se abre el stream del chat. Por defecto, el SSE real; un test inyecta
+  /// un fake para no dejar un socket ni timers colgados.
+  final ChatEventSourceFactory? chatStreamFactory;
+
+  /// Estado del destino Chat sin ninguna sesión abierta: no hay viewmodel, no
+  /// hay request y se dice qué hacer en vez de mostrar un error de red.
+  static const Key noChatSessionKey = Key('shell-chat-no-session');
+
   @override
   State<AppShell> createState() => _AppShellState();
 }
 
 class _AppShellState extends State<AppShell> {
-  final MobileNav _nav = MobileNav();
+  late final MobileNav _nav = widget.nav ?? MobileNav();
 
   /// Las 94 claves de la spec aprobada, con su default de diseño.
   Future<Map<String, bool>> _loadLayerSpec() async => {
@@ -159,6 +176,7 @@ class _AppShellState extends State<AppShell> {
                   config: widget.config,
                   visible: _nav.tab == MobileTab.chat,
                   onBack: _nav.leaveChat,
+                  streamFactory: widget.chatStreamFactory,
                 ),
                 _FilesTab(config: widget.config),
                 SettingsView(
@@ -234,12 +252,19 @@ class _ChatTab extends StatefulWidget {
     required this.config,
     required this.visible,
     required this.onBack,
+    this.streamFactory,
   });
 
   final String sessionId;
   final ServerConfig config;
   final bool visible;
   final VoidCallback onBack;
+
+  /// Lo inyecta el shell; ver [AppShell.chatStreamFactory].
+  final ChatEventSourceFactory? streamFactory;
+
+  /// Estado sin sesión abierta (prueba de que no se pide nada a un id vacío).
+  static const Key noSessionKey = AppShell.noChatSessionKey;
 
   @override
   State<_ChatTab> createState() => _ChatTabState();
@@ -252,25 +277,38 @@ class _ChatTabState extends State<_ChatTab> {
   void initState() {
     super.initState();
     _openFor(widget.sessionId);
+    // Sin sesión no hay viewmodel que pausar: el `IndexedStack` construye los
+    // 4 destinos aunque no estén al frente, así que esto también evita que el
+    // stream arranque solo por existir.
+    _vm?.setVisible(widget.visible);
   }
 
   @override
   void didUpdateWidget(covariant _ChatTab oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.sessionId != widget.sessionId) _openFor(widget.sessionId);
+    // La visibilidad cambia al cambiar de pestaña, y para eso Flutter llama a
+    // `didUpdateWidget`: `didChangeDependencies` corre UNA vez por `State`, así
+    // que desde ahí el socket y el poll de 2 s seguían vivos con el chat
+    // fuera de pantalla y la regla de batería de `chat_viewmodel` no aplicaba.
+    if (oldWidget.visible != widget.visible) _vm?.setVisible(widget.visible);
   }
 
+  /// Abre (o cierra) el chat de una sesión.
+  ///
+  /// Un id vacío **no** construye viewmodel: `load()` pediría
+  /// `/api/session//message`, una ruta que no existe, en cada arranque y en
+  /// cada `leaveChat()`. Sin sesión se muestra [_ChatNoSession].
   void _openFor(String sessionId) {
     // Una sesión por vez: se descarta la anterior (y su socket con ella).
     _vm?.dispose();
-    _vm = ChatViewModel(ApiClient(config: widget.config), sessionId: sessionId)
-      ..load();
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _vm?.setVisible(widget.visible);
+    _vm = null;
+    if (sessionId.isEmpty) return;
+    _vm = ChatViewModel(
+      ApiClient(config: widget.config),
+      sessionId: sessionId,
+      streamFactory: widget.streamFactory,
+    )..load();
   }
 
   @override
@@ -282,10 +320,51 @@ class _ChatTabState extends State<_ChatTab> {
   @override
   Widget build(BuildContext context) {
     final vm = _vm;
-    if (vm == null) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
+    if (vm == null) return const _ChatNoSession();
     return ChatView(viewModel: vm, onBack: widget.onBack);
+  }
+}
+
+/// El destino Chat sin ninguna sesión abierta.
+///
+/// Es un estado real, no un error: la lista de sesiones es la que lleva al
+/// chat, así que esto sólo se ve en el `IndexedStack` del arranque. Lo que
+/// **no** se hace es pedir mensajes de un id inexistente para poder mostrar
+/// algo.
+class _ChatNoSession extends StatelessWidget {
+  const _ChatNoSession();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      body: Center(
+        key: _ChatTab.noSessionKey,
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.xxl),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AppIcon(
+                'message-square',
+                size: 48,
+                color: theme.colorScheme.onSurfaceVariant.withValues(
+                  alpha: 0.7,
+                ),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              Text('Sin sesión abierta', style: theme.textTheme.titleMedium),
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                'Elegí una sesión de la lista para ver su chat.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

@@ -13,7 +13,6 @@ class LayerSpec {
   final bool defaultOn;
   final String label;
 
-  /// Identificador de widget para los tests: `layer:<key>`.
   @override
   String toString() => 'layer:$key';
 }
@@ -32,9 +31,9 @@ class LayerCatalog extends ChangeNotifier {
 
   static const String assetPath = 'assets/spec/layers.json';
 
-  /// Se inyecta en `main()` (o en tests) antes de usar la app.
   static LayerCatalog? _instance;
 
+  /// El catálogo, o error si nadie lo cargó. Usá [maybeInstance] desde widgets.
   static LayerCatalog get instance {
     final c = _instance;
     if (c == null) {
@@ -44,6 +43,11 @@ class LayerCatalog extends ChangeNotifier {
     }
     return c;
   }
+
+  /// El catálogo si ya se cargó, o `null`. Lo usa [LayerGate] para no romper
+  /// una pantalla montada sin bootstrap (tests, o un widget suelto): sin
+  /// catálogo, todas las capas cuentan como encendidas.
+  static LayerCatalog? get maybeInstance => _instance;
 
   /// Inyecta (o limpia, con `null`) el catálogo. Sólo para tests.
   @visibleForTesting
@@ -116,7 +120,14 @@ class LayerCatalog extends ChangeNotifier {
 ///
 /// Es el equivalente en Flutter del `[data-layer]` del prototipo: el mismo
 /// sistema de toggles, pero dentro de la app real.
-class LayerGate extends StatelessWidget {
+///
+/// Implementa [PreferredSizeWidget] para poder envolver también un `AppBar`
+/// (o cualquier `appBar:` de un Scaffold): si la capa está apagada, la altura
+/// preferida es 0 y el Scaffold no reserva espacio.
+///
+/// **Fail-open**: si el catálogo no se cargó, la capa cuenta como encendida,
+/// para que montar un widget suelto (o un test) no lo haga desaparecer.
+class LayerGate extends StatelessWidget implements PreferredSizeWidget {
   const LayerGate(this.layerKey, {super.key, required this.child});
 
   /// Clave de la capa en `spec/layers.json` (p.ej. `chat.appbar.title`).
@@ -124,8 +135,17 @@ class LayerGate extends StatelessWidget {
   final Widget child;
 
   @override
+  Size get preferredSize {
+    final catalog = LayerCatalog.maybeInstance;
+    if (catalog == null || !catalog.isOn(layerKey)) return Size.zero;
+    final w = child;
+    return w is PreferredSizeWidget ? w.preferredSize : Size.zero;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final catalog = LayerCatalog.instance;
+    final catalog = LayerCatalog.maybeInstance;
+    if (catalog == null) return child;
     return ListenableBuilder(
       listenable: catalog,
       builder: (context, _) =>
