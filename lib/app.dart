@@ -8,6 +8,7 @@ import 'core/storage/prefs_store.dart';
 import 'ui/core/layer_gate.dart';
 import 'ui/core/theme.dart';
 import 'ui/features/connect/connect_view.dart';
+import 'ui/features/files/files_view.dart';
 import 'ui/features/navigation/mobile_bottom_nav.dart';
 import 'ui/features/navigation/mobile_nav.dart';
 import 'ui/features/sessions/sessions_view.dart';
@@ -152,7 +153,7 @@ class _AppShellState extends State<AppShell> {
               children: [
                 _SessionsTab(config: widget.config, onOpen: _nav.openSession),
                 const _ChatTab(),
-                const _FilesTab(),
+                _FilesTab(config: widget.config),
                 SettingsView(
                   config: widget.config,
                   prefs: widget.prefs,
@@ -223,11 +224,34 @@ class _ChatTab extends StatelessWidget {
       const Scaffold(body: Center(child: Text('Chat')));
 }
 
-/// Los archivos también entran por su worker; placeholder explícito.
-class _FilesTab extends StatelessWidget {
-  const _FilesTab();
+/// Archivos: explorar el workspace del server y mandar un path al chat.
+class _FilesTab extends StatefulWidget {
+  const _FilesTab({required this.config});
+
+  final ServerConfig config;
 
   @override
-  Widget build(BuildContext context) =>
-      const Scaffold(body: Center(child: Text('Archivos')));
+  State<_FilesTab> createState() => _FilesTabState();
+}
+
+class _FilesTabState extends State<_FilesTab> {
+  final List<String> _pendingForChat = [];
+
+  @override
+  Widget build(BuildContext context) {
+    return FilesView(
+      config: widget.config,
+      onAddToChat: (path) {
+        // El chat todavía no está cableado (M4): guardamos el path para que
+        // el composer lo reciba en cuanto aterrice, en vez de perderlo.
+        _pendingForChat.add(path);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Se mandará al chat: $path'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      },
+    );
+  }
 }
