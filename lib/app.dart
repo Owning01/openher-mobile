@@ -159,7 +159,7 @@ class AppShell extends StatefulWidget {
     required this.prefs,
     required this.creds,
     required this.onProbe,
-    required this.onThemeVariant,
+    this.onThemeVariant,
     required this.onLoggedOut,
     this.nav,
     this.chatStreamFactory,
@@ -175,7 +175,13 @@ class AppShell extends StatefulWidget {
   final ServerProbe onProbe;
 
   /// Ajustes -> Apariencia -> Tema de color. Repinta en vivo.
-  final ValueChanged<String> onThemeVariant;
+  /// Ajustes -> Apariencia -> Tema de color. Repinta en vivo.
+  ///
+  /// Opcional a propósito: el tema tambien se aplica solo al arrancar
+  /// (se lee de las prefs), asi que un AppShell sin selector de tema
+  /// es una app perfectamente válida -- y obligarlo a inventar un
+  /// callback rompe a quien arma el shell en un test sin necesitarlo.
+  final ValueChanged<String>? onThemeVariant;
 
   final VoidCallback onLoggedOut;
 

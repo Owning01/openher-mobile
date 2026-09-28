@@ -14,10 +14,13 @@
 ///
 /// ## Markdown
 /// El texto del asistente se renderiza con `flutter_markdown_plus` (el sucesor
-/// mantenido de `flutter_markdown`, que quedó discontinuado): párrafos, listas
-/// anidadas, tablas, citas y **bloques de código**, que en un chat de agente es
-/// lo que más se ve. `MarkdownText` (abajo) es el wrapper que memoiza por
-/// firma: si el texto no cambió, se devuelve el mismo subtree.
+/// mantenido de `flutter_markdown`, que quedó discontinuado), pero **con hoja de
+/// estilos propia**: `MarkdownStyleSheet.fromTheme` deja los valores por defecto
+/// de Material (8 px entre bloques, viñeta `•`, sangría de 24 px, celdas de
+/// tabla de 16 px, `hr` de 5 px) y eso es justo lo que hace que el markdown se
+/// vea genérico y distinto de la maqueta. Acá todo sale de `tokens.dart` —
+/// ver `_markdownSheet`. [MarkdownText] además memoiza por firma: si el texto no
+/// cambió, se devuelve el mismo subtree.
 library;
 
 import 'dart:convert';
@@ -25,6 +28,10 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+// `markdown` es dependencia transitiva de flutter_markdown_plus (misma versión
+// que exponen sus firmas de MarkdownElementBuilder); no se declara en pubspec.
+// ignore: depend_on_referenced_packages
+import 'package:markdown/markdown.dart' as md;
 
 import '../../../domain/models/errors.dart';
 import '../../../domain/models/message.dart';
@@ -144,12 +151,22 @@ class MessageBubble extends StatelessWidget {
     final error = assistant.error;
     if (error != null) children.add(_errorCard(context, error));
 
-    children.add(
-      LayerGate(
-        'chat.msg.assistant',
-        child: MarkdownText(assistant.textContent),
-      ),
-    );
+    // El texto va con la capa que lo corresponde: mientras el turno escribe es
+    // la línea de streaming (`.streamline`, texto plano), y recién al terminar
+    // el mensaje es markdown (`chat.msg.assistant`). Parsear markdown en cada
+    // delta es además el mayor costo de scroll del chat.
+    final streaming = working && !assistant.isComplete;
+    final text = assistant.textContent;
+    if (text.trim().isNotEmpty) {
+      children.add(
+        streaming
+            ? LayerGate(
+                'chat.stream.text',
+                child: MarkdownText(text, streaming: true),
+              )
+            : LayerGate('chat.msg.assistant', child: MarkdownText(text)),
+      );
+    }
 
     // Los puntos sólo mientras el texto aún no llegó: si hay algo escrito, el
     // texto ES el indicador. Y con una pregunta esperando tampoco: el modelo no
@@ -159,17 +176,26 @@ class MessageBubble extends StatelessWidget {
       children.add(const LayerGate('chat.typing', child: TypingDots()));
     }
 
+    // `.msg{gap:6px}` del prototipo: sin esto la caja de actividad queda
+    // pegada al texto y el error pegado a la card de pregunta.
+    final spaced = <Widget>[];
+    for (final child in children) {
+      if (spaced.isNotEmpty) spaced.add(const SizedBox(height: AppSpacing.sm));
+      spaced.add(child);
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
-      children: children,
+      children: spaced,
     );
   }
 
   // ─────────────────────────── usuario ───────────────────────────
 
   Widget _user(BuildContext context, UserMessage user) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final bubble = Container(
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.md,
@@ -194,7 +220,11 @@ class MessageBubble extends StatelessWidget {
           if (user.files.isNotEmpty) const SizedBox(height: 6),
           Text(
             user.text,
-            style: TextStyle(fontSize: 13, color: scheme.onPrimary),
+            // El cuerpo del tema (13/1.5) con el color del chip: el `Text` solo
+            // con `fontSize` heredaba el alto de línea de otra base.
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: scheme.onPrimary,
+            ),
           ),
         ],
       ),
@@ -202,17 +232,29 @@ class MessageBubble extends StatelessWidget {
 
     return LayerGate(
       'chat.msg.user.bubble',
-      child: Align(
-        alignment: Alignment.centerRight,
-        child: FractionallySizedBox(
-          // `max-width: 88%` del CSS: la burbuja larga no barre la pantalla.
-          widthFactor: 0.88,
+      // `max-width:88%` del CSS: la burbuja larga no barre la pantalla. Es un
+      // tope, no un ancho — con `FractionallySizedBox` hasta un "hola" salía
+      // con el 88% del ancho. El `LayoutBuilder` mide el ancho disponible (el
+      // del área de chat, ya sin el padding del scroll) en vez de el de la
+      // pantalla, que incluye la barra de sistema.
+      child: LayoutBuilder(
+        builder: (context, constraints) => Align(
           alignment: Alignment.centerRight,
-          child: bubble,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: constraints.maxWidth.isFinite
+                  ? constraints.maxWidth * _userMaxWidth
+                  : double.infinity,
+            ),
+            child: bubble,
+          ),
         ),
       ),
     );
   }
+
+  /// `max-width:88%` de `.bubble` (`prototype/mobile.html:247`).
+  static const double _userMaxWidth = 0.88;
 
   /// `chat.msg.user.attachment`: miniatura de 120×90 con el nombre abajo a la
   /// derecha, como el `.att` del prototipo. SVG, nunca emoji ni Material icon.
@@ -226,7 +268,7 @@ class MessageBubble extends StatelessWidget {
         children: [
           for (final file in files)
             Padding(
-              padding: const EdgeInsets.only(bottom: 4),
+              padding: const EdgeInsets.only(bottom: AppSpacing.xs),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 mainAxisSize: MainAxisSize.min,
@@ -247,11 +289,19 @@ class MessageBubble extends StatelessWidget {
                       ),
                     ),
                   ),
-                  Text(
-                    file.name ?? file.uri.split('/').last,
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: scheme.onSurfaceVariant,
+                  // `.attname`: vive dentro de la burbuja `primary`, así que el
+                  // nombre va en `on-primary` al 80% — en gris se perdía contra
+                  // el fondo del chip. Los 3 px de `margin-top` son los del
+                  // CSS (:253): no hay token de 3, y `.syspill` usa el mismo.
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      file.name ?? file.uri.split('/').last,
+                      style: TextStyle(
+                        fontSize: 11,
+                        height: 1.4,
+                        color: scheme.onPrimary.withValues(alpha: 0.8),
+                      ),
                     ),
                   ),
                 ],
@@ -270,9 +320,19 @@ class MessageBubble extends StatelessWidget {
   /// `alert-triangle` y el `name: message` del server. Ojo: en v2 el
   /// discriminador viene en `type` y `OcErrorInfo` ya resuelve `name ?? type`
   /// (API_CONTRACT.md §7.1bis).
+  ///
+  /// El color es el `--danger` del prototipo (`#E11D48` / `#FB7185`), que en
+  /// `tokens.dart` es el rojo del scope de diffs — el mismo que ya usa el botón
+  /// Detener del composer. Con el `danger` gris del chrome, el error del
+  /// provider y el error de una tool se veían como dos cosas distintas y el
+  /// Detener era el único botón de color de la pantalla.
   Widget _errorCard(BuildContext context, OcErrorInfo error) {
     final scheme = Theme.of(context).colorScheme;
-    final danger = AppColors.dangerOf(Theme.of(context).brightness);
+    final brightness = Theme.of(context).brightness;
+    final danger = AppColors.diffDelOf(brightness);
+    final dangerSoft = brightness == Brightness.dark
+        ? AppColors.diffDelSoftDark
+        : AppColors.diffDelSoft;
     return LayerGate(
       'chat.msg.error',
       child: Container(
@@ -281,9 +341,10 @@ class MessageBubble extends StatelessWidget {
           vertical: AppSpacing.sm,
         ),
         decoration: BoxDecoration(
-          borderRadius: AppRadius.mdAll,
+          // `.errcard`: `--r3` (8), no `--r2`.
+          borderRadius: AppRadius.lgAll,
           border: Border.all(color: danger),
-          color: scheme.surfaceContainerHighest,
+          color: dangerSoft,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -311,6 +372,7 @@ class MessageBubble extends StatelessWidget {
               style: TextStyle(
                 fontFamily: 'monospace',
                 fontSize: 11.5,
+                height: 1.55,
                 color: scheme.onSurface,
               ),
             ),
@@ -321,6 +383,10 @@ class MessageBubble extends StatelessWidget {
   }
 
   /// `.syspill`: píldora centrada delgada de 12 px.
+  ///
+  /// Sin margen propio: la separación entre mensajes la pone el `ListView`
+  /// (12 px, el `gap` de `.chat-scroll`), y con los 4 px de acá las píldoras
+  /// quedaban a 20 px de sus vecinas.
   Widget _pill(BuildContext context, String text) {
     if (text.isEmpty) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
@@ -328,7 +394,6 @@ class MessageBubble extends StatelessWidget {
       'chat.msg.system',
       child: Center(
         child: Container(
-          margin: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
           decoration: BoxDecoration(
             color: scheme.surfaceContainer,
@@ -339,7 +404,11 @@ class MessageBubble extends StatelessWidget {
             textAlign: TextAlign.center,
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.4,
+              color: scheme.onSurfaceVariant,
+            ),
           ),
         ),
       ),
@@ -405,14 +474,21 @@ Map<String, Object?>? _jsonObject(String raw) {
   }
 }
 
-// ─────────────────────────── markdown mínimo ───────────────────────────
+// ─────────────────────────── markdown del asistente ─────────────────────────
 
 /// Markdown del texto del asistente.
 ///
 /// `flutter_markdown_plus` (el sucesor mantenido de `flutter_markdown`, que
-/// quedó discontinuado) trae títulos, listas anidadas, tablas y **bloques de
-/// código** — que en un chat de agente es lo que más se ve. El renderer
+/// quedó discontinuado) trae títulos, listas anidadas, tablas, citas y **bloques
+/// de código** — que en un chat de agente es lo que más se ve. El renderer
 /// anterior sólo cubría párrafos, listas y `código` en línea.
+///
+/// Los estilos **no** salen de `MarkdownStyleSheet.fromTheme`: sus defaults
+/// (viñeta `•` de 24 px, 8 px entre bloques, celdas de tabla de 16 px, `hr` de
+/// 5 px, `code` inline como un simple fondo sin borde) son los que hacían que
+/// esto se viera como un `Text` de Material y no como la maqueta. Todo sale de
+/// tokens en [_markdownSheet], [_CodeBlockBuilder], [_InlineCodeBuilder] y
+/// [_bullet].
 ///
 /// La memoización por firma se conserva (es el costo #1 del render con 500
 /// mensajes, plan §4): si el texto no cambió, se devuelve **la misma**
@@ -421,76 +497,318 @@ Map<String, Object?>? _jsonObject(String raw) {
 /// Es público y sin `const` a propósito: el memo vive en el estado, así que
 /// el widget tiene que ser estable entre rebuilds.
 class MarkdownText extends StatefulWidget {
-  const MarkdownText(this.text, {super.key});
+  const MarkdownText(this.text, {super.key, this.streaming = false});
 
   final String text;
+
+  /// El turno sigue escribiendo: se pinta **texto plano** (`.streamline` del
+  /// prototipo y el `streaming` del cliente desktop). Parsear markdown en cada
+  /// delta, además de costly, hace parpadear los títulos y las listas a medio
+  /// construir; el markdown rico entra al terminar el turno.
+  final bool streaming;
 
   @override
   State<MarkdownText> createState() => _MarkdownTextState();
 }
 
 class _MarkdownTextState extends State<MarkdownText> {
-  /// Firma de lo renderizado (texto + estilo). Si no cambia, se reutiliza el
-  /// subtree entero. El separador \u0000 evita que dos textos distintos den la
-  /// misma firma al concatenarse.
+  /// Firma de lo renderizado (texto + modo + estilo). Si no cambia, se
+  /// reutiliza el subtree entero. El separador \u0000 evita que dos textos
+  /// distintos den la misma firma al concatenarse.
   String? _signature;
   Widget? _cached;
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // El tema entra al subárbol renderizado (colores, brillo y la escala de
+    // texto del sistema): si cambia, el memo quedó rancio. La firma también,
+    // o `build` devolvería el caché que acabamos de tirar.
+    _signature = null;
+    _cached = null;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final style = theme.textTheme.bodyMedium!;
+    final body = widget.text.trim();
+    if (body.isEmpty) return const SizedBox.shrink();
+    final style = Theme.of(context).textTheme.bodyMedium!;
     final signature =
-        '${widget.text}\u0000${style.color}\u0000${style.fontSize}';
+        '${widget.text}\u0000${widget.streaming}\u0000${style.color}\u0000'
+        '${style.fontSize}\u0000${MediaQuery.textScalerOf(context).scale(13)}';
     if (signature != _signature) {
       _signature = signature;
-      _cached = _render(context, style);
+      _cached = _render(context, body);
     }
     return _cached ?? const SizedBox.shrink();
   }
 
-  Widget _render(BuildContext context, TextStyle style) {
-    final body = widget.text.trim();
-    if (body.isEmpty) return const SizedBox.shrink();
+  Widget _render(BuildContext context, String body) {
     final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
-    final codeBg = isDark ? AppColors.darkCodeBg : AppColors.lightCodeBg;
-
+    if (widget.streaming) {
+      // `.streamline` del prototipo: una línea de texto del mismo cuerpo, sin
+      // parsear nada.
+      return Text(body, style: theme.textTheme.bodyMedium);
+    }
+    final muted = theme.colorScheme.onSurfaceVariant;
+    final base = theme.textTheme.bodyMedium!;
     return MarkdownBody(
       data: body,
-      // El padding del body lo pone la burbuja: acá 0 para no duplicar.
-      selectable: false,
-      shrinkWrap: true,
-      styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
-        p: style,
-        a: style.copyWith(
-          color: theme.colorScheme.primary,
-          decoration: TextDecoration.underline,
+      // Seleccionable, como el cliente desktop: en un chat lo que uno quiere es
+      // copiar el fragmento, no el mensaje entero.
+      selectable: true,
+      styleSheet: _markdownSheet(context),
+      builders: {'pre': _CodeBlockBuilder(), 'code': _InlineCodeBuilder()},
+      bulletBuilder: (parameters) => _bullet(parameters, base, muted),
+      // La viñeta va arriba de la primera línea (`.ai li::before`), no en la
+      // línea base: el punto es una caja sin texto y no tiene base que alinear.
+      listItemCrossAxisAlignment: MarkdownListItemCrossAxisAlignment.start,
+    );
+  }
+}
+
+/// La hoja de estilos del markdown del chat.
+///
+/// Cada valor sale de un token o de una regla medida del prototipo
+/// (`prototype/mobile.html`) o del cliente desktop, y está anotado con su
+/// origen. Lo que no se usa son los defaults de `fromTheme`, que es
+/// exactamente lo que había que cambiar.
+MarkdownStyleSheet _markdownSheet(BuildContext context) {
+  final theme = Theme.of(context);
+  final scheme = theme.colorScheme;
+  final dark = theme.brightness == Brightness.dark;
+  final muted = scheme.onSurfaceVariant;
+  final mutedStrong = dark
+      ? AppColors.darkMutedStrong
+      : AppColors.lightMutedStrong;
+  // `.ai` (:254): 13 px sobre `--text`, que es el `bodyMedium` del tema.
+  final base = theme.textTheme.bodyMedium!;
+
+  // Escala de encabezados: los ratios del `chat.css` del cliente desktop
+  // (18.4/16.8/15.2/14.08 sobre 14 px) llevados al cuerpo de 13 px. Con los
+  // títulos del tema (que colapsan display/headline/title a 14 px) un `#` se
+  // veía del mismo tamaño que el párrafo.
+  TextStyle heading(double ratio) => base.copyWith(
+    fontSize: (base.fontSize! * ratio).roundToDouble(),
+    height: 1.35,
+    fontWeight: FontWeight.w700,
+  );
+
+  return MarkdownStyleSheet.fromTheme(theme).copyWith(
+    p: base,
+    a: base.copyWith(
+      color: scheme.primary,
+      decoration: TextDecoration.underline,
+    ),
+    strong: base.copyWith(fontWeight: FontWeight.w700),
+    // 8 px entre bloques: el mismo default del cliente desktop. Con 0 los
+    // párrafos quedan pegados.
+    blockSpacing: AppSpacing.sm,
+    // `.ai li{gap:7px}` con un punto de 4 px: cada nivel sangra 4 + 7.
+    listIndent: AppSpacing.xs,
+    listBulletPadding: const EdgeInsets.only(right: 7),
+    listBullet: base,
+    h1: heading(1.31),
+    h2: heading(1.2),
+    h3: heading(1.09),
+    h4: heading(1),
+    h5: heading(1),
+    h6: heading(1),
+    // Cita: filete de 2 px a la izquierda y `--muted` para el texto, como el
+    // cliente desktop. El default (relleno `surfaceContainerHighest` + radio 3
+    // + filete de 3 px) es el look "Material".
+    blockquote: base.copyWith(color: muted),
+    blockquoteDecoration: BoxDecoration(
+      border: Border(left: BorderSide(color: muted, width: 2)),
+    ),
+    blockquotePadding: const EdgeInsets.only(left: AppSpacing.md),
+    // El chip inline lo pinta el builder (`code.chip` lleva borde, padding y
+    // radio, que un `TextStyle` no puede expresar). El estilo queda como base
+    // y para el texto que el builder no cubre.
+    code: TextStyle(
+      fontFamily: 'monospace',
+      fontSize: 11.5,
+      height: 1.55,
+      color: mutedStrong,
+      backgroundColor: dark ? AppColors.darkCodeBg : AppColors.lightCodeBg,
+    ),
+    // El bloque lo arma `_CodeBlockBuilder`; el paquete envuelve lo que
+    // devuelva con este `Container`, así que va vacío para no duplicar fondo,
+    // radio ni padding.
+    codeblockDecoration: const BoxDecoration(),
+    codeblockPadding: EdgeInsets.zero,
+    // `fromTheme` pone un filete de 5 px: en un chat se lee como un bloque.
+    horizontalRuleDecoration: BoxDecoration(
+      border: Border(top: BorderSide(color: scheme.outline, width: 1)),
+    ),
+    tableHead: base.copyWith(fontWeight: FontWeight.w700),
+    tableBody: base,
+    tableBorder: TableBorder.all(color: scheme.outline, width: 1),
+    // `fromTheme` deja 16 px horizontales: en 360 px una tabla de dos columnas
+    // no entra. 10/6 es lo que usa el cliente desktop.
+    tableCellsPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    // El ancho intrínseco es lo que hace que la tabla scrollee en horizontal
+    // en vez de reventar el ancho de la burbuja.
+    tableColumnWidth: const IntrinsicColumnWidth(),
+    // El paquete fusiona esta hoja con la del tema y en el merge el
+    // `textScaler` lo gana el lado derecho: sin pasarlo explícitamente, el
+    // tamaño de fuente del sistema se pierde en todo el texto del asistente.
+    textScaler: MediaQuery.textScalerOf(context),
+  );
+}
+
+/// La viñeta de las listas.
+///
+/// El default del paquete es un `•` de 13 px, que pesa más que el texto y deja
+/// la lista desalineada. `.ai li::before` (`prototype/mobile.html:258`) es un
+/// punto de 4 px en `--muted` a 7 px de la primera línea.
+Widget _bullet(
+  MarkdownBulletParameters parameters,
+  TextStyle base,
+  Color muted,
+) {
+  if (parameters.style == BulletStyle.orderedList) {
+    return Text(
+      '${parameters.index + 1}.',
+      textAlign: TextAlign.right,
+      style: base.copyWith(color: muted),
+    );
+  }
+  return Padding(
+    padding: const EdgeInsets.only(top: 7),
+    child: Container(
+      width: 4,
+      height: 4,
+      decoration: BoxDecoration(color: muted, shape: BoxShape.circle),
+    ),
+  );
+}
+
+/// Bloque de código (`` ``` ``): `--code-bg`, borde `--border`, radio `--r2`,
+/// 11.5 px monoespaciados en `--code-text`.
+///
+/// El default del paquete mete el texto en un `SingleChildScrollView`
+/// horizontal **sin tope de alto** y con el `code` inline de fondo: un bloque
+/// largo estira la lista de mensajes entera.
+class _CodeBlockBuilder extends MarkdownElementBuilder {
+  // Sin `const`: `MarkdownElementBuilder` no tiene constructor const.
+  _CodeBlockBuilder();
+
+  @override
+  bool isBlockElement() => true;
+
+  /// El texto del fence entra por acá. El placeholder vacío es obligatorio: si
+  /// además se texturiza, el paquete lo vuelca como bloque propio y el código
+  /// sale dos veces.
+  @override
+  Widget? visitText(md.Text text, TextStyle? preferredStyle) =>
+      const SizedBox.shrink();
+
+  @override
+  Widget? visitElementAfterWithContext(
+    BuildContext context,
+    md.Element element,
+    TextStyle? preferredStyle,
+    TextStyle? parentStyle,
+  ) {
+    final code = element.textContent;
+    return _CodeBlock(
+      code: code.endsWith('\n') ? code.substring(0, code.length - 1) : code,
+    );
+  }
+}
+
+class _CodeBlock extends StatelessWidget {
+  const _CodeBlock({required this.code});
+
+  final String code;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final dark = theme.brightness == Brightness.dark;
+    return Container(
+      margin: const EdgeInsets.only(top: AppSpacing.xs),
+      decoration: BoxDecoration(
+        color: dark ? AppColors.darkCodeBg : AppColors.lightCodeBg,
+        border: Border.all(color: theme.colorScheme.outline),
+        borderRadius: AppRadius.mdAll,
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        // `.codeblock{max-height:190px;overflow:auto}` (:299-302): el mismo
+        // tope que usa la salida de una tool.
+        constraints: const BoxConstraints(maxHeight: 190),
+        child: SingleChildScrollView(
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Padding(
+              padding: const EdgeInsets.all(AppSpacing.sm),
+              // `softWrap:false` + scroll horizontal: una línea larga scrollea
+              // en vez de desbordar la burbuja.
+              child: Text(
+                code,
+                softWrap: false,
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11.5,
+                  height: 1.55,
+                  color: dark
+                      ? AppColors.darkCodeText
+                      : AppColors.lightCodeText,
+                ),
+              ),
+            ),
+          ),
         ),
-        code: TextStyle(
-          fontFamily: 'monospace',
-          fontSize: 11.5,
-          color: theme.colorScheme.onSurfaceVariant,
-          backgroundColor: codeBg,
+      ),
+    );
+  }
+}
+
+/// `code` en línea: el chip de `prototype/mobile.html:259-262`.
+///
+/// Un `TextStyle` sólo puede pintar el fondo de los glifos, así que el borde
+/// de 1 px, el padding de 1/5 y el radio de `--r1` necesitan un widget: sin
+/// esto el código en línea salía como texto mono pelado.
+class _InlineCodeBuilder extends MarkdownElementBuilder {
+  // Sin `const`: `MarkdownElementBuilder` no tiene constructor const.
+  _InlineCodeBuilder();
+
+  @override
+  Widget? visitElementAfterWithContext(
+    BuildContext context,
+    md.Element element,
+    TextStyle? preferredStyle,
+    TextStyle? parentStyle,
+  ) => _CodeChip(code: element.textContent, style: preferredStyle);
+}
+
+class _CodeChip extends StatelessWidget {
+  const _CodeChip({required this.code, this.style});
+
+  final String code;
+  final TextStyle? style;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final dark = theme.brightness == Brightness.dark;
+    return Container(
+      // 1 px / 5 px son los del CSS; no hay token de 1 ni de 5.
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: dark ? AppColors.darkCodeBg : AppColors.lightCodeBg,
+        border: Border.all(color: theme.colorScheme.outline),
+        borderRadius: AppRadius.smAll,
+      ),
+      // El fondo lo pone la decoración: el del estilo se descarta para que no
+      // se vea un rectángulo detrás de otro.
+      child: Text(
+        code,
+        style: (style ?? const TextStyle()).copyWith(
+          backgroundColor: Colors.transparent,
         ),
-        codeblockDecoration: BoxDecoration(
-          color: codeBg,
-          borderRadius: AppRadius.smAll,
-        ),
-        codeblockPadding: const EdgeInsets.all(AppSpacing.sm),
-        blockquoteDecoration: BoxDecoration(
-          color: theme.colorScheme.surfaceContainerHighest,
-          borderRadius: AppRadius.smAll,
-        ),
-        blockquotePadding: const EdgeInsets.all(AppSpacing.sm),
-        // Tablas y código largo scrollean: en 360 px no entran.
-        tableBorder: TableBorder.all(color: theme.dividerColor, width: 1),
-        tableCellsPadding: const EdgeInsets.all(6),
-        tableColumnWidth: const IntrinsicColumnWidth(),
-        h1: style.copyWith(fontSize: 20, fontWeight: FontWeight.w700),
-        h2: style.copyWith(fontSize: 18, fontWeight: FontWeight.w700),
-        h3: style.copyWith(fontSize: 16, fontWeight: FontWeight.w600),
-        listBullet: style.copyWith(color: theme.colorScheme.onSurfaceVariant),
       ),
     );
   }
@@ -544,56 +862,91 @@ class _QuestionCardState extends State<QuestionCard> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final mutedStrong = theme.brightness == Brightness.dark
+        ? AppColors.darkMutedStrong
+        : AppColors.lightMutedStrong;
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+      // El margen vertical lo pone el `.msg` del chat (6 px entre hijos).
       decoration: BoxDecoration(
         color: scheme.surface,
-        borderRadius: AppRadius.mdAll,
+        borderRadius: AppRadius.lgAll,
         border: Border.all(color: scheme.outlineVariant),
       ),
+      clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              AppSpacing.md,
-              AppSpacing.sm,
-              AppSpacing.sm,
-              AppSpacing.sm,
+          // `.qhead` (:314): banda `surface-subtle` con filete abajo, rótulo en
+          // mayúsculas de 11 px.
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.md,
+              vertical: AppSpacing.sm,
+            ),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerLow,
+              border: Border(bottom: BorderSide(color: scheme.outline)),
             ),
             child: Row(
               children: [
-                AppIcon('message-square', size: 16),
+                AppIcon('message-square', size: 16, color: mutedStrong),
                 const SizedBox(width: 6),
-                Text(
-                  widget.header,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                    color: scheme.onSurface,
+                Expanded(
+                  child: Text(
+                    // El texto va **tal cual** lo mandó el modelo: `.qhead` del
+                    // prototipo lo pasa por `text-transform:uppercase`, que en
+                    // Flutter no existe como estilo (habría que recorrer la
+                    // cadena) y rompería el rótulo que el agente escribió. La
+                    // banda, el filete y la escala de 11 px w700 ya dan la
+                    // lectura de "rótulo".
+                    widget.header,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      height: 1.3,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.66,
+                      color: mutedStrong,
+                    ),
                   ),
                 ),
               ],
             ),
           ),
-          if (widget.question.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                AppSpacing.md,
-                0,
-                AppSpacing.md,
-                AppSpacing.sm,
-              ),
-              child: Text(
-                widget.question,
-                style: TextStyle(fontSize: 13, color: scheme.onSurface),
-              ),
-            ),
-          for (var i = 0; i < widget.options.length; i++) _option(context, i),
+          // `.qbody` (:315): 12 px de padding y 8 px entre los hijos.
           Padding(
-            padding: const EdgeInsets.all(AppSpacing.sm),
+            padding: const EdgeInsets.all(AppSpacing.md),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.question.isNotEmpty) ...[
+                  Text(
+                    widget.question,
+                    style: TextStyle(fontSize: 13, color: scheme.onSurface),
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                ],
+                for (var i = 0; i < widget.options.length; i++) ...[
+                  _option(context, i),
+                  if (i != widget.options.length - 1)
+                    const SizedBox(height: AppSpacing.sm),
+                ],
+              ],
+            ),
+          ),
+          // `.qactions` (:325-326): 12 px laterales, 12 abajo, botones de 36 px.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.md,
+              0,
+              AppSpacing.md,
+              AppSpacing.md,
+            ),
             child: Row(
               children: [
                 Expanded(
@@ -601,6 +954,8 @@ class _QuestionCardState extends State<QuestionCard> {
                     key: QuestionCard.submitKey,
                     label: 'Enviar',
                     primary: true,
+                    // `.qactions .ghostbtn{height:36px}`.
+                    height: 36,
                     onTap: _selected.isEmpty
                         ? null
                         : () => widget.onSubmit?.call(_answers()),
@@ -611,6 +966,7 @@ class _QuestionCardState extends State<QuestionCard> {
                   child: _GhostButton(
                     key: QuestionCard.skipKey,
                     label: 'Ahora no',
+                    height: 36,
                     onTap: () => widget.onSkip?.call(const <String>[]),
                   ),
                 ),
@@ -622,60 +978,78 @@ class _QuestionCardState extends State<QuestionCard> {
     );
   }
 
+  /// `.qopt` (:317-323): fila con borde y radio, `primary-soft` marcada, y un
+  /// radio de 16 px con punto de 8 px adentro. Antes era un `InkWell` sin borde
+  /// con un círculo de 12 px, que no se leía como opción.
   Widget _option(BuildContext context, int index) {
     final option = widget.options[index];
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final picked = _selected.contains(index);
-    return InkWell(
-      onTap: () => setState(() {
-        if (!picked) {
-          _selected.add(index);
-        } else {
-          _selected.remove(index);
-        }
-      }),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.md,
-          vertical: 6,
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 12,
-              height: 12,
-              margin: const EdgeInsets.only(top: 3),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: picked ? scheme.primary : scheme.outlineVariant,
-                  width: picked ? 4 : 1,
-                ),
+    // `--primary-soft` de `.qopt[aria-checked="true"]`.
+    final soft = theme.brightness == Brightness.dark
+        ? AppColors.darkPrimarySoft
+        : AppColors.lightPrimarySoft;
+    return Semantics(
+      button: true,
+      selected: picked,
+      child: Material(
+        color: picked ? soft : scheme.surface,
+        borderRadius: AppRadius.mdAll,
+        child: InkWell(
+          onTap: () => setState(() {
+            if (!picked) {
+              _selected.add(index);
+            } else {
+              _selected.remove(index);
+            }
+          }),
+          borderRadius: AppRadius.mdAll,
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 10,
+              vertical: AppSpacing.sm,
+            ),
+            decoration: BoxDecoration(
+              borderRadius: AppRadius.mdAll,
+              border: Border.all(
+                color: picked ? scheme.primary : scheme.outline,
               ),
             ),
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    option.label,
-                    style: TextStyle(fontSize: 13, color: scheme.onSurface),
-                  ),
-                  if (option.detail case final String detail)
-                    Text(
-                      detail,
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: scheme.onSurfaceVariant,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _Radio(picked: picked),
+                const SizedBox(width: AppSpacing.sm),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        option.label,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          color: scheme.onSurface,
+                        ),
                       ),
-                    ),
-                ],
-              ),
+                      if (option.detail case final String detail) ...[
+                        const SizedBox(height: 1),
+                        Text(
+                          detail,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -686,29 +1060,75 @@ class _QuestionCardState extends State<QuestionCard> {
   ];
 }
 
+/// `.radio` (:320-322): círculo de 16 px con filete de 1.5 px y, marcada, un
+/// punto de 8 px adentro.
+class _Radio extends StatelessWidget {
+  const _Radio({required this.picked});
+
+  final bool picked;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: 16,
+      height: 16,
+      margin: const EdgeInsets.only(top: 2),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: picked ? scheme.primary : scheme.outlineVariant,
+          width: 1.5,
+        ),
+      ),
+      child: picked
+          ? Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: scheme.primary,
+              ),
+            )
+          : null,
+    );
+  }
+}
+
 // ─────────────────────────── piezas compartidas ───────────────────────────
 
-/// Botón fantasma (`.ghostbtn`): borde 1 px, 13 px, y `primary` cuando es la
-/// acción principal de la fila.
+/// Botón fantasma (`.ghostbtn`, `prototype/mobile.html:233-242`): borde 1 px,
+/// 12 px en `--muted-strong`, y `primary` con w600 cuando es la acción
+/// principal de la fila.
+///
+/// La altura la fija la fila que lo usa: `.ghostbtn` mide 32 y `.qactions
+/// .ghostbtn` 36 (:326). Por eso es un parámetro con default.
 class _GhostButton extends StatelessWidget {
   const _GhostButton({
     super.key,
     required this.label,
     this.onTap,
     this.primary = false,
+    this.height = 32,
   });
 
   final String label;
   final VoidCallback? onTap;
   final bool primary;
+  final double height;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final enabled = onTap != null;
+    final mutedStrong = theme.brightness == Brightness.dark
+        ? AppColors.darkMutedStrong
+        : AppColors.lightMutedStrong;
     final fg = primary
         ? scheme.onPrimary
-        : (enabled ? scheme.onSurface : scheme.onSurfaceVariant);
+        : (enabled ? mutedStrong : scheme.onSurfaceVariant);
     return Material(
       color: primary ? scheme.primary : Colors.transparent,
       shape: RoundedRectangleBorder(
@@ -717,15 +1137,20 @@ class _GhostButton extends StatelessWidget {
       ),
       child: InkWell(
         onTap: onTap,
-        child: Container(
-          height: 32,
-          alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: primary ? FontWeight.w600 : FontWeight.w400,
-              color: fg,
+        child: Opacity(
+          // `.ghostbtn:disabled{opacity:.45}`: el "Enviar" sin selección se ve
+          // apagado, no en un gris distinto al del texto.
+          opacity: enabled ? 1 : 0.45,
+          child: Container(
+            height: height,
+            alignment: Alignment.center,
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: primary ? FontWeight.w600 : FontWeight.w500,
+                color: fg,
+              ),
             ),
           ),
         ),
@@ -772,12 +1197,16 @@ class _TypingDotsState extends State<TypingDots>
                 // escalonado del CSS, sin depender de un asset de animación.
                 final phase = (_c.value * 3 - i * 0.15) % 3;
                 final wave = math.sin(phase / 3 * math.pi);
+                // `@keyframes bounce` (:333): además del fade, el punto sube
+                // 3 px en el pico. Sólo con el fade los tres puntos se leían
+                // como una fila de círculos quietos.
                 return Container(
                   width: 6,
                   height: 6,
                   margin: const EdgeInsets.only(right: 5),
+                  transform: Matrix4.translationValues(0, -3 * wave, 0),
                   decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.35 + 0.65 * wave),
+                    color: color.withValues(alpha: 0.28 + 0.72 * wave),
                     shape: BoxShape.circle,
                   ),
                 );

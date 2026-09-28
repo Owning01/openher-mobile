@@ -25,8 +25,9 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../../data/repositories/catalog_repository.dart';
+import '../../../domain/models/agent_catalog.dart';
 import '../../../domain/models/message.dart';
-import '../../../domain/models/session.dart';
 import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
 import '../../core/theme.dart';
@@ -34,6 +35,8 @@ import '../../core/tokens.dart';
 import 'chat_viewmodel.dart';
 import 'composer.dart';
 import 'message_bubble.dart';
+import 'agent_sheet.dart';
+import 'model_sheet.dart';
 
 /// Las 12 acciones de la hoja `surfaces.sheet.actions`, **en el orden del
 /// prototipo** (`prototype/mobile.html:1204-1215`).
@@ -76,6 +79,7 @@ class ChatView extends StatefulWidget {
     this.onOpenDiff,
     this.thinkingDefault = true,
     this.visible = true,
+    this.catalog,
   });
 
   final ChatViewModel viewModel;
@@ -91,8 +95,17 @@ class ChatView extends StatefulWidget {
   /// no decide ni renombra ni exporta.
   final ValueChanged<ChatSessionAction>? onAction;
 
-  /// Se pide modelo/agente distinto (la hoja `surfaces.sheet.model`).
-  final ValueChanged<SessionInfo?>? onPickModel;
+  /// Se eligió modelo (y nivel de pensamiento) en la hoja `surfaces.sheet.model`.
+  ///
+  /// El chat **no** crea la sesión ni guarda la preferencia: elige y avisa. El
+  /// shell es el que sabe abrir la sesión con ese modelo y ese nivel
+  /// (`ApiClient.createSession` arma `model: {id, providerID, variant}`).
+  final ValueChanged<ModelPick>? onPickModel;
+
+  /// Catálogo de modelos para la hoja. Si no viene, el chat arma el suyo contra
+  /// el `ApiClient` del viewmodel: el shell puede inyectar uno compartido (que
+  /// cachea entre sesiones) o dejarlo ahí.
+  final CatalogRepository? catalog;
 
   /// Abre el diff de un tool (`edit`/`write`/`patch`) en la vista que lo sabe
   /// mostrar. Lo ejecuta el shell: el chat no sabe de archivos.
@@ -120,12 +133,19 @@ class ChatView extends StatefulWidget {
 class _ChatViewState extends State<ChatView> {
   final ScrollController _scroll = ScrollController();
 
+  /// Catálogo propio, sólo si el shell no inyectó uno. Se arma una vez: cada
+  /// apertura de la hoja reusa la caché en vez de pegarle al server.
+  CatalogRepository? _ownCatalog;
+
   /// Espejo de widget.visible: el post-frame del initState lo consulta.
   late bool _visible = true;
   bool _atBottom = true;
   bool _firstBuildDone = false;
 
   ChatViewModel get _vm => widget.viewModel;
+
+  CatalogRepository get _catalog =>
+      widget.catalog ?? (_ownCatalog ??= CatalogRepository(_vm.api));
 
   @override
   @override
@@ -312,8 +332,7 @@ class _ChatViewState extends State<ChatView> {
   }
 
   String get _title {
-    final info = _vm.sessionInfo;
-    final title = info?.title.trim() ?? '';
+    final title = _vm.sessionInfo?.title.trim() ?? '';
     if (title.isNotEmpty) return title;
     // Sin título el server manda el id: `ses_0acd172…` no dice nada, así que
     // se recorta al prefijo.
@@ -322,8 +341,8 @@ class _ChatViewState extends State<ChatView> {
   }
 
   String get _subtitle {
-    final model = _vm.sessionInfo?.model;
-    final agent = _vm.sessionInfo?.agent;
+    final model = _vm.currentModel;
+    final agent = _vm.currentAgent;
     final left = model == null ? 'Elegir modelo' : model.id;
     return agent == null || agent.isEmpty ? left : '$left · $agent';
   }
@@ -543,20 +562,20 @@ class _ChatViewState extends State<ChatView> {
   // ──────────────────────────── composer ────────────────────────────
 
   Widget _composer() {
-    final info = _vm.sessionInfo;
     // Capa chat.composer: apagar el toggle saca el composer entero.
     return LayerGate(
       'chat.composer',
       child: ChatComposer(
         working: _vm.working,
         canSend: true,
-        modelLabel: info?.model?.id,
-        agentLabel: info?.agent,
+        modelLabel: _modelLabel,
+        agentLabel: _agentLabel,
         contextLabel: contextLabel(_vm.serverTokens, _vm.serverCost),
         onSend: (text, files) =>
             _vm.send(text, files: [for (final f in files) f.toPromptFile()]),
         onStop: _vm.abort,
         onPickModel: _openModelSheet,
+        onPickAgent: _openAgentSheet,
       ),
     );
   }
@@ -581,20 +600,91 @@ class _ChatViewState extends State<ChatView> {
     if (handler != null) handler(action);
   }
 
+  /// Elige modelo **y** nivel de pensamiento, y lo aplica a la sesión viva.
+  ///
+  /// Antes esto terminaba en `widget.onPickModel?.call(picked)`: la elección se
+  /// descartaba. Ahora manda el `POST /api/session/{id}/model` (medido: 204 sin
+  /// cuerpo) y recién después la deja registrada en el VM para que los pills
+  /// muestren lo elegido.
+  /// El rótulo del pill de modelo.
+  ///
+  /// Antes era `info?.model?.id`, y eso daba siempre `null`: una sesión nueva
+  /// del server v2 **no trae** campo `model` (medido: `id`, `projectID`,
+  /// `cost`, `tokens`, `time`, `location`), así que el pill decía "Elegir
+  /// modelo" para siempre, incluso después de haber elegido.
+  String get _modelLabel {
+    final m = _vm.currentModel;
+    if (m == null || m.id.isEmpty) return 'Elegir modelo';
+    return m.id;
+  }
+
+  /// El rótulo del pill de agente, con el mismo criterio.
+  String get _agentLabel => AgentCatalog.labelFor(_agents, _vm.currentAgent);
+
   Future<void> _openModelSheet() async {
-    final info = _vm.sessionInfo;
-    final picked = await showModalBottomSheet<SessionInfo?>(
-      context: context,
-      showDragHandle: true,
-      builder: (sheetContext) => LayerGate(
-        'surfaces.sheet.model',
-        child: _ModelSheet(
-          info: info,
-          onClose: () => Navigator.of(sheetContext).pop(),
-        ),
-      ),
+    final picked = await showModelSheet(
+      context,
+      catalog: _catalog,
+      current: _vm.currentModel,
     );
-    if (picked != null) widget.onPickModel?.call(picked);
+    if (picked == null) return;
+    final model = ModelRef(
+      id: picked.modelId,
+      providerID: picked.providerId,
+      variant: picked.variantId,
+    );
+    try {
+      await _vm.api.setSessionModel(
+        _vm.sessionId,
+        providerId: picked.providerId,
+        modelId: picked.modelId,
+        variantId: picked.variantId,
+        directory: _vm.directory,
+      );
+      _vm.applySelection(model: model);
+    } catch (e) {
+      _vm.reportError('No se pudo cambiar el modelo: $e');
+    }
+    // Se avisa igual: un shell que abre sesiones nuevas con este modelo tiene
+    // que enterarse, y el `catch` ya dejó el error a la vista.
+    widget.onPickModel?.call(picked);
+  }
+
+  /// Elige agente y lo aplica a la sesión viva.
+  ///
+  /// El pill de agente usaba el mismo callback que el de modelo, y los dos
+  /// abrían la hoja de modelo. Por eso no había forma de elegir un agente: no
+  /// era que estuviera escondido, es que la pantalla no existía.
+  Future<void> _openAgentSheet() async {
+    final picked = await showAgentSheet(
+      context,
+      load: _loadAgents,
+      current: _vm.currentAgent,
+    );
+    if (picked == null) return;
+    try {
+      await _vm.api.setSessionAgent(
+        _vm.sessionId,
+        agent: picked,
+        directory: _vm.directory,
+      );
+      _vm.applySelection(agent: picked);
+    } catch (e) {
+      _vm.reportError('No se pudo cambiar el agente: $e');
+    }
+  }
+
+  /// Los agentes, cacheados en memoria mientras la vista viva: `GET /api/agent`
+  /// son 26 y no cambian entre aperturas de la hoja.
+  AgentCatalog? _agents;
+
+  Future<AgentCatalog> _loadAgents() async {
+    final cached = _agents;
+    if (cached != null) return cached;
+    final raw = await _vm.api.listAgents(directory: _vm.directory);
+    final catalog = AgentCatalog.fromList(raw);
+    _agents = catalog;
+    return catalog;
   }
 }
 
@@ -717,250 +807,6 @@ class _ActionRow extends StatelessWidget {
                   action.label,
                   style: TextStyle(fontSize: 13, color: color),
                 ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// La hoja de modelo y agente (`surfaces.sheet.model`).
-///
-/// **Es un andamiaje**: la app todavía no tiene catálogo de modelos ni de
-/// agentes (no hay endpoint en el contrato medido), así que muestra lo que la
-/// sesión ya usa y delega el cambio al shell con [ChatView.onPickModel]. Cuando
-/// exista el catálogo, esta hoja pasa a listarlo; el andamiaje (buscador,
-/// secciones `surfaces.model.agent` / `surfaces.model.item`, check) ya está.
-class _ModelSheet extends StatefulWidget {
-  const _ModelSheet({required this.info, required this.onClose});
-
-  final SessionInfo? info;
-  final VoidCallback onClose;
-
-  @override
-  State<_ModelSheet> createState() => _ModelSheetState();
-}
-
-class _ModelSheetState extends State<_ModelSheet> {
-  final TextEditingController _query = TextEditingController();
-  String _filter = '';
-
-  @override
-  void dispose() {
-    _query.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final model = widget.info?.model;
-    final agent = widget.info?.agent;
-    final modelMatches =
-        model == null || _filter.isEmpty || model.id.contains(_filter);
-    final agentMatches =
-        agent == null || _filter.isEmpty || agent.contains(_filter);
-    // Con filtro y sin resultados, o sin modelo/agente que listar: se avisa.
-    final filtered = _filter.isNotEmpty;
-    final nothingToShow =
-        (agent == null || !agentMatches) && (model == null || !modelMatches);
-    final emptySession = agent == null && model == null;
-
-    return SafeArea(
-      top: false,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              AppSpacing.lg,
-              0,
-              AppSpacing.sm,
-              AppSpacing.sm,
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Modelo y agente',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                ),
-                AppIconButton(
-                  icon: 'x',
-                  tooltip: 'Cerrar',
-                  onPressed: widget.onClose,
-                  size: 20,
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
-            child: TextField(
-              controller: _query,
-              onChanged: (v) => setState(() => _filter = v.trim()),
-              decoration: InputDecoration(
-                hintText: 'Buscar modelo o agente…',
-                prefixIcon: AppIcon(
-                  'search',
-                  size: 18,
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-          ),
-          // Cuando el catálogo crezca, la lista scrollea; la cabeza y el
-          // buscador quedan fijos.
-          Flexible(
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (agentMatches && agent != null) ...[
-                    const _SectionHead('AGENTE'),
-                    LayerGate(
-                      'surfaces.model.agent',
-                      child: _ModelRow(
-                        name: agent,
-                        detail: _agentDetail(agent),
-                        selected: true,
-                        onTap: widget.onClose,
-                      ),
-                    ),
-                  ],
-                  if (modelMatches && model != null) ...[
-                    const _SectionHead('MODELO'),
-                    LayerGate(
-                      'surfaces.model.item',
-                      child: _ModelRow(
-                        name: model.id,
-                        detail: model.providerID,
-                        selected: true,
-                        onTap: widget.onClose,
-                      ),
-                    ),
-                  ],
-                  if (filtered && nothingToShow)
-                    Padding(
-                      padding: const EdgeInsets.all(AppSpacing.lg),
-                      child: Text(
-                        'Sin resultados para "$_filter".',
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                  if (emptySession)
-                    Padding(
-                      padding: const EdgeInsets.all(AppSpacing.lg),
-                      child: Text(
-                        'Esta sesión todavía no tiene modelo ni agente.',
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                  const SizedBox(height: AppSpacing.sm),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Los tres agentes que el prototipo documenta. Es texto de ayuda, no lógica:
-  /// la lista real de agentes la trae el shell cuando exista el endpoint.
-  static String _agentDetail(String agent) => switch (agent) {
-    'plan' => 'solo lectura, propone un plan',
-    'explore' => 'búsqueda amplia en el repo',
-    _ => 'escribe código, ejecuta comandos',
-  };
-}
-
-class _SectionHead extends StatelessWidget {
-  const _SectionHead(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(
-      AppSpacing.md,
-      AppSpacing.md,
-      AppSpacing.md,
-      AppSpacing.xs,
-    ),
-    child: Text(
-      text,
-      style: TextStyle(
-        fontSize: 10.5,
-        fontWeight: FontWeight.w700,
-        letterSpacing: 0.5,
-        color: Theme.of(context).colorScheme.onSurfaceVariant,
-      ),
-    ),
-  );
-}
-
-class _ModelRow extends StatelessWidget {
-  const _ModelRow({
-    required this.name,
-    required this.detail,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String name;
-  final String detail;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        child: SizedBox(
-          height: 48,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        name,
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                          color: scheme.onSurface,
-                        ),
-                      ),
-                      Text(
-                        detail,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                if (selected) AppIcon('check', size: 16),
               ],
             ),
           ),
