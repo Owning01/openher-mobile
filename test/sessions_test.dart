@@ -174,7 +174,7 @@ void main() {
             'data': [
               'no soy un mapa',
               42,
-              sessionJson(id: 'ses_ok', title: 'ok', updatedMs: 0),
+              jsonDecode(sessionJson(id: 'ses_ok', title: 'ok', updatedMs: 0)),
             ],
             'cursor': {'next': 'x'},
           }),
@@ -281,7 +281,8 @@ void main() {
       expect(formatRelative(ago(const Duration(hours: 1)), kNow), '1 h');
       expect(formatRelative(ago(const Duration(days: 1)), kNow), 'ayer');
       expect(formatRelative(ago(const Duration(days: 3)), kNow), '3 d');
-      expect(formatRelative(ago(const Duration(days: 30)), kNow), '20/8');
+      // 2026-09-28 menos 30 días = 2026-08-29.
+      expect(formatRelative(ago(const Duration(days: 30)), kNow), '29/8');
       expect(formatCost(0.42), r'$0.42');
       expect(formatCost(2.07), r'$2.07');
     });
@@ -362,11 +363,12 @@ void main() {
     });
 
     test('search filtra por título sin volver al server', () async {
-      var calls = 0;
+      // Sólo se cuenta `GET /api/session`: `load` también pega a `/active`.
+      var lists = 0;
       final vm = SessionsViewModel(
         repository: repoWith(
-          MockClient((_) async {
-            calls++;
+          MockClient((request) async {
+            if (request.url.path == '/api/session') lists++;
             return json(
               listJson([
                 sessionJson(id: 'a', title: 'Diseña las vistas', updatedMs: 0),
@@ -386,7 +388,7 @@ void main() {
       vm.search('');
       expect(vm.visible, hasLength(2));
       // Filtrar es local: no se gastó un request.
-      expect(calls, 1);
+      expect(lists, 1);
       vm.dispose();
     });
 
@@ -526,9 +528,12 @@ void main() {
               sessionJson(
                 id: 'ses_old',
                 title: 'vieja',
+                directory: 'G:/code/openher-flutter-desktop',
+                agent: 'plan',
                 updatedMs: kNow
                     .subtract(const Duration(days: 30))
                     .millisecondsSinceEpoch,
+                cost: 2.07,
               ),
             ]),
             active: '{"data":{"ses_today":{"type":"running"}}}',
@@ -545,10 +550,12 @@ void main() {
       expect(find.text('HOY'), findsOneWidget);
       expect(find.text('ANTERIORES'), findsOneWidget);
       expect(find.text('Diseña las vistas mobile'), findsOneWidget);
-      // `.smeta` del prototipo: `openher-mobile · build`.
+      // `.smeta` del prototipo: basename del directorio + agente.
       expect(find.text('openher-mobile · build'), findsOneWidget);
+      expect(find.text('openher-flutter-desktop · plan'), findsOneWidget);
       expect(find.text('En ejecución'), findsOneWidget);
       expect(find.text(r'$0.42'), findsOneWidget);
+      expect(find.text(r'$2.07'), findsOneWidget);
       expect(find.text('Sin sesiones'), findsNothing);
 
       await unmount(tester, vm);
@@ -560,10 +567,11 @@ void main() {
         clock: () => kNow,
       );
       await pumpView(tester, SessionsView(viewmodel: vm, onOpen: (_) {}));
-
-      expect(find.byKey(SessionsView.emptyKey), findsOneWidget);
+      // El primer frame sale con el spinner: `load()` ya viene en curso.
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
       await settle(tester);
 
+      expect(find.byKey(SessionsView.emptyKey), findsOneWidget);
       expect(find.text('Sin sesiones'), findsOneWidget);
       expect(
         find.text('Toca + para crear una sesión en el directorio actual.'),
