@@ -38,6 +38,7 @@ import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
 import '../../core/theme.dart';
 import '../../core/tokens.dart';
+import 'file_preview.dart';
 import 'files_viewmodel.dart';
 
 /// Qué se pidió desde la hoja de acciones de una fila.
@@ -219,8 +220,24 @@ class _FilesViewState extends State<FilesView> {
         _toast('Ruta copiada');
         break;
       case FileAction.open:
+        // El boton existia desde el primer dia y no hacia nada: mismo patron
+        // que el pill de agente y el microfono, un control dibujado sin
+        // destino. Ahora abre el visor, que decide por el tipo de archivo.
+        if (!mounted) return;
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => FilePreview(
+              config: widget.config,
+              path: node.path,
+              name: node.name,
+            ),
+          ),
+        );
+        break;
       case FileAction.diff:
-        // Sin destino todavía: se muestran, pero no se pueden apretar.
+        // El diff necesita un repo git en el directorio. Sin destino todavia,
+        // y se dice en vez de fingir que funciona.
+        _toast('Diff: todavia no disponible');
         break;
     }
   }
@@ -645,7 +662,6 @@ class _FileActionsSheet extends StatelessWidget {
             name: FileAction.open.name,
             icon: 'external-link',
             label: 'Abrir',
-            // Todavía no hay visor de archivos: se muestra, no se puede apretar.
             onPressed: null,
           ),
           _SheetAction(

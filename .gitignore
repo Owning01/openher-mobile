@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Material del E2E del visor de archivos: lo regenera
+# scripts/make_test_media.py, no va al repo.
+test_media/

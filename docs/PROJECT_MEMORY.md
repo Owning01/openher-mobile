@@ -149,3 +149,33 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   medición desmentió es lo contrario, siempre que quede escrito por qué.
 - Trampa de proceso que costó trabajo: `dart format lib test` reescribió archivos de otro agente.
   La causa fue correr el formateo global con trabajo sin commitear en el árbol.
+
+## 2026-09-28 — Visor de archivos + dos bugs de release que rompian la instalacion
+
+- **Que se pide**: ver imagen, video, audio, PDF, markdown y codigo desde Archivos.
+  `FileAction.open` existia desde el primer dia como un boton **muerto** ("se muestran, pero no se
+  pueden apretar"): el quinto caso del patron de control dibujado sin destino.
+- **La medicion que lo habilita**: `GET /api/fs/read/<path>` **no es un endpoint de texto, devuelve
+  los bytes crudos con el `Content-Type` correcto**. Probado con un APK de 56 MB
+  (`application/vnd.android.package-archive`, 56.318.889 bytes), un PNG, un SVG, un PDF y un `.md`.
+  No hay otra via: `/api/fs/raw/*`, `/api/fs/download/*` y `/api/file/*` dan 404, y las rutas sin
+  prefijo caen en el catch-all del SPA. Acepta `\` y `/` (server Windows manda `\`).
+- **Que se agrego**: `domain/models/file_type.dart` (clasificador por extension, 9 tipos) y
+  `ui/features/files/file_preview.dart` (el visor). Deps: `video_player` 2.14.0 y `pdfrx` 2.4.8.
+  `ServerConfig.fileUrl` + `binaryHeaders` para la URL y el header Basic.
+- **BUG CRITICO, encontrado al instalar**: el `<queries>` del manifest tenia **un `<intent>` con dos
+  `<action>`** (`PICK` + `GET_CONTENT`). Android rechaza el APK entero con
+  `INSTALL_PARSE_FAILED_MANIFEST_MALFORMED: intent tag may have at most one action` (medido con
+  `aapt2 dump xmltree` y al instalar). **1.1.0 y 1.2.0 nunca fueron instalables**: el telefono seguia
+  en 1.0.0+5 y yo creia que estaba en 1.2.0. Arreglado partiendolo en dos `<intent>`.
+  Lección: `flutter build apk` compila happily un manifest invalido; solo `pm install` lo dice.
+- **APK 73,6 MB -> 26,8 MB**: el universal empaqueta 3 ABIs y `libpdfium.so` solo son 16,4 MB (3
+  copias). `publish-update.ps1` ahora compila `--target-platform android-arm64`, con el costo
+  anotado (se pierde 32 bits y emulador).
+- **Trampa de pdfrx**: la version 2.4.8 NO tiene `Pdfrx.instantiate` ni `PdfrxDocument.uriParser`;
+  son `PdfViewer.uri(uri, headers: ...)` y `PdfDocument.openUri`. Acepta headers, asi que no hace
+  falta el truco del `auth_token` en el query.
+- **Sin verificar**: el visor **no se pudo probar en el handset** - el Xiaomi quedo `offline` para
+  adb en el medio de la sesion. El codigo esta medido contra el server y con `flutter analyze` y los
+  686 tests en verde, pero el render en pantalla no esta comprobado.
+- **Pendiente**: `FileAction.diff` sigue sin destino (ahora lo dice con un toast en vez de fingir).
