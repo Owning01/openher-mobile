@@ -283,7 +283,7 @@ void main() {
 
       expect(uri!.path, '/api/session/$kSessionId/prompt');
       final decoded = jsonDecode(body!) as Map<String, Object?>;
-      final prompt = decoded['prompt']! as Map<String, Object?>;
+      final prompt = decoded; // text en la raiz (medido: anidado da 400)
       expect(prompt['text'], 'diseñá las vistas');
       expect(prompt['files'], [
         {'uri': 'file:///c.png', 'name': 'c.png', 'mime': 'image/png'},
@@ -743,9 +743,10 @@ void main() {
         contains('POST /api/session/$kSessionId/question/que_42/reply'),
       );
       expect(calls, contains('POST /api/session/$kSessionId/prompt'));
-      expect((jsonDecode(promptBody!) as Map<String, Object?>)['prompt'], {
-        'text': 'Modulo dentro de OpenHer',
-      });
+      expect(
+        (jsonDecode(promptBody!) as Map<String, Object?>)['text'],
+        'Modulo dentro de OpenHer',
+      );
       // Un 404 del endpoint NO es un error del usuario: no hay banner.
       expect(vm.error, isNull);
     });
@@ -768,9 +769,10 @@ void main() {
         final path = await vm.answerQuestion('que_42', answers: [<String>[]]);
 
         expect(path, QuestionReplyPath.prompt);
-        expect((jsonDecode(promptBody!) as Map<String, Object?>)['prompt'], {
-          'text': 'Ahora no.',
-        });
+        expect(
+          (jsonDecode(promptBody!) as Map<String, Object?>)['text'],
+          'Ahora no.',
+        );
       },
     );
 
@@ -797,9 +799,7 @@ void main() {
 
       expect(path, QuestionReplyPath.prompt);
       expect(calls.where((c) => c.contains('/reply')), isEmpty);
-      expect((jsonDecode(promptBody!) as Map<String, Object?>)['prompt'], {
-        'text': 'A',
-      });
+      expect((jsonDecode(promptBody!) as Map<String, Object?>)['text'], 'A');
     });
 
     test('question.replied de otra request no cierra la que espera', () async {

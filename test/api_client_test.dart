@@ -1,4 +1,4 @@
-import 'dart:convert';
+﻿import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -638,8 +638,9 @@ void main() {
       expect(seen.single.path, '/api/session/ses_1/prompt');
       expect(body['id'], 'prt_1');
       expect(body['delivery'], 'steer');
-      expect(body['prompt']['text'], 'hola');
-      expect(body['prompt']['files'], [
+      // El body va con text en la raiz (medido: anidado da 400).
+      expect(body['text'], 'hola');
+      expect(body['files'], [
         {'uri': 'file:///a.png', 'name': 'a.png'},
       ]);
     });

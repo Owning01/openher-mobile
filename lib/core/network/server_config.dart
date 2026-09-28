@@ -171,8 +171,9 @@ class ServerConfig {
 /// caracteres del cuerpo.
 bool looksLikeHtml(String? contentType, String body) {
   final type = contentType?.toLowerCase() ?? '';
-  if (type.contains('text/html') || type.contains('application/xhtml'))
+  if (type.contains('text/html') || type.contains('application/xhtml')) {
     return true;
+  }
   final head = body.trimLeft().toLowerCase();
   return head.startsWith('<!doctype html') || head.startsWith('<html');
 }
