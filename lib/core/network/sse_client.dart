@@ -47,8 +47,16 @@ class SseParseResult {
   /// Último `id` conocido (el de la línea SSE, o el del JSON del último frame).
   final String? lastEventId;
 
-  /// Mayor `id` **numérico** visto. Sirve para reconectar con `?after=<seq>`
-  /// sin perder eventos (el stream por sesión es durable y resumible).
+  /// Mayor **cursor** visto en los frames de este chunk.
+  ///
+  /// Es `durable.seq` (medido en `/api/event`), que es el contador durable del
+  /// agregado. El `id` numérico es sólo el fallback para un build viejo que no
+  /// manda `durable`; el `id` medido (`evt_…`) no es número y por lo tanto
+  /// nunca inventa un cursor falso.
+  ///
+  /// Se **expone** pero no se manda: no hay un endpoint medido que acepte
+  /// `?after=` (el por sesión da 404), así que la reanudación sin duplicados
+  /// no está implementada. Sirve para diagnóstico y para el día que exista.
   final int? maxSeq;
 
   /// Frames con `data:` que no era un objeto JSON. Se cuentan y se descartan:
@@ -73,9 +81,22 @@ class SseParseResult {
 ///   tipo es `event`) y `{id, type, data}` en el global. Se aceptan ambos.
 /// - El payload está en `data`; `properties` es la clave v1 y se acepta como
 ///   fallback para no romper si alguien apunta a un server viejo.
+/// - `durable: {aggregateID, seq, version}` y `created` se leen por [OcEvent];
+///   el cursor es `durable.seq` (el `id` `evt_…` medido no es numérico).
 /// - Un buffer a medio frame no se parsea: [SseParseResult.consumed] lo deja
 ///   para la próxima llamada, que lo reprocesa pasando `offset:`.
-SseParseResult parseSseChunk(String buffer, {int offset = 0}) {
+///
+/// [sessionId] filtra por sesión, porque `/api/event` es **global**: manda las
+/// sesiones de todos los directorios y el server no acepta `?sessionID=` (400).
+/// Se leen `data.sessionID` (o `properties.sessionID` en v1) y `durable.aggregateID`;
+/// un frame sin ninguno de los dos se deja pasar (los globales, como
+/// `server.connected`, no pertenecen a ninguna sesión). Vacío o `null` = sin
+/// filtro, que es lo que necesita quien ya filtra por su cuenta.
+SseParseResult parseSseChunk(
+  String buffer, {
+  int offset = 0,
+  String? sessionId,
+}) {
   final events = <OcEvent>[];
   var sawComment = false;
   var malformed = 0;
@@ -120,19 +141,30 @@ SseParseResult parseSseChunk(String buffer, {int offset = 0}) {
             : null);
     final payload = json['data'] ?? json['properties'];
 
-    final seq = rawId is int ? rawId : int.tryParse('$rawId');
-    if (seq != null && (maxSeq == null || seq > maxSeq)) maxSeq = seq;
+    // El modelo es el que sabe leer `durable` y `created`: el parser sólo
+    // normaliza las dos ambigüedades del formato (la línea `event:` y la clave
+    // v1 `properties`) y se lo pasa como un frame ya plano.
+    final event = OcEvent.fromJson(<String, Object?>{
+      'id': rawId == null ? '' : '$rawId',
+      'type': rawType == null ? '' : '$rawType',
+      'data': payload,
+      if (json['created'] != null) 'created': json['created'],
+      if (json['durable'] != null) 'durable': json['durable'],
+    });
+
+    // Filtro por sesión del stream global (ver [parseSseChunk]).
+    if (sessionId != null && sessionId.isNotEmpty) {
+      final owner = event.sessionID ?? event.aggregateID;
+      if (owner != null && owner != sessionId) continue;
+    }
+
+    // El cursor durable manda; el `id` numérico es el fallback de un build sin
+    // `durable`. El `evt_…` medido no es número ⇒ nunca un cursor inventado.
+    final cursor = event.seq ?? (rawId is int ? rawId : int.tryParse('$rawId'));
+    if (cursor != null && (maxSeq == null || cursor > maxSeq)) maxSeq = cursor;
     lastEventId ??= rawId == null ? null : '$rawId';
 
-    events.add(
-      OcEvent(
-        id: rawId == null ? '' : '$rawId',
-        type: rawType == null ? '' : '$rawType',
-        data: payload is Map
-            ? Map<String, dynamic>.from(payload)
-            : <String, dynamic>{},
-      ),
-    );
+    events.add(event);
   }
 
   return SseParseResult(
@@ -172,8 +204,9 @@ _Boundary? _frameBoundary(String buffer, int from) {
         return _Boundary(i, i + 3);
       }
     } else if (c == _cr) {
-      if (i + 1 < buffer.length && buffer.codeUnitAt(i + 1) == _cr)
+      if (i + 1 < buffer.length && buffer.codeUnitAt(i + 1) == _cr) {
         return _Boundary(i, i + 2);
+      }
     }
   }
   return null;
@@ -225,17 +258,35 @@ _Frame _parseFrame(String frame) {
 
 // ───────────────────────────── cliente ──────────────────────────────────────
 
-/// Stream de eventos de **una** sesión: `GET /api/session/{id}/event?after=<seq>`.
+/// Stream de eventos: `GET /api/event` (**global**), con la sesión filtrada del
+/// lado cliente.
 ///
-/// Por qué el stream por sesión y no el global (`docs/API_CONTRACT.md` §7.1): es
-/// durable y acepta `?after=`, así que reconectar no pierde el turno. El global
-/// no manda `Last-Event-ID` y obliga a re-snapshotear.
+/// Lo medido contra el build que corre en `:4098` (no de la doc, del server):
+/// - `GET /api/event` ⇒ **200 `text/event-stream`**. Es el único que anda.
+/// - `GET /api/session/{id}/event` ⇒ **404**. Este build no tiene stream por
+///   sesión, así que ése **no** puede ser el default de la clase de red: si lo
+///   fuera, el cliente "funcionaría" sólo mientras otro capa lo sobreescribiera,
+///   y un uso directo de [SseClient] se caería al 404 en cada reconexión.
+/// - El stream global trae las sesiones de todos los directorios, y el server
+///   **no** acepta filtrar por query. El filtro es cliente: [parseSseChunk]
+///   deja pasar sólo los frames de [sessionId] (`data.sessionID` /
+///   `properties.sessionID` / `durable.aggregateID`).
 ///
 /// Dos detalles que el server no perdona:
 /// - **Nunca** mandar `sessionID` como query del stream: no está declarado en el
-///   schema y el middleware responde **400**. El filtro por sesión es cliente.
+///   schema y el middleware responde **400**.
 /// - La auth va en `?auth_token=` (carrier que el server chequea antes del
 ///   header). La URL se redacta antes de cualquier log.
+///
+/// ## Reanudación: NO implementada (y por qué)
+///
+/// Cada frame trae su cursor durable en `durable.seq` y el cliente lo expone
+/// como [lastSeq]. Aun así **no** se manda `?after=`: el único endpoint que lo
+/// aceptaría es el por sesión, y ese da 404. Mandar un query no declarado trae
+/// un 400 del middleware, así que la reanudación sin duplicados queda para
+/// cuando exista un endpoint medido que la soporte. Consecuencia conocida: al
+/// reconectar, el server puede re-emitir eventos ya entregados y el consumidor
+/// tiene que deduplicar por `id`/tipo.
 class SseClient {
   SseClient({
     required this.config,
@@ -291,6 +342,11 @@ class SseClient {
   bool _alive = false;
   int _offset = 0;
   int? _lastSeq;
+
+  /// Ids de eventos ya entregados. El server durable re-sirve desde el
+  /// principio al reconectar, asi que sin esto cada reconexion duplicaria
+  /// el texto del asistente.
+  final Set<String> _deliveredIds = <String>{};
   StreamState _state = StreamState.polling;
   Future<void>? _loop;
 
@@ -303,22 +359,27 @@ class SseClient {
 
   StreamState get state => _state;
 
-  /// `?after=` del próximo intento: el mayor `id` numérico ya entregado.
+  /// Mayor `durable.seq` entregado. Es el cursor durable, listo para reanudar,
+  /// pero el default **no** lo manda: ver la nota de reanudación de la clase.
   int? get lastSeq => _lastSeq;
 
   /// URL del stream, con `auth_token` y **sin** `sessionID`. Contiene la
   /// credencial: para mostrarla o loguearla, pasarla por
   /// [ServerConfig.redactAuthToken].
+  ///
+  /// [after] se acepta para no romper la firma que sobreescriben los
+  /// consumidores, pero el default **lo ignora a propósito**: mandar `?after=`
+  /// al stream global no se pudo verificar (el endpoint que lo declara da 404)
+  /// y un query no declarado trae un 400 del middleware.
   Uri streamUri({int? after}) => config.api(
-    '/session/$sessionId/event',
+    '/event',
     query: <String, String?>{
-      'after': (after ?? _lastSeq)?.toString(),
       if (config.authTokenQuery != null)
         ServerConfig.authTokenParam: config.authTokenQuery,
       if (directory != null && directory!.isNotEmpty)
         ServerConfig.locationParam: directory,
-      // OJO: acá NO va `sessionID`. No está declarado en el schema del
-      // stream y el server responde 400 (§7.3).
+      // OJO: acá NO va `sessionID` (400 del middleware, §7.3) ni `after`
+      // (no hay endpoint medido que lo acepte).
     },
   );
 
@@ -426,14 +487,32 @@ class SseClient {
     if (_closed || text.isEmpty) return;
     _alive = true;
     _buffer.write(text);
-    final result = parseSseChunk(_buffer.toString(), offset: _offset);
-    if (result.malformed > 0) {
-      developer.log(
-        'sse: ${result.malformed} frame(s) con data inválido, descartados',
-        name: 'openher.sse',
-      );
+    // El filtro por sesión va adentro del parser: el stream es global y el
+    // server rechaza `?sessionID=`, así que filtrar es cosa del cliente.
+    final result = parseSseChunk(
+      _buffer.toString(),
+      offset: _offset,
+      sessionId: sessionId,
+    );
+    // El server durable re-sirve desde el principio al reconectar (su
+    // endpoint con ?after= da 404 en este build, asi que no se puede
+    // reanudar por cursor). Sin este filtro, cada reconexion entregaria
+    // otra vez todos los deltas y el texto del asistente se duplicaria.
+    final fresh = <OcEvent>[];
+    for (final event in result.events) {
+      if (event.id.isNotEmpty && !_deliveredIds.add(event.id)) continue;
+      fresh.add(event);
     }
-    if (result.maxSeq != null) _lastSeq = result.maxSeq;
+    if (_deliveredIds.length > 8000) {
+      _deliveredIds.clear();
+    }
+    // Sólo avanza con lo que se entregó: un `durable.seq` de otra sesión no
+    // puede pisar el cursor de ésta.
+    if (result.maxSeq != null) {
+      _lastSeq = _lastSeq == null || result.maxSeq! > _lastSeq!
+          ? result.maxSeq
+          : _lastSeq;
+    }
     _offset = result.consumed;
     _trim();
 
@@ -441,7 +520,7 @@ class SseClient {
     // no evento. Un stream con heartbeats y sin eventos está perfecto.
     _armWatchdog();
 
-    for (final event in result.events) {
+    for (final event in fresh) {
       if (!_events.isClosed) _events.add(event);
     }
   }

@@ -26,10 +26,12 @@ final class OcEvent {
     required this.type,
     this.data = const {},
     this.createdMs,
+    this.aggregateID,
     this.seq,
   });
 
-  /// Acepta `{id, type, data}` (global) y `{id, event, data}` (por sesión).
+  /// Acepta `{id, type, data}` (global) y `{id, event, data}` (por sesión),
+  /// más el bloque `durable` (`{aggregateID, seq, version}`) del frame medido.
   /// `data` ausente ⇒ mapa vacío (así viene `server.connected`).
   factory OcEvent.fromJson(Map<String, Object?> json) {
     final durable = asMap(json['durable']);
@@ -38,7 +40,8 @@ final class OcEvent {
       type: asStr(json['type']) ?? asStr(json['event']) ?? '',
       data: asMap(json['data']) ?? const {},
       createdMs: asInt(json['created']),
-      seq: asInt(durable?['seq']),
+      aggregateID: asStr(durable?['aggregateID']),
+      seq: _seqOf(durable?['seq']),
     );
   }
 
@@ -54,7 +57,14 @@ final class OcEvent {
   /// `created` del frame, en ms de epoch.
   final int? createdMs;
 
-  /// `durable.seq`: el cursor para reanudar con `?after=`.
+  /// `durable.aggregateID`: la sesión a la que pertenece el frame. Es lo que
+  /// permite filtrar el stream **global** por sesión del lado cliente.
+  final String? aggregateID;
+
+  /// `durable.seq`: el cursor durable del agregado (medido en :4098). Es `int`
+  /// en el frame real; [fromJson] también acepta el string por si algún build
+  /// lo serializa así. `null` en los frames sin bloque `durable` (p. ej. los
+  /// globales como `server.connected`).
   final int? seq;
 
   /// `data.sessionID`, o `null` en eventos globales (`server.connected`).
@@ -128,5 +138,15 @@ bool isSettledStatus(Object? status) =>
 String? _statusType(Object? status) {
   if (status is String) return status.toLowerCase();
   if (status is Map) return asStr(status['type'])?.toLowerCase();
+  return null;
+}
+
+/// `durable.seq` llega como `int` en el frame medido, pero un build que
+/// serialice el agregado a mano lo manda como string. [asInt] no castea
+/// (a propósito, para no convertir `"1"` en cualquier lado), así que el string
+/// se convierte **acá**, en el único lugar que conoce la forma del cursor.
+int? _seqOf(Object? raw) {
+  if (raw is num) return raw.toInt();
+  if (raw is String) return int.tryParse(raw);
   return null;
 }

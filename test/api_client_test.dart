@@ -194,6 +194,100 @@ void main() {
 
       await expectLater(api.getJson('/session'), throwsA(isA<ApiError>()));
     });
+
+    test(
+      'el HtmlFallbackError NOMBRA la ruta que cayó en el catch-all',
+      () async {
+        // Sin `path` el mensaje decía "el endpoint no existe" y el usuario no
+        // tenía forma de saber cuál. Es la razón de ser del error.
+        final api = clientWith(
+          MockClient(
+            (_) async => json(kSpaHtml, type: 'text/html; charset=utf-8'),
+          ),
+        );
+
+        await expectLater(
+          api.getJson('/session/ses_1/tool'),
+          throwsA(
+            isA<HtmlFallbackError>()
+                .having((e) => e.path, 'path', '/session/ses_1/tool')
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('/session/ses_1/tool'),
+                ),
+          ),
+        );
+      },
+    );
+
+    test(
+      '502 con cuerpo HTML => ApiError reintentable, NO HtmlFallbackError',
+      () async {
+        // Página de error de un proxy: HTML **y** 5xx. Es una caída del server,
+        // no una ruta inexistente; clasificarla como HTML mataba el reintento.
+        final api = clientWith(
+          MockClient(
+            (_) async => json(
+              '<html><head><title>502 Bad Gateway</title></head></html>',
+              status: 502,
+              type: 'text/html',
+            ),
+          ),
+        );
+
+        await expectLater(
+          api.getJson('/session'),
+          throwsA(
+            isA<ApiError>()
+                .having((e) => e.statusCode, 'statusCode', 502)
+                .having((e) => e.retriable, 'retriable', isTrue),
+          ),
+        );
+      },
+    );
+
+    test('503 con cuerpo HTML también es ApiError reintentable', () async {
+      final api = clientWith(
+        MockClient(
+          (_) async => json('<html>Service Unavailable</html>', status: 503),
+        ),
+      );
+
+      await expectLater(
+        api.getJson('/session'),
+        throwsA(
+          isA<ApiError>()
+              .having((e) => e.statusCode, 'statusCode', 503)
+              .having((e) => e.retriable, 'retriable', isTrue),
+        ),
+      );
+    });
+
+    test('401 con cuerpo HTML sigue siendo AuthError, no HTML', () async {
+      final api = clientWith(
+        MockClient(
+          (_) async => json('<html>401</html>', status: 401, type: 'text/html'),
+        ),
+      );
+
+      await expectLater(api.getJson('/session'), throwsA(isA<AuthError>()));
+    });
+
+    test('404 con cuerpo HTML es ApiError 404 (la ruta no existe)', () async {
+      final api = clientWith(
+        MockClient((_) async => json(kSpaHtml, status: 404, type: 'text/html')),
+      );
+
+      await expectLater(
+        api.getJson('/session/ses_1/event'),
+        throwsA(
+          isA<ApiError>()
+              .having((e) => e.statusCode, 'statusCode', 404)
+              .having((e) => e.retriable, 'retriable', isFalse),
+        ),
+      );
+    });
   });
 
   group('retry', () {

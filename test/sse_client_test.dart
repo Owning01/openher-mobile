@@ -1,6 +1,8 @@
 import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:openher_mobile/core/network/server_config.dart';
 import 'package:openher_mobile/core/network/sse_client.dart';
 import 'package:openher_mobile/domain/models/event.dart';
@@ -272,11 +274,15 @@ void main() {
       return client;
     }
 
-    test('lleva auth_token, after y location[directory]', () {
-      final uri = newClient(directory: r'C:\Users\perca').streamUri(after: 42);
+    test('el default es el stream GLOBAL /api/event, no el por sesión', () {
+      // MEDIDO en :4098: `/api/session/{id}/event` ⇒ 404, `/api/event` ⇒ 200
+      // text/event-stream. El default de la clase de red tiene que ser el que
+      // anda: si fuera el por sesión, un uso directo de SseClient se caería al
+      // 404 en cada reconexión y sólo funcionaría con el override del repo.
+      final uri = newClient(directory: r'C:\Users\perca').streamUri();
 
-      expect(uri.path, '/api/session/ses_1/event');
-      expect(uri.queryParameters['after'], '42');
+      expect(uri.path, '/api/event');
+      expect(uri.path, isNot(contains('/session/')));
       expect(
         uri.queryParameters[ServerConfig.authTokenParam],
         kConfig.authTokenQuery,
@@ -285,6 +291,57 @@ void main() {
         uri.queryParameters[ServerConfig.locationParam],
         r'C:\Users\perca',
       );
+    });
+
+    test('NO manda ?after= (no hay endpoint medido que lo acepte)', () {
+      // El único que aceptaría `?after=` es el stream por sesión, que da 404.
+      // Un query no declarado trae un 400 del middleware, así que el cursor
+      // `durable.seq` se expone (`lastSeq`) pero no se manda.
+      final uri = newClient().streamUri(after: 42);
+
+      expect(uri.queryParameters.containsKey('after'), isFalse);
+    });
+
+    test('el filtro por sesión es del cliente, no un query param', () {
+      // El stream global trae TODAS las sesiones. `/api/event?sessionID=` da
+      // 400 (§7.3), así que la separación tiene que ser posterior al parseo.
+      final parsed = parseSseChunk(
+        'data: {"id":"evt_1","type":"session.text.delta",'
+        '"data":{"sessionID":"ses_1","text":"mio"}}\n\n'
+        'data: {"id":"evt_2","type":"session.text.delta",'
+        '"data":{"sessionID":"ses_2","text":"ajeno"}}\n\n',
+        sessionId: 'ses_1',
+      );
+
+      expect(parsed.events.map((e) => e.id), ['evt_1']);
+    });
+
+    test('sin sessionId el stream global pasa entero (filtro desactivado)', () {
+      final parsed = parseSseChunk(
+        'data: {"id":"evt_1","type":"x","data":{"sessionID":"ses_1"}}\n\n'
+        'data: {"id":"evt_2","type":"y","data":{"sessionID":"ses_2"}}\n\n',
+      );
+
+      expect(parsed.events.map((e) => e.id), ['evt_1', 'evt_2']);
+    });
+
+    test('los frames globales (sin sessionID) no se filtran', () {
+      final parsed = parseSseChunk(
+        'data: {"id":"evt_1","type":"server.connected"}\n\n',
+        sessionId: 'ses_1',
+      );
+
+      expect(parsed.events.map((e) => e.type), ['server.connected']);
+    });
+
+    test('el filtro acepta durable.aggregateID como dueño del frame', () {
+      final parsed = parseSseChunk(
+        'data: {"id":"evt_1","type":"session.status",'
+        '"durable":{"aggregateID":"ses_2","seq":9,"version":1}}\n\n',
+        sessionId: 'ses_1',
+      );
+
+      expect(parsed.events, isEmpty);
     });
 
     test('NUNCA manda sessionID (el server responde 400)', () {
@@ -349,5 +406,113 @@ void main() {
         expect(client.state, StreamState.polling);
       },
     );
+  });
+
+  group('cursor durable (durable.seq)', () {
+    /// El frame EXACTO que manda `/api/event` en :4098.
+    String durableFrame(String id, Object? seq, {String aggregate = 'ses_1'}) =>
+        'data: {"id":"$id","created":1790570117526,'
+        '"type":"session.text.delta",'
+        '"data":{"sessionID":"$aggregate","text":"hola"},'
+        '"durable":{"aggregateID":"$aggregate","seq":$seq,"version":1}}\n\n';
+
+    test('el frame medido llena seq y createdMs del evento', () {
+      final result = parseSseChunk(durableFrame('evt_0e64bb95', 431));
+      final event = result.events.single;
+
+      // El `id` medido es `evt_…`: sin leer `durable`, el cursor nunca avanza.
+      expect(event.id, 'evt_0e64bb95');
+      expect(event.seq, 431);
+      expect(event.createdMs, 1790570117526);
+      expect(event.aggregateID, 'ses_1');
+      expect(result.maxSeq, 431);
+    });
+
+    test('el cursor acepta seq como string (build que serializa a mano)', () {
+      final result = parseSseChunk(durableFrame('evt_a', '"88"'));
+
+      expect(result.events.single.seq, 88);
+      expect(result.maxSeq, 88);
+    });
+
+    test('maxSeq es el MAYOR seq del chunk, no el último', () {
+      final result = parseSseChunk(
+        durableFrame('evt_1', 431) + durableFrame('evt_2', 12),
+      );
+
+      expect(result.maxSeq, 431);
+    });
+
+    test('un frame global sin durable no inventa cursor', () {
+      final result = parseSseChunk(
+        'data: {"id":"evt_1","type":"server.connected"}\n\n',
+      );
+
+      expect(result.events.single.seq, isNull);
+      expect(result.maxSeq, isNull);
+    });
+
+    test('el id numérico sigue sirviendo de cursor si no hay durable', () {
+      // Build viejo: `id` numérico y sin bloque `durable`. No es el medido, pero
+      // cuando aparece es un cursor de verdad y no debe pisarse con null.
+      final result = parseSseChunk(
+        'data: {"id":431,"type":"session.text.delta","data":{}}\n\n',
+      );
+
+      expect(result.maxSeq, 431);
+    });
+
+    test('durable manda sobre el id numérico si vinieran los dos', () {
+      final result = parseSseChunk(
+        'data: {"id":7,"type":"session.text.delta","data":{},'
+        '"durable":{"aggregateID":"ses_1","seq":500,"version":1}}\n\n',
+      );
+
+      expect(result.maxSeq, 500);
+    });
+  });
+
+  group('SseClient vivo: el cursor sube con los frames reales', () {
+    test('lastSeq arranca en null y sigue el mayor durable.seq', () async {
+      var calls = 0;
+      final mock = MockClient((_) async {
+        calls++;
+        // Sólo la primera conexión trae el turno; después se corta, para que
+        // el loop termine solo y el test no corra reconectando para siempre.
+        if (calls > 1) return http.Response('', 500);
+        return http.Response(
+          ': heartbeat\n\n'
+          'data: {"id":"evt_1","type":"session.text.delta",'
+          '"data":{"sessionID":"ses_1","text":"a"},'
+          '"durable":{"aggregateID":"ses_1","seq":100,"version":1}}\n\n'
+          'data: {"id":"evt_2","type":"session.text.ended",'
+          '"data":{"sessionID":"ses_1","text":"hola"},'
+          '"durable":{"aggregateID":"ses_1","seq":431,"version":1}}\n\n',
+          200,
+          headers: const {'content-type': 'text/event-stream'},
+        );
+      });
+      final sse = SseClient(
+        config: kConfig,
+        sessionId: 'ses_1',
+        client: mock,
+        maxAttempts: 2,
+        baseBackoff: const Duration(milliseconds: 5),
+        maxBackoff: const Duration(milliseconds: 10),
+        watchdog: const Duration(seconds: 2),
+      );
+      addTearDown(sse.dispose);
+      expect(sse.lastSeq, isNull, reason: 'nada leído todavía');
+
+      final ids = <String>[];
+      sse.events.listen((e) => ids.add(e.id));
+      sse.connect();
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      expect(ids, ['evt_1', 'evt_2']);
+      expect(sse.lastSeq, 431);
+      // Y sigue expuesto, no enviado: la reanudación no está implementada.
+      expect(sse.streamUri().queryParameters.containsKey('after'), isFalse);
+    });
   });
 }

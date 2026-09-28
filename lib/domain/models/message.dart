@@ -19,7 +19,12 @@ final class ModelRef {
 
   factory ModelRef.fromJson(Object? raw) {
     final m = asMap(raw);
-    if (m == null) return const ModelRef(id: '', providerID: '');
+    if (m == null) {
+      // Un `model`/`previous` que llega como string plano (dialecto v1, o un
+      // `model-switched` con el nombre del modelo anterior) no debe perderse:
+      // se trata como el id, sin provider.
+      return ModelRef(id: asStr(raw) ?? '', providerID: '');
+    }
     return ModelRef(
       id: asStr(m['id']) ?? '',
       providerID: asStr(m['providerID']) ?? '',
@@ -198,7 +203,11 @@ final class AssistantMessage extends SessionMessage {
   final Map<String, Object?>? snapshot;
 
   /// `time.completed != null`.
-  bool get isComplete => time.isComplete;
+  /// El turno terminó si hay **cualquiera** de las dos evidencias del contrato
+  /// (§7.4): `time.completed` escrito, o `finish` informado. El server pone las
+  /// dos, pero un build que sólo mande una no puede dejar el botón Detener
+  /// pegado para siempre — que era justo lo que pasaba.
+  bool get isComplete => time.isComplete || finish != null;
 
   bool get hasError => error != null;
 
@@ -277,7 +286,9 @@ final class ModelSwitchedMessage extends SessionMessage {
         time: MessageTime.fromJson(json['time']),
         metadata: asMap(json['metadata']) ?? const {},
         model: ModelRef.fromJson(json['model']),
-        previous: asMap(json['previous']) == null
+        // previous llega como objeto en v2 y como string plano en v1; se deja
+        // pasar por el mismo fromJson, que ya tolera las dos formas.
+        previous: json['previous'] == null
             ? null
             : ModelRef.fromJson(json['previous']),
       );

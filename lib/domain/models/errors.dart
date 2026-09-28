@@ -206,7 +206,15 @@ Map<String, Object?>? asMap(Object? raw) {
 String? asStr(Object? raw) => raw is String ? raw : null;
 
 /// `int` o `null`. Acepta `double`/`num` y los trunca.
-int? asInt(Object? raw) => raw is num ? raw.toInt() : null;
+///
+/// Tolera un **string numérico** a propósito: `time.completed: "2600"` venía
+/// como string en un build y hacía que el turno pareciera eterno (el botón
+/// Detener quedaba pegado). Un string no numérico sigue devolviendo `null`.
+int? asInt(Object? raw) {
+  if (raw is num) return raw.toInt();
+  if (raw is String) return int.tryParse(raw.trim());
+  return null;
+}
 
 /// `double` o `null`. Acepta `int`.
 double? asNum(Object? raw) => raw is num ? raw.toDouble() : null;

@@ -136,7 +136,7 @@ class ApiClient {
     } on UnsupportedServerError {
       rethrow;
     } on OchError catch (e) {
-      throw UnsupportedServerError('${e.message}');
+      throw UnsupportedServerError(e.message);
     }
   }
 
@@ -294,7 +294,10 @@ class ApiClient {
         final streamed = await _client
             .send(_request(method, uri, body))
             .timeout(timeout);
-        return _decode(await http.Response.fromStream(streamed));
+        // `path` viaja hasta el clasificador: sin él, [HtmlFallbackError] no
+        // puede decirle al usuario **qué** ruta cayó en el catch-all, que es
+        // justo para lo que existe ese error.
+        return _decode(await http.Response.fromStream(streamed), path: path);
       } on OchError {
         // Ya es un error tipado y determinístico (401, HTML, 5xx, JSON roto):
         // reintentar sólo alarga la espera del error en la UI.
@@ -308,8 +311,9 @@ class ApiClient {
         // `IOException` no trae `message`: se usa el texto del error.
         lastError = e.toString();
       }
-      if (attempt + 1 < attempts)
+      if (attempt + 1 < attempts) {
         await Future<void>.delayed(_retryDelay(attempt));
+      }
     }
     throw NetworkError(lastError == null ? 'sin red' : '$lastError');
   }
@@ -331,18 +335,33 @@ class ApiClient {
     return request;
   }
 
+  /// Clasifica la respuesta. El **orden** importa y es el medido:
+  ///
+  /// 1. `5xx` ⇒ [ApiError]. Es una caída del server (o de un proxy delante de
+  ///    él), y por definición se reintenta. Tiene que ir **antes** del sniff de
+  ///    HTML: una página de error 502/503 de nginx trae `text/html` y, sin este
+  ///    orden, se clasificaba como "esa ruta no existe" con `retriable: false`,
+  ///    lo que mataba el reintento de un fallo de red.
+  /// 2. `401/403` ⇒ [AuthError] (credenciales, no dialecto).
+  /// 3. `>= 400` ⇒ [ApiError] con el mensaje del server.
+  /// 4. Recién con un **2xx**, si el cuerpo es HTML ⇒ [HtmlFallbackError]. Ésa
+  ///    es la firma exacta del catch-all del SPA (`httpapi/server.ts:194-203`):
+  ///    un path desconocido devuelve `index.html` con status **200**.
   dynamic _decode(http.Response response, {String? path}) {
     final body = response.body;
     final status = response.statusCode;
 
-    if (looksLikeHtml(response.headers['content-type'], body)) {
-      throw HtmlFallbackError(path: path, statusCode: status);
+    if (status >= 500) {
+      throw ApiError(statusCode: status, detail: _errorMessage(body));
     }
     if (status == 401 || status == 403) {
       throw AuthError(realm: response.headers['www-authenticate']);
     }
     if (status >= 400) {
       throw ApiError(statusCode: status, detail: _errorMessage(body));
+    }
+    if (looksLikeHtml(response.headers['content-type'], body)) {
+      throw HtmlFallbackError(path: path, statusCode: status);
     }
     if (status == 204 || body.trim().isEmpty) return null;
 
