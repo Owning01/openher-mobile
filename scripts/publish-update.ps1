@@ -107,18 +107,25 @@ foreach ($entry in $assets.GetEnumerator()) {
 # El chequeo final: si el manifiesto no responde 200 con el versionCode
 # esperado, el autoupdate está roto para todos los dispositivos que ya tienen
 # la app. Mejor fallar acá que descubrirlo cuando alguien abre la app.
+#
+# Se lee con `curl.exe` y no con `Invoke-RestMethod` a propósito: medido 2026-09-28,
+# PowerShell 5.1 devuelve **500** contra el redirect de assets de GitHub
+# (`releases/latest/download/...`) aunque la URL responda 200 de verdad. Un
+# chequeo que falla cuando todo anda bien entrena al script para que ignore sus
+# propios errores, que es peor que no chequear.
 $latest = 'https://github.com/Owning01/openher-mobile/releases/latest/download/latest.json'
+$body = Join-Path $env:TEMP 'openher-latest-check.json'
 $seen = $null
 foreach ($attempt in 1..5) {
   Start-Sleep -Seconds 3
-  try {
-    $seen = (Invoke-RestMethod -Uri $latest -TimeoutSec 20)
+  $code = & curl.exe -s -L -o $body -w '%{http_code}' $latest
+  if ($code -eq '200') {
+    $seen = Get-Content $body -Raw | ConvertFrom-Json
     break
-  } catch {
-    Write-Host "  intento ${attempt}: $($_.Exception.Message)"
   }
+  Write-Host "  intento ${attempt}: HTTP $code"
 }
-if (-not $seen) { throw "El manifiesto no responde en $latest" }
+if (-not $seen) { throw "El manifiesto no responde 200 en $latest" }
 if ($seen.versionCode -ne $versionCode) {
   throw "El manifiesto publicado dice versionCode $($seen.versionCode) y esperábamos $versionCode"
 }
