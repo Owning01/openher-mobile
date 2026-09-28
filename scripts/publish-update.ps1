@@ -73,7 +73,9 @@ foreach ($entry in $assets.GetEnumerator()) {
   if ($LASTEXITCODE -ne 0) { throw "Falló el upload del APK a $repo" }
 }
 
-# El manifiesto va después del APK, en ambas repos.
+# El manifiesto va después del APK, en ambas repos. El archivo tiene que
+# llamarse EXACTAMENTE `latest.json`: el nombre del asset es el que la app
+# pide en la URL, y `gh` sube el basename del archivo.
 $manifest = [ordered]@{
   version      = $versionName
   versionCode  = $versionCode
@@ -82,13 +84,14 @@ $manifest = [ordered]@{
   published_at = (Get-Date).ToUniversalTime().ToString('o')
 }
 $json = ($manifest | ConvertTo-Json -Depth 4)
-$manifestPath = Join-Path $env:TEMP 'openher-latest.json'
+$manifestDir = Join-Path $env:TEMP 'openher-release'
+New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
+$manifestPath = Join-Path $manifestDir 'latest.json'
 [System.IO.File]::WriteAllText($manifestPath, $json, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "Manifiesto:`n$json"
 
 foreach ($entry in $assets.GetEnumerator()) {
-  & gh release upload $entry.Value $manifestPath --repo $entry.Key --clobber `
-    '#openher-latest.json'
+  & gh release upload $entry.Value $manifestPath --repo $entry.Key --clobber
   if ($LASTEXITCODE -ne 0) { throw "Falló el upload del manifiesto a $($entry.Key)" }
   & gh release edit $entry.Value -R $entry.Key --notes $Notes *> $null
 }
