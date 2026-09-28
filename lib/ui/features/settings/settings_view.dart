@@ -20,6 +20,7 @@ import '../../../core/network/server_config.dart';
 import '../../../core/storage/creds_store.dart';
 import '../../../core/storage/prefs_store.dart';
 import '../../core/tokens.dart';
+import '../../core/layer_gate.dart';
 import '../connect/connect_view.dart' show ServerProbe, describeProbeError;
 
 /// Fila de la lista de ajustes.
@@ -417,12 +418,16 @@ class _SettingsViewState extends State<SettingsView> {
     final canProbe = config != null && widget.onProbe != null;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Ajustes'),
-        leading: IconButton(
-          onPressed: widget.onBack ?? () => Navigator.of(context).maybePop(),
-          icon: const Icon(Icons.arrow_back),
-          tooltip: 'Volver',
+      // Capa settings.appbar: apagar el toggle saca la barra de Ajustes.
+      appBar: LayerGate(
+        'settings.appbar',
+        child: AppBar(
+          title: const Text('Ajustes'),
+          leading: IconButton(
+            onPressed: widget.onBack ?? () => Navigator.of(context).maybePop(),
+            icon: const Icon(Icons.arrow_back),
+            tooltip: 'Volver',
+          ),
         ),
       ),
       body: ListView(

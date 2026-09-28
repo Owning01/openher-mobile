@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
+import 'tokens.dart';
+
 /// Iconografía de la app: SVG formal (Lucide 1.5px sobre `currentColor`),
 /// extraído del prototipo aprobado. Cero emojis en la UI (regla del repo).
 ///
@@ -17,8 +19,7 @@ class AppIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final tint =
-        color ?? IconTheme.of(context).color ?? const Color(0xFF18181B);
+    final tint = color ?? IconTheme.of(context).color ?? AppColors.lightPrimary;
     return SvgPicture.asset(
       'assets/icons/$name.svg',
       width: size,
@@ -51,12 +52,19 @@ class AppIconButton extends StatelessWidget {
   final double size;
   final double tapSize;
   final Color? color;
+
+  /// Botón con estado (el buscador abierto, por ejemplo). Cuando es `true` el
+  /// glifo se pinta con el primario del tema, igual que el resto del chrome
+  /// activo, y no se pierde el monocromo: es el mismo token, sólo que marcado.
   final bool selected;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tint = selected ? theme.colorScheme.primary : color;
     return Semantics(
       button: true,
+      selected: selected,
       label: tooltip,
       child: Tooltip(
         message: tooltip,
@@ -69,7 +77,7 @@ class AppIconButton extends StatelessWidget {
             width: tapSize,
             height: tapSize,
             child: Center(
-              child: AppIcon(icon, size: size, color: color),
+              child: AppIcon(icon, size: size, color: tint),
             ),
           ),
         ),

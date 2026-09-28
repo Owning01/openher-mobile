@@ -3,8 +3,11 @@ import 'package:flutter/widgets.dart';
 /// Los 4 destinos del bottom-nav. Es la decisión D5 del plan: un pulgar, una
 /// tarea por pantalla. La activity-bar de 12 items del escritorio no es táctil.
 enum MobileTab {
+  // El prototipo repite `message-square` en Sesiones y Chat; en un pulgar los
+  // dos destinos quedan indistinguibles, así que el chat toma su propio glifo
+  // (`sparkles`: el agente), que ya existe en `assets/icons/`.
   sessions('Sesiones', 'message-square'),
-  chat('Chat', 'message-square'),
+  chat('Chat', 'sparkles'),
   files('Archivos', 'folder'),
   settings('Ajustes', 'settings');
 
@@ -56,7 +59,8 @@ class MobileNav extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Abre una sesión en el destino Chat.
+  /// Abre una sesión en el destino Chat. La lista la llama con el id que
+  /// acaba de crear o de tocar; no hace falta un `openNewSession` aparte.
   void openSession(String sessionId) {
     chatSessionId = sessionId;
     _tab = MobileTab.chat;
@@ -64,7 +68,4 @@ class MobileNav extends ChangeNotifier {
     if (_stack.length > 16) _stack.removeAt(0);
     notifyListeners();
   }
-
-  /// El `+` de la lista crea sesión y abre el chat.
-  void openNewSession(String sessionId) => openSession(sessionId);
 }
