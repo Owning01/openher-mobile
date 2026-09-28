@@ -129,8 +129,37 @@ ChatEventSource _defaultSource(ServerConfig config, String? directory) =>
 ///
 /// `:4098`) y el `session.idle` deprecado. Los nombres que estaban antes acá
 /// el protocolo: nadie los emitía, pero se leían como evidencia de turno y
-/// por eso las reglas del repo no admiten eventos inventados.
-const Set<String> kChatStatusEvents = {'session.status', 'session.idle'};
+/// Eventos que abren y cierran un turno.
+///
+/// **Medido 2026-09-28** capturando el stream real del server durante un turno
+/// completo, no leyendo el spec: en el dialecto v2 **no existe** ni
+/// `session.status` ni `session.idle`. El stream manda
+///
+///     session.execution.started   {"sessionID":"ses_…"}
+///     session.execution.succeeded {"sessionID":"ses_…"}
+///
+/// y, además, el endpoint de mensajes inserta un mensaje `{"type":"idle"}` al
+/// terminar cada turno.
+///
+/// Los nombres v1 se quedan en el conjunto a propósito: si un build viejo los
+/// emitiera, seguírían siendo la misma señal, y borrarlos sería volver a
+/// romper el botón Detener sin avisar. Un conjunto con nombres de más es
+/// inofensivo; uno con nombres de menos congela la UI.
+const Set<String> kChatStatusEvents = {
+  'session.execution.started',
+  'session.execution.succeeded',
+  'session.execution.failed',
+  'session.status',
+  'session.idle',
+};
+
+/// `type: "idle"` — el mensaje con el que el server cierra el turno.
+///
+/// No es un mensaje para la persona: `SessionMessage.fromJson` lo convertía en
+/// un `SystemMessage` vacío y cada turno dejaba una burbuja en blanco en el
+/// chat. Va aparte justamente para que se pueda usar como señal de cierre sin
+/// que se pinte.
+const String kIdleMessageType = 'idle';
 
 /// `question.asked`: el agente está esperando una respuesta (§6).
 ///
@@ -467,7 +496,11 @@ class ChatViewModel extends ChangeNotifier {
       final page = await _api.listMessages(
         sessionId,
         limit: _policy.pageSize,
-        order: 'asc',
+        // `order` se omite a proposito: hay cursor y el server rechaza
+        // los dos juntos (medido: `InvalidCursorError: Cursor cannot be
+        // combined with order`). El cursor ya trae `order` y
+        // `direction` adentro.
+        order: null,
         cursor: cursor,
         directory: directory,
       );
@@ -779,6 +812,11 @@ class ChatViewModel extends ChangeNotifier {
       return;
     }
 
+    if (lower.startsWith('session.execution.')) {
+      _applyExecution(lower);
+      return;
+    }
+
     if (kChatStatusEvents.contains(lower)) {
       _applyStatus(event.data);
       return;
@@ -829,6 +867,55 @@ class ChatViewModel extends ChangeNotifier {
     _pendingQuestion = null;
     _recomputeWorking();
     _safeNotify();
+  }
+
+  /// Cierra o abre el turno según el evento.
+  ///
+  /// En v2 la señal no es un `status` sino el par
+  /// `session.execution.started` / `session.execution.succeeded`
+  /// (**medido 2026-09-28**, ver [kChatStatusEvents]). El nombre del evento va
+  /// por parámetro porque `_applyEvent` ya lo tiene y el payload de ejecución
+  /// no trae ningún campo que diga si abre o cierra.
+  void _applyExecution(String event) {
+    if (event == 'session.execution.started') {
+      _busyStatus = true;
+      _recomputeWorking();
+      _safeNotify();
+      return;
+    }
+
+    // Un `succeeded` (o `failed`) significa que el turno **terminó**. Punto.
+    //
+    // El mensaje del assistant sigue apareciendo como incompleto hasta que
+    // vuelve el refetch que trae `finish` y `time.completed`; si el contrato
+    // de `_recomputeWorking` ("el último assistant sin cerrar = trabajando")
+    // se respeta a ciegas, el botón se queda en Detener durante esa ventana y,
+    // si el refetch no llega, para siempre. Eso es exactamente lo que reportó
+    // el usuario: "después de que ya se ha enviado me aparece directamente el
+    // botón de stop".
+    //
+    // Por eso el cierre es autoritativo: se marca el assistant abierto como
+    // terminado **y** se pide el refetch, que después deja el mensaje con los
+    // valores reales del server (costo, tokens, finish de verdad). Lo local es
+    // sólo para no dejar la UI clavada mientras llega.
+    _busyStatus = false;
+    _awaitingAssistant = false;
+    _retryNotice = null;
+    _closeOpenAssistant();
+    _recomputeWorking();
+    _safeNotify();
+    _scheduleRefetch();
+  }
+
+  /// Marca como terminado el último assistant que seguía abierto.
+  void _closeOpenAssistant() {
+    for (var i = _messages.length - 1; i >= 0; i--) {
+      final m = _messages[i];
+      if (m is! AssistantMessage) continue;
+      if (m.isComplete) return;
+      _messages[i] = _copyAssistant(m, m.content, finish: 'stop');
+      return;
+    }
   }
 
   void _applyStatus(Map<String, Object?> data) {
@@ -997,10 +1084,16 @@ class ChatViewModel extends ChangeNotifier {
   /// Poll REST de respaldo cuando el SSE se rinde (§2.3 del plan).
   static const Duration pollInterval = Duration(seconds: 2);
 
+  /// Los mensajes de la página, en orden cronológico.
+  ///
+  /// Filtra el `type: "idle"` (**medido 2026-09-28**): el server lo inserta en
+  /// la lista al cerrar cada turno, y sin este filtro caía en el `default` de
+  /// [SessionMessage.fromJson] como `SystemMessage` con texto vacío — una
+  /// burbuja en blanco por cada turno, arriba del mensaje que sí importa.
   static List<SessionMessage> _parseAll(List<dynamic> raw) => [
     for (final item in raw)
       if (asMap(item) case final Map<String, Object?> m)
-        SessionMessage.fromJson(m),
+        if (asStr(m['type']) != kIdleMessageType) SessionMessage.fromJson(m),
   ];
 
   /// Inserta la página del server **sin perder** lo ya cargado (upsert por
@@ -1084,15 +1177,16 @@ class ChatViewModel extends ChangeNotifier {
   /// `AssistantMessage` es inmutable: para un delta hay que copiarlo entero.
   static AssistantMessage _copyAssistant(
     AssistantMessage m,
-    List<AssistantContent> content,
-  ) => AssistantMessage(
+    List<AssistantContent> content, {
+    String? finish,
+  }) => AssistantMessage(
     id: m.id,
     time: m.time,
     metadata: m.metadata,
     agent: m.agent,
     model: m.model,
     content: content,
-    finish: m.finish,
+    finish: finish ?? m.finish,
     rawFinish: m.rawFinish,
     cost: m.cost,
     tokens: m.tokens,

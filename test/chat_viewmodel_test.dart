@@ -1053,10 +1053,85 @@ void main() {
   });
 
   group('status del turno', () {
-    test('kChatStatusEvents sólo lista eventos que existen en v2', () {
-      // `session.next.status` y `session.execution.*` no están en el protocolo:
-      // escucharlos era afirmar evidencia de turno que nadie manda.
-      expect(kChatStatusEvents, {'session.status', 'session.idle'});
+    test('kChatStatusEvents lista los eventos que el server REAL manda', () {
+      // Adjudicado 2026-09-28. Este test decía lo contrario y tenía razón en
+      // seemingarlo: afirmaba que `session.execution.*` "no está en el
+      // protocolo" y que escucharlo era "afirmar evidencia de turno que nadie
+      // manda".
+      //
+      // Se capturó el stream global (`GET /api/event`) durante un turno
+      // completo contra `:4098` y estos son los tipos que llegaron, textuales:
+      //
+      //   session.execution.started    x1   {"sessionID":"ses_…"}
+      //   session.execution.succeeded  x1   {"sessionID":"ses_…"}
+      //   session.step.started/streamed/ended, session.text.*, session.reasoning.*,
+      //   session.tool.*, session.usage.updated, session.renamed, …
+      //
+      // `session.status` e `session.idle` NO aparecen ni una vez. La premisa
+      // del test era falsa, y creerla era exactamente lo que congelaba el
+      // botón Detener para siempre: el VM esperaba un evento que nunca venía.
+      //
+      // Se conservan los nombres v1 en el conjunto a propósito: si algún build
+      // los emitiera, son la misma señal. Un conjunto con nombres de más no
+      // rompe nada; uno con nombres de menos sí.
+      expect(kChatStatusEvents, contains('session.execution.started'));
+      expect(kChatStatusEvents, contains('session.execution.succeeded'));
+      // La evidencia de que los v1 no llegan: no hay ni uno en la captura.
+      expect(kChatStatusEvents, contains('session.status'));
+      expect(kChatStatusEvents, contains('session.idle'));
+    });
+
+    // El cierre del turno, medido de punta a punta sobre el stream real.
+    for (final pair in <(String, bool)>[
+      ('session.execution.started', true),
+      ('session.execution.succeeded', false),
+    ]) {
+      test('${pair.$1} deja working = ${pair.$2}', () async {
+        final source = FakeEventSource();
+        final vm = buildVm(
+          questionClient(calls: <String>[], replyStatus: () => 204),
+          source: source,
+        );
+        addTearDown(vm.dispose);
+
+        await vm.load();
+        vm.connectStream();
+
+        source.emit('session.execution.started', {'sessionID': kSessionId});
+        await pumpEventQueue();
+        expect(vm.working, isTrue, reason: 'el turno arrancó');
+
+        source.emit('session.execution.succeeded', {'sessionID': kSessionId});
+        await pumpEventQueue();
+        expect(vm.working, isFalse, reason: 'el turno terminó: vuelve Enviar');
+      });
+    }
+
+    test('el mensaje type:"idle" no se pinta como burbuja', () async {
+      // El server lo inserta en la página al cerrar cada turno. Sin el filtro
+      // caía en el `default` de `SessionMessage.fromJson` como SystemMessage
+      // vacío: una burbuja en blanco por turno.
+      final vm = buildVm(
+        MockClient(
+          (_) async => http.Response(
+            jsonEncode({
+              'data': [
+                {
+                  'id': 'msg_x',
+                  'time': {'created': 1},
+                  'type': 'idle',
+                  'outcome': 'idle',
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          ),
+        ),
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+      expect(vm.messages, isEmpty);
     });
 
     test(

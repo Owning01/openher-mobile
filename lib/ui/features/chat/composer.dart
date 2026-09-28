@@ -21,6 +21,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 
 import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
@@ -96,6 +97,12 @@ class ChatComposer extends StatefulWidget {
   /// 413 antes, así que es sólo una guarda visual.
   static const int charLimit = 20000;
 
+  /// El dictado es es-ES porque la app es en español; el layer
+  /// chat.composer.mic se dibuja con el texto Dictar por voz (es-ES).
+  /// Si el dispositivo no tiene ese modelo instalado, initialize falla y
+  /// el boton lo dice en vez de quedarse mudo.
+  static const String kDictationLocale = 'es_ES';
+
   /// 5 líneas es el máximo del `textarea` del prototipo (`max-height:98px` con
   /// `line-height:19.5px`).
   static const int maxLines = 5;
@@ -116,11 +123,78 @@ class _ChatComposerState extends State<ChatComposer> {
   final TextEditingController _controller = TextEditingController();
   final FocusNode _focus = FocusNode();
 
+  /// El motor de dictado. Se crea acá y no como campo final para poder
+  /// inyectarlo en un test sin el plugin nativo.
+  final SpeechToText _speech = SpeechToText();
+  bool _speechReady = false;
+  bool _dictating = false;
+
   @override
   void dispose() {
     _controller.dispose();
     _focus.dispose();
+    // Dejar el microfono abierto al salir de la pantalla del chat
+    // deja el servicio de dictado escuchando en el vacio.
+    _speech.stop();
     super.dispose();
+  }
+
+  /// El dictado por voz vive acá y no en la vista porque el que tiene que
+  /// escribir el texto reconocido es el `TextEditingController` del composer.
+  /// Si la vista lo manejara, el textohoveríalostres campos o habría que
+  /// inventar un canal de "escribí esto en el input".
+  ///
+  /// El botón queda **inerte con motivo visible** si el server de dictado no
+  /// está disponible (Android 11+ sin `<queries>`, sin modelo de idioma, sin
+  /// permiso): un icono que no hace nada es peor que uno que dice por qué.
+  Future<void> _toggleDictation() async {
+    if (_dictating) {
+      await _speech.stop();
+      return;
+    }
+    if (!_speechReady) {
+      _speechReady = await _speech.initialize(
+        onError: (e) =>
+            _reportDictation('No se pudo iniciar el dictado: ${e.errorMsg}'),
+        onStatus: (s) {
+          // `notListening` con resultado vacío es el fin normal del dictado por
+          // voz en Android; sin esto se queda pensando que sigue escuchando.
+          if (s == 'done' || s == 'notListening') _endDictation();
+        },
+      );
+      if (!_speechReady) {
+        _reportDictation(
+          'Este dispositivo no tiene dictado por voz disponible.',
+        );
+        return;
+      }
+    }
+    await _speech.listen(
+      localeId: ChatComposer.kDictationLocale,
+      onResult: (r) {
+        setState(() {
+          _controller.text = r.recognizedWords;
+          _controller.selection = TextSelection.collapsed(
+            offset: _controller.text.length,
+          );
+        });
+        if (r.finalResult) _endDictation();
+      },
+    );
+    if (mounted) setState(() => _dictating = true);
+  }
+
+  void _endDictation() {
+    if (!_dictating) return;
+    setState(() => _dictating = false);
+  }
+
+  void _reportDictation(String message) {
+    _endDictation();
+    if (mounted)
+      ScaffoldMessenger.maybeOf(
+        context,
+      )?.showSnackBar(SnackBar(content: Text(message)));
   }
 
   bool get _canSend =>
@@ -260,7 +334,6 @@ class _ChatComposerState extends State<ChatComposer> {
                 onPressed: widget.onAttach,
                 size: 20,
                 tapSize: 32,
-                color: _mutedStrong(context),
               ),
             ),
             Expanded(
@@ -295,10 +368,12 @@ class _ChatComposerState extends State<ChatComposer> {
                 key: ChatComposer.micKey,
                 icon: 'mic',
                 tooltip: 'Dictar por voz (es-ES)',
-                onPressed: widget.onDictate,
+                onPressed: _toggleDictation,
+                color: _dictating
+                    ? Theme.of(context).colorScheme.primary
+                    : _mutedStrong(context),
                 size: 20,
                 tapSize: 32,
-                color: _mutedStrong(context),
               ),
             ),
             _sendButton(scheme, hasText),

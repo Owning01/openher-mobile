@@ -180,6 +180,34 @@ class ApiClient {
   /// Medido: responde **204 sin cuerpo** (igual que `interrupt`), no un
   /// `{"data":…}`. Por eso va por `postJson`, que ya tolera el 204, y no por
   /// _object, que leería un JSON de un cuerpo vacío.
+
+  /// `POST /api/session/{id}/compact` - resume la conversacion.
+  ///
+  /// El server responde **204 sin cuerpo** (medido), asi que va por
+  /// [postJson] y no por [_object].
+  Future<void> compactSession(String sessionId, {String? directory}) =>
+      postJson(
+        '/session/$sessionId/compact',
+        query: _withLocation(const {}, directory),
+      );
+
+  /// `POST /api/session/{id}/revert/stage` - prepara un Deshacer.
+  ///
+  /// El dialecto v2 no tiene un "undo" de un solo paso: el revert es **por
+  /// etapas**. [stageRevert] prepara y [commitRevert] aplica; si se manda
+  /// [commitRevert] sin [stageRevert] el server no tiene nada que commitear.
+  Future<void> stageRevert(String sessionId, {String? directory}) => postJson(
+    '/session/$sessionId/revert/stage',
+    query: _withLocation(const {}, directory),
+  );
+
+  /// `POST /api/session/{id}/revert/commit` - aplica lo que preparó
+  /// [stageRevert].
+  Future<void> commitRevert(String sessionId, {String? directory}) => postJson(
+    '/session/$sessionId/revert/commit',
+    query: _withLocation(const {}, directory),
+  );
+
   Future<void> setSessionAgent(
     String sessionId, {
     required String agent,
@@ -271,6 +299,19 @@ class ApiClient {
       _object('/session/active', directory: directory);
 
   /// `GET /api/session/{id}/message` — mensajes de la sesión, paginados.
+  /// `GET /api/session/{id}/message` - mensajes de la sesión, paginados.
+  ///
+  /// **Medido 2026-09-28**: `order` y `cursor` son **mutuamente excluyentes**.
+  /// Mandarlos juntos devuelve
+  /// `InvalidCursorError: Cursor cannot be combined with order` (400), y eso
+  /// era exactamente por lo que "Cargar 30 anteriores" no cargaba nada.
+  ///
+  /// No es un capricho del server: el cursor es un base64 que ya lleva la
+  /// dirección adentro —decodificado es
+  /// `{"id":"msg_…","order":"desc","direction":"previous"}`—, así que cuando
+  /// hay cursor, el `order` es redundante **y** prohibido. Por eso `order` se
+  /// descarta acá en vez de dejar que cada llamador se acuerde: un solo lugar
+  /// donde la regla se puede equivocar es ninguno.
   Future<ApiPage> listMessages(
     String sessionId, {
     int? limit,
@@ -279,7 +320,7 @@ class ApiClient {
     String? directory,
   }) => _page('/session/$sessionId/message', <String, String?>{
     'limit': limit?.toString(),
-    'order': order,
+    'order': cursor == null ? order : null,
     'cursor': cursor,
   }, directory);
 
