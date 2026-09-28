@@ -5,69 +5,123 @@
 
 ## Qué es esto
 
-App **Android nueva** en Flutter. Cliente delgado que habla **directo con el server de
-opencode** (dialecto v2, `/api/*`). **No** depende de OpenHer ni de `openher-desktop.exe`.
+App **Android** en Flutter. Cliente delgado que habla **directo con el server de opencode**
+(dialecto v2, `/api/*`). **No** depende de OpenHer ni de `openher-desktop.exe`.
+
+App **id**: `ai.openher.openher_mobile` · versión `1.2.0+7` (`versionCode=7`).
 
 ## Estructura
 
 | Ruta | Qué hay |
 |---|---|
-| `docs/API_CONTRACT.md` | Contrato de API **medido** contra el server real (auth, envolturas, mensajes, tools, errores, SSE, drift) |
-| `docs/SUPER_PLAN.md` | El plan maestro: decisiones, arquitectura, performance, fases M0–M10, riesgos, tribunal |
-| `prototype/mobile.html` | Maqueta navegable con toggles de capas (en construcción) |
+| `lib/core/network/` | `api_client.dart` (REST v2), `sse_client.dart` (stream global), `server_config.dart` |
+| `lib/core/storage/` | `creds_store.dart` (secure storage), `prefs_store.dart` (capas, tema) |
+| `lib/core/update/` | `update_service.dart`: manifiesto, descarga, instalación vía canal nativo |
+| `lib/data/connectivity/` | `network_monitor.dart` + `DataPolicy`: modo bajo consumo **sólo** con datos móviles |
+| `lib/data/repositories/` | `session_repository`, `file_repository`, `catalog_repository` |
+| `lib/domain/models/` | `session`, `message`, `tool`, `event`, `errors`, `agent_catalog`, `model_catalog`, `turn_activity` |
+| `lib/ui/core/` | `tokens.dart`, `theme.dart`, `theme_variants.dart` (61 paletas), `layer_gate.dart`, `app_icon.dart`, `low_data_banner.dart`, `update_banner.dart` |
+| `lib/ui/features/chat/` | `chat_view`, `chat_viewmodel`, `composer`, `message_bubble`, `turn_activity`, `tool_card`, `model_sheet`, `agent_sheet` |
+| `lib/ui/features/` | `sessions/`, `files/`, `settings/`, `connect/`, `navigation/` |
+| `docs/API_CONTRACT.md` | Contrato **medido** contra el server real |
+| `docs/SUPER_PLAN.md` | Decisiones, arquitectura, fases M0–M10 |
+| `prototype/mobile.html` | Maqueta navegable con toggles de capas |
+| `scripts/publish-update.ps1` | Compila, sube APK + manifiesto, **verifica con `curl`** y **exige PowerShell 7+** |
 
-Todavía **no** hay código Dart. El proyecto Flutter arranca en la fase M0.
+**Tamaños medidos:** 43 archivos Dart en `lib/` (17.778 líneas), 28 archivos de test (14.860
+líneas), 39 iconos SVG, **686 tests**, `flutter analyze lib` en cero errores y cero warnings.
+
+## Capas
+
+`spec/layers.json` (y su copia **idéntica** en `assets/spec/layers.json`, verificado con
+comparación byte a byte) tiene cuatro secciones:
+
+| Sección | Qué es | Cuántas |
+|---|---|---|
+| `_meta` | metadatos de la spec | 7 claves |
+| `layers` | el catálogo por clave | **94 claves**, 4 en `false` |
+| `disabled` | las 4 apagadas por diseño | 8 claves |
+| `flutter_map` | qué capa va a qué widget | 12 claves |
+
+`LayerCatalog` las carga y `LayerGate` es fail-open. `test/layer_contract_test.dart` falla si
+una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
+
+**Las 4 apagadas** (se pueden prender en vivo desde Ajustes → Capas de la UI):
+`chat.appbar.subtitle`, `chat.composer.counter`, `chat.composer.tsl`, `chat.header.progress`.
 
 ## Decisiones cerradas
 
 | # | Decisión |
 |---|---|
-| D1 | Sólo dialecto v2 (`/api/*`); si el server es v1, error explícito (no modo dual) |
+| D1 | Sólo dialecto v2 (`/api/*`); si el server es v1, error explícito |
 | D2 | Credenciales por UI → `flutter_secure_storage`; `service.json` **no** existe en opencode2 |
-| D3 | Stream por sesión `/api/session/{id}/event?after=` (durable, resumible) |
-| D4 | POST del prompt y después escuchar (el POST no devuelve el turno) |
-| D5 | Bottom nav de 4 destinos + hojas inferiores; se elimina activity-bar/grid/splits |
-| D6 | Tokens reusados del escritorio (espejo de `tokens.css`) |
-| D7 | Cero deps nuevas salvo `flutter_secure_storage` (+`speech_to_text` si se dicta) |
+| D3 | Stream **global** `/api/event` (el por sesión da 404), filtrado por sesión en el cliente, con dedupe por `id` de evento |
+| D4 | POST del prompt y después escuchar; el POST no devuelve el turno |
+| D5 | Bottom nav de 4 destinos + hojas inferiores |
+| D6 | Tokens y **variantes de tema** reusados del escritorio (espejo de `tokens.css`) |
+| D7 | Deps directos: `http`, `flutter_secure_storage`, `speech_to_text`, `flutter_svg`, `shared_preferences`, `flutter_markdown_plus`, `connectivity_plus`, `image_picker` |
 | D8 | Los 3 canales de error visibles (el escritorio se come `session.error`) |
+| D9 | Modo de bajo consumo **automático** sólo con red celular; el usuario puede desactivarlo a mano |
+| D10 | Autoupdate contra el manifiesto de la release, sin diálogos ni bloqueos |
 
 ## Contrato: lo que hay que no olvidar
 
-- **Auth:** Basic `opencode:<OPENCODE_SERVER_PASSWORD>`; o `?auth_token=base64(user:pass)`
-  para el SSE. El user se compara **siempre**; default `"opencode"`.
+- **Auth:** Basic `opencode:<OPENCODE_SERVER_PASSWORD>`; el user se compara **siempre**; default `"opencode"`.
 - **Probe de versión:** `GET /api/location` (NO `/api/health`: da 404 en este build).
 - **Trampa:** todo path desconocido devuelve **HTML 200** (catch-all del SPA) → el parser
-  rechaza `text/html` explícitamente.
-- **Heartbeat v2:** comentario SSE `: heartbeat` cada 15 s, no un evento.
+  rechaza `text/html`. Un **5xx con HTML** es error de server, no el catch-all: se clasifica el
+  5xx antes del sniff de HTML, o se pierde el retry.
+- **Heartbeat v2:** comentario SSE `: heartbeat`, no un evento. El tipo del evento va **dentro**
+  del `data` (no hay líneas `event:`).
 - **Mensajes v2:** `content[]` embebido (text/reasoning/tool), no `parts[]`.
-- **Tool completed** usa `content[]`, no `output:string`; `error` es objeto, no string.
-- **Fin de turno:** `session.status` + `time.completed`/`finish`; nunca por tiempo.
-- **Orden de precedencia de auth:** `?auth_token` (query) gana sobre el header Basic.
-- **Trampa (2):** un **5xx con cuerpo HTML es error de server**, no el catch-all: se
-  clasifica el 5xx antes del sniff de HTML, o se pierde el retry.
-- **Tool pending:** manda input como **string**, no como mapa (hay que parsearlo).
-- **Stream:** el global /api/event es el único que responde (el por sesión da 404).
-  Los frames traen durable.seq y created; el filtro por sesión es del cliente.
-- **Preguntas:** no existe endpoint listable (/api/question/request → 404). Se
-  responde por POST /api/session/{id}/question/{requestID}/reply, con fallback a
-  prompt. Permisos sí existen: /api/permission/request → 200.
-- **Deltas:** se enrutan por ssistantMessageID del evento, no "al último mensaje".
+- **Fin de turno:** `session.execution.started` / `.succeeded` **y** `time.completed`/`finish`.
+  `session.status` e `session.idle` **no existen** en v2 (medido, capturando el stream).
+- **Cierre de turno en modo polling:** el endpoint de mensajes inserta un `{"type":"idle"}`; esa es
+  la única señal de fin cuando no hay SSE (modo de bajo consumo).
+- **Paginación (medido con 200 mensajes):** `order=desc` = los más nuevos; `cursor.previous` va
+  hacia lo **nuevo** (0 ítems desde la última), `cursor.next` va hacia lo **atrás**. Con cursor,
+  `order` **no** se manda (`InvalidCursorError`). Las páginas llegan de más nuevo a más viejo.
+- **Bodies:** `POST /api/session/{id}/prompt` exige `text` en la **raíz**; `createSession` quiere
+  `location` como **objeto** `{directory}`; `compact` y `revert/commit` exigen un body `{}`;
+  `revert/stage` exige `messageID`. Sin body: 400 `Expected object`.
+- **204:** los endpoints de cambio (`/agent`, `/model`, `interrupt`, `/compact`) devuelven **204
+  sin cuerpo**; van por `postJson`, nunca por `_object`.
+- **Deltas:** se enrutan por `assistantMessageID` del evento, no "al último mensaje".
+- **Preguntas:** no hay endpoint listable (`/api/question/request` → 404). Se responde por
+  `POST /api/session/{id}/question/{requestID}/reply`, con fallback a prompt.
+- **Stream:** nunca mandar `?sessionID=` (400, query no declarada) ni `?after=` (no existe).
+- **Modelos y agentes:** `GET /api/model` (102 modelos) y `GET /api/agent` (26 crudos, 20
+  elegibles). Los **niveles de pensamiento son las `variants`** del modelo, no un campo aparte.
+  Un agente **no** trae modelo.
+- **Herramientas agrupadas:** una caja por **turno**, montada en el primer assistant del turno
+  (los resultados de shell nunca la poseen). Dueño y absorciones: `lib/domain/models/turn_activity.dart`.
 
 ## Server de desarrollo
 
-`127.0.0.1:4098` · usuario `opencode` · password: la del `opencode serve` local
-(en esta máquina escrita por el sidecar de OpenHer en
-`%USERPROFILE%\.config\opencode\service.json`, pero **la app no lo lee**).
+`127.0.0.1:4098` · usuario `opencode` · password en
+`%USERPROFILE%\.config\opencode\service.json` (**la app no lo lee**: va por UI → secure storage).
 
-## Comandos (cuando exista el proyecto)
+## Comandos
 
 ```powershell
-flutter create . ; flutter run -d <android> ; flutter test ; flutter analyze
+$env:ProgramFiles(x86) = (Join-Path $env:TEMP 'vs_shim')   # solo para flutter test/analyze
+flutter analyze
+flutter test
+# build + publicar (el script exige PowerShell 7+, o se niega a correr)
+pwsh -File .\scripts\publish-update.ps1 -Notes "..."
 ```
+
+Build de Android: `ANDROID_HOME=G:\Android\SDK`, `JAVA_HOME=G:\Android\Android Studio\jbr`,
+`kotlin.incremental=false` en `android/gradle.properties` (la caché incremental falla en este disco).
 
 ## Trampas conocidas
 
-- `/api/health` no existe en el build de esta máquina ⇒ usar `/api/location`.
-- `sessionID` como query del `/event` ⇒ **400** (query no declarada). Filtrar en el cliente.
-- La API "form" (`/api/form/*`) no existe; las preguntas v2 son `/api/question/*`.
-- `POST /session {directory}` ignora el body; el directorio va por query/header.
+- `/api/health` no existe ⇒ `/api/location`.
+- PowerShell 5.1 devuelve **500** contra el redirect de assets de GitHub aunque la URL responda
+  200: toda verificación de red por script va con `curl.exe`, no con `Invoke-RestMethod`.
+- Windows PowerShell 5.1 **no se puede desinstalar**: es componente del SO y su binario está en
+  control de `TrustedInstaller`. La defensa es negarse a correr bajo 5.1, no borrarlo.
+- Un **test** que afirma algo que la medición desmentió se adjudica **en el lugar**, con el motivo
+  escrito en el archivo. Editar un test para que pase está prohibido; corregir su premisa no.
+- `dart format lib test` reescribe archivos de otros si hay trabajo sin commitear: commitear
+  antes de formatear.
