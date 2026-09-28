@@ -14,7 +14,14 @@
 ///    agente del app bar (`chat.appbar.subtitle`) y la barra de progreso
 ///    (`chat.header.progress`) existen como `LayerGate` para que el toggle de
 ///    Ajustes los pueda prender, pero apagados no pintan nada.
+///
+/// 4. **Ninguna acción finge**: `Abrir diff` no aparece si el shell no le pasa
+///    [ChatView.onOpenDiff]. Antes se pintaba siempre y contestaba con un
+///    Snackbar que decía "lo abre la vista de archivos" sin que hubiera nada
+///    conectado detrás.
 library;
+
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 
@@ -66,10 +73,16 @@ class ChatView extends StatefulWidget {
     this.onBack,
     this.onAction,
     this.onPickModel,
+    this.onOpenDiff,
     this.thinkingDefault = true,
+    this.visible = true,
   });
 
   final ChatViewModel viewModel;
+
+  /// Si el chat esta al frente. Lo decide el shell: fuera de pantalla el
+  /// socket y los timers se pausan (bateria).
+  final bool visible;
 
   /// Vuelve a la lista de sesiones (`chat.appbar.back`).
   final VoidCallback? onBack;
@@ -80,6 +93,13 @@ class ChatView extends StatefulWidget {
 
   /// Se pide modelo/agente distinto (la hoja `surfaces.sheet.model`).
   final ValueChanged<SessionInfo?>? onPickModel;
+
+  /// Abre el diff de un tool (`edit`/`write`/`patch`) en la vista que lo sabe
+  /// mostrar. Lo ejecuta el shell: el chat no sabe de archivos.
+  ///
+  /// `null` ⇒ el chip `Abrir diff` **no se pinta** (ver `ToolCard`). El chat no
+  /// inventa un destino ni promete con un Snackbar.
+  final ValueChanged<AssistantTool>? onOpenDiff;
 
   /// Preferencia de Ajustes: el razonamiento arranca abierto.
   final bool thinkingDefault;
@@ -99,25 +119,46 @@ class ChatView extends StatefulWidget {
 
 class _ChatViewState extends State<ChatView> {
   final ScrollController _scroll = ScrollController();
+
+  /// Espejo de widget.visible: el post-frame del initState lo consulta.
+  late bool _visible = true;
   bool _atBottom = true;
   bool _firstBuildDone = false;
 
   ChatViewModel get _vm => widget.viewModel;
 
   @override
+  @override
   void initState() {
     super.initState();
+    _visible = widget.visible;
     _scroll.addListener(_onScroll);
     _vm.addListener(_onVm);
+    // Se establece la visibilidad inicial. Con isible: true abre el socket
+    // (un chat al frente tiene que estar en vivo); con alse lo deja
+    // cerrado hasta que didUpdateWidget lo promueva. No se fuerza 	rue a
+    // ciegas: el shell sabe si esta al frente.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _vm.setVisible(true);
+      if (mounted) _vm.setVisible(_visible);
     });
+  }
+
+  /// El shell cambia isible al cambiar de pestana (el IndexedStack deja
+  /// el widget montado): hay que propagarlo a mano, porque
+  /// didChangeDependencies no corre en un update.
+  @override
+  void didUpdateWidget(covariant ChatView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.visible != widget.visible) {
+      _visible = widget.visible;
+      _vm.setVisible(_visible);
+    }
   }
 
   @override
   void dispose() {
     // El socket se pausa antes de que el widget muera: fuera de pantalla no
-    // hay stream ni timers (batería).
+    // hay stream ni timers (bateria).
     _vm.setVisible(false);
     _vm.removeListener(_onVm);
     _scroll
@@ -150,6 +191,10 @@ class _ChatViewState extends State<ChatView> {
   }
 
   void _jumpToBottom() {
+    // El callback se registra en `_onVm` (con `mounted`) pero corre **después**
+    // del frame: si entre medio el widget salió del árbol, el `setState`
+    // revienta con "used after being disposed". Se re-chequea acá.
+    if (!mounted) return;
     if (!_scroll.hasClients) return;
     _scroll.jumpTo(_scroll.position.maxScrollExtent);
     setState(() => _atBottom = true);
@@ -159,8 +204,15 @@ class _ChatViewState extends State<ChatView> {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        _appBar(),
+        // Capa chat.appbar: apagar el toggle saca la barra entera.
+        LayerGate('chat.appbar', child: _appBar()),
         if (_vm.error case final String message) _errorBanner(message),
+        // Capa chat.header.progress: apagada por diseño (se puede
+        // prender desde Ajustes). Indica que hay un turno en curso.
+        LayerGate(
+          'chat.header.progress',
+          child: _vm.working ? const _WorkingLine() : const SizedBox.shrink(),
+        ),
         Expanded(
           child: Stack(
             children: [
@@ -282,7 +334,9 @@ class _ChatViewState extends State<ChatView> {
   /// re-fetch exitoso.
   Widget _errorBanner(String message) {
     final scheme = Theme.of(context).colorScheme;
-    final danger = AppColors.diffDelOf(Theme.of(context).brightness);
+    // Chrome monocromo: el mismo `danger` que la card de error del assistant y
+    // que el error de un tool. El rojo de los diffs es de los diffs.
+    final danger = AppColors.dangerOf(Theme.of(context).brightness);
     return Material(
       color: scheme.surfaceContainer,
       child: InkWell(
@@ -324,10 +378,12 @@ class _ChatViewState extends State<ChatView> {
 
   Widget _messages() {
     final messages = _vm.messages;
-    // El botón de "anteriores" es el ítem 0, no un `header`: la lista es un
+    // Los ítems fijos van **arriba** de la lista y no son un `header`: es un
     // `ListView.builder` y no se puede meter un hijo más sin romper el índice.
-    final withLoadMore = _vm.hasEarlier ? 1 : 0;
-    final count = withLoadMore + messages.length;
+    // `0` = aviso de reintento, `1` = botón de "Cargar 30 anteriores".
+    final notice = _vm.retryNotice;
+    final lead = (notice != null ? 1 : 0) + (_vm.hasEarlier ? 1 : 0);
+    final count = lead + messages.length;
 
     return LayerGate(
       'chat.scroll',
@@ -343,8 +399,16 @@ class _ChatViewState extends State<ChatView> {
         itemCount: count == 0 ? 1 : count,
         itemBuilder: (context, index) {
           if (count == 0) return _emptyState();
-          if (withLoadMore == 1 && index == 0) return _loadMore();
-          final message = messages[index - withLoadMore];
+          var offset = index;
+          if (notice != null) {
+            if (offset == 0) return _retryPill(notice);
+            offset--;
+          }
+          if (_vm.hasEarlier) {
+            if (offset == 0) return _loadMore();
+            offset--;
+          }
+          final message = messages[offset];
           return Padding(
             padding: const EdgeInsets.only(bottom: AppSpacing.md),
             child: MessageBubble(
@@ -352,13 +416,26 @@ class _ChatViewState extends State<ChatView> {
               message: message,
               working: _vm.working,
               thinkingDefault: widget.thinkingDefault,
-              onOpenDiff: _onOpenDiff,
+              onOpenDiff: widget.onOpenDiff == null ? null : _onOpenDiff,
               onQuestionAnswer: _onQuestion,
+              questionRequestId: _requestIdFor(message),
             ),
           );
         },
       ),
     );
+  }
+
+  /// El `requestID` de la pregunta que espera, si este mensaje es el que la
+  /// tiene pendiente. El id vive en el `question.asked`, no en el mensaje: sin
+  /// esto la card no podría llamar al endpoint de reply.
+  String? _requestIdFor(SessionMessage message) {
+    final tool = MessageBubble.pendingQuestionTool(message);
+    // `AssistantContent.id` es `String?` aunque el tool siempre lo traiga: sin
+    // `callID` no hay a qué `requestID` pegarse y el viewmodel va al prompt.
+    final callId = tool?.id;
+    if (callId == null) return null;
+    return _vm.requestIdFor(callId);
   }
 
   Widget _emptyState() {
@@ -408,36 +485,79 @@ class _ChatViewState extends State<ChatView> {
   }
 
   void _onOpenDiff(AssistantTool tool) {
-    // El diff lo abre el `files`/shell: el chat sólo pasa el tool.
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      SnackBar(
-        content: Text('Diff de ${tool.name}: lo abre la vista de archivos'),
+    // El diff lo abre el `files`/shell: el chat sólo pasa el tool. Si el shell
+    // no pasó handler, el chip ni siquiera se pintó (`ToolCard`).
+    widget.onOpenDiff?.call(tool);
+  }
+
+  /// El aviso de reintento: `Reintentando en 8s — Rate limit`. Sin esto un
+  /// `status: retry` es un "ocupado" más, indistinguible de un turno trabajando
+  /// (§7.3). Va en la pila de sistema porque **no** es un error: no hay nada
+  /// que arreglar, sólo que avisar.
+  Widget _retryPill(String notice) {
+    final scheme = Theme.of(context).colorScheme;
+    return LayerGate(
+      'chat.msg.system',
+      child: Center(
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainer,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Text(
+            notice,
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+          ),
+        ),
       ),
     );
   }
 
-  void _onQuestion(List<String> answers) {
-    if (answers.isEmpty) {
-      _vm.send('Ahora no.');
-      return;
-    }
-    _vm.send(answers.join('\n'));
+  /// Contesta la pregunta de la card.
+  ///
+  /// El viewmodel intenta el endpoint de reply del protocolo y, si no existe
+  /// (404 medido en `:4098`), manda las respuestas como prompt. Cuando fue por
+  /// el prompt se avisa: no es un error, pero sí cambia lo que el usuario está
+  /// tocando (su mensaje en vez de la card).
+  void _onQuestion(String? requestId, List<String> answers) {
+    unawaited(
+      _vm.answerQuestion(requestId, answers: [answers]).then((path) {
+        if (path != QuestionReplyPath.prompt || !mounted) return;
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Este servidor no expone el endpoint de preguntas: la respuesta '
+              'va como mensaje.',
+            ),
+          ),
+        );
+      }),
+    );
   }
 
   // ──────────────────────────── composer ────────────────────────────
 
   Widget _composer() {
     final info = _vm.sessionInfo;
-    return ChatComposer(
-      working: _vm.working,
-      canSend: true,
-      modelLabel: info?.model?.id,
-      agentLabel: info?.agent,
-      contextLabel: contextLabel(_vm.serverTokens, _vm.serverCost),
-      onSend: (text, files) =>
-          _vm.send(text, files: [for (final f in files) f.toPromptFile()]),
-      onStop: _vm.abort,
-      onPickModel: _openModelSheet,
+    // Capa chat.composer: apagar el toggle saca el composer entero.
+    return LayerGate(
+      'chat.composer',
+      child: ChatComposer(
+        working: _vm.working,
+        canSend: true,
+        modelLabel: info?.model?.id,
+        agentLabel: info?.agent,
+        contextLabel: contextLabel(_vm.serverTokens, _vm.serverCost),
+        onSend: (text, files) =>
+            _vm.send(text, files: [for (final f in files) f.toPromptFile()]),
+        onStop: _vm.abort,
+        onPickModel: _openModelSheet,
+      ),
     );
   }
 
@@ -844,6 +964,47 @@ class _ModelRow extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Linea de 2 px que se mueve mientras el agente trabaja (.progress del
+/// prototipo). Va **encima** de la lista, no dentro del scroll, para que no
+/// se mueva con el contenido. Apagada por defecto en la spec de capas.
+class _WorkingLine extends StatefulWidget {
+  const _WorkingLine();
+
+  @override
+  State<_WorkingLine> createState() => _WorkingLineState();
+}
+
+class _WorkingLineState extends State<_WorkingLine>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SizedBox(
+      height: 2,
+      width: double.infinity,
+      child: AnimatedBuilder(
+        animation: _c,
+        builder: (context, _) => FractionallySizedBox(
+          alignment: Alignment(-1 + 2 * _c.value, 0),
+          widthFactor: 0.35,
+          child: ColoredBox(color: theme.colorScheme.primary),
         ),
       ),
     );

@@ -9,6 +9,12 @@
 /// de un `output: String`: en v2 `state.content[]` es la salida
 /// (`docs/API_CONTRACT.md` §4.2). Un tool en `error` pinta borde izquierdo
 /// `danger` y el `errorMessage`: es el canal B de §5 y el turno puede seguir.
+///
+/// ## El error usa `danger`, no el rojo de diff
+/// El chrome es monocromo y el color vive en los diffs: el rojo de `diffDel` es
+/// de diff, así que el error de un tool pintado con él y el error de assistant
+/// pintado con `danger` hacían ver dos errores distintos en el mismo chat.
+/// Acá va `AppColors.dangerOf`, igual que en `message_bubble.dart`.
 library;
 
 import 'dart:async';
@@ -30,6 +36,11 @@ class ToolCard extends StatefulWidget {
 
   /// Se dispara con el tool cuando el usuario pide "Abrir diff". El shell (o el
   /// `files`) decide qué hacer: el chat no abre archivos.
+  ///
+  /// `null` ⇒ **el chip no se pinta**. Antes el botón existía siempre y
+  /// mostraba un Snackbar diciendo "lo abre la vista de archivos" sin que
+  /// hubiera nada conectado: una acción que promete y no hace. Sin handler no
+  /// hay acción.
   final ValueChanged<AssistantTool>? onOpenDiff;
 
   /// Override del copiado (tests, o un toast propio del shell).
@@ -63,7 +74,8 @@ class _ToolCardState extends State<ToolCard> {
     final scheme = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
     final brightness = Theme.of(context).brightness;
-    final danger = AppColors.diffDelOf(brightness);
+    // Chrome monocromo: el error usa `danger`, no el rojo de los diffs.
+    final danger = AppColors.dangerOf(brightness);
     final border = scheme.outline;
 
     return DecoratedBox(
@@ -87,7 +99,7 @@ class _ToolCardState extends State<ToolCard> {
 
   Widget _head(BuildContext context, TextTheme text, Brightness brightness) {
     final scheme = Theme.of(context).colorScheme;
-    final danger = AppColors.diffDelOf(brightness);
+    final danger = AppColors.dangerOf(brightness);
     final state = _state;
     final isError = _isError;
 
@@ -157,7 +169,7 @@ class _ToolCardState extends State<ToolCard> {
     }, style: text.labelSmall?.copyWith(color: muted));
 
     final dot = switch (state) {
-      ToolError() => _Dot(color: AppColors.diffDelOf(brightness)),
+      ToolError() => _Dot(color: AppColors.dangerOf(brightness)),
       ToolRunning() => const _Spinner(),
       ToolPending() => _Dot(color: AppColors.warnOf(brightness)),
       _ => _Dot(color: AppColors.diffAddOf(brightness)),
@@ -194,7 +206,7 @@ class _ToolCardState extends State<ToolCard> {
                     fontSize: 11.5,
                     height: 1.55,
                     color: _isError
-                        ? AppColors.diffDelOf(Theme.of(context).brightness)
+                        ? AppColors.dangerOf(Theme.of(context).brightness)
                         : Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
                 ),
@@ -217,7 +229,7 @@ class _ToolCardState extends State<ToolCard> {
                     label: 'Copiar',
                     onTap: () => _copy(code),
                   ),
-                  if (_hasDiff) ...[
+                  if (_hasDiff && widget.onOpenDiff != null) ...[
                     const SizedBox(width: AppSpacing.sm),
                     _ChipButton(
                       icon: 'git-branch',
@@ -260,23 +272,63 @@ class _ToolCardState extends State<ToolCard> {
   }
 }
 
-/// Glifo de una tool. Los nombres son los que existen en `assets/icons/`: si
-/// el server manda una tool que no está en la lista cae en `terminal`, que es
-/// el glifo genérico de "el agente corrió algo".
-String toolIcon(String name) => switch (name) {
-  'shell' || 'bash' || 'powershell' => 'terminal',
-  'read' || 'notebookread' => 'book',
-  'edit' || 'multiedit' || 'patch' => 'edit',
-  'write' || 'create' => 'file',
-  'glob' || 'grep' || 'list' => 'search',
-  'todowrite' || 'todoread' => 'list-checks',
-  'subagent' || 'task' => 'user',
-  'webfetch' || 'websearch' => 'download',
-  'question' || 'ask' => 'message-square',
-  'skill' => 'sparkles',
-  'plan' => 'list-checks',
-  _ => 'terminal',
+/// Lo que la UI sabe de un nombre de tool: el glifo de la card y la categoría
+/// que muestra la caja de actividad.
+///
+/// `category == null` ⇒ la fila de la caja usa el **nombre en mayúsculas**
+/// (`turnCategoryLabel`), que es lo que pasaba con las tools que no estaban en
+/// ninguna de las dos listas: agregar un nombre nuevo no obliga a inventarle
+/// una categoría.
+final class ToolInfo {
+  const ToolInfo(this.icon, [this.category]);
+
+  final String icon;
+  final String? category;
+}
+
+/// **La** tabla de tools. Antes había dos mapas paralelos —`toolIcon` acá y
+/// `toolCategory` en `turn_activity.dart`— con nombres superpuestos
+/// (`shell|bash|powershell`, `read|notebookread`, …): agregar una tool obligaba
+/// a acordarse de los dos y se olvidaba la mitad de las veces.
+///
+/// Los glifos son los SVG que existen en `assets/icons/`; una tool que no está
+/// en la tabla cae en `terminal`, que es el glifo genérico de "el agente corrió
+/// algo".
+const Map<String, ToolInfo> kToolInfo = <String, ToolInfo>{
+  'shell': ToolInfo('terminal', 'SHELL'),
+  'bash': ToolInfo('terminal', 'SHELL'),
+  'powershell': ToolInfo('terminal', 'SHELL'),
+  'read': ToolInfo('book', 'READ'),
+  'notebookread': ToolInfo('book', 'READ'),
+  'edit': ToolInfo('edit', 'EDIT'),
+  'multiedit': ToolInfo('edit', 'EDIT'),
+  'write': ToolInfo('file', 'WRITE'),
+  'create': ToolInfo('file', 'WRITE'),
+  'glob': ToolInfo('search', 'SEARCH'),
+  'grep': ToolInfo('search', 'SEARCH'),
+  'list': ToolInfo('search', 'SEARCH'),
+  'subagent': ToolInfo('user', 'SUBAGENT'),
+  'task': ToolInfo('user', 'SUBAGENT'),
+  'question': ToolInfo('message-square', 'QUESTION'),
+  'ask': ToolInfo('message-square', 'QUESTION'),
+  'skill': ToolInfo('sparkles', 'SKILL'),
+  // Sin categoría a propósito: el nombre en mayúsculas ya dice la categoría
+  // (`PATCH`, `PLAN`, `TODOWRITE`…) y es lo que se veía antes.
+  'patch': ToolInfo('edit'),
+  'plan': ToolInfo('list-checks'),
+  'todowrite': ToolInfo('list-checks'),
+  'todoread': ToolInfo('list-checks'),
+  'webfetch': ToolInfo('download'),
+  'websearch': ToolInfo('download'),
 };
+
+/// Glifo de una tool. Sale de [kToolInfo].
+String toolIcon(String name) => kToolInfo[name]?.icon ?? 'terminal';
+
+/// La categoría que muestra la caja de actividad. Sale de [kToolInfo] y cae en
+/// el nombre en mayúsculas si la tool no está.
+String toolCategory(String name) =>
+    kToolInfo[name]?.category ?? name.toUpperCase();
 
 /// Una línea: el comando o el resumen de la tool. Sale del `input` crudo, que
 /// es `String` en `pending` y mapa en el resto (`tool.dart`); por eso el

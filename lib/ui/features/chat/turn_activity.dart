@@ -223,6 +223,9 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
 /// Las categorías de la fila: el nombre de la tool en mayúsculas, deduplicado
 /// y en el orden de aparición. Es lo que el prototipo escribe a mano
 /// (`SHELL · READ · EDIT`).
+///
+/// La tabla de nombres vive en [kToolInfo] (`tool_card.dart`): acá sólo se
+/// recorre, no se decide la categoría.
 String turnCategoryLabel(List<AssistantTool> tools) {
   final seen = <String>{};
   final out = <String>[];
@@ -232,18 +235,3 @@ String turnCategoryLabel(List<AssistantTool> tools) {
   }
   return out.join(' · ');
 }
-
-/// Una tool → la categoría que muestra la caja. Lo que no está en la lista
-/// pasa con su propio nombre en mayúsculas: una tool nueva no puede romper ni
-/// quedar sin etiqueta.
-String toolCategory(String name) => switch (name) {
-  'shell' || 'bash' || 'powershell' => 'SHELL',
-  'read' || 'notebookread' => 'READ',
-  'edit' || 'multiedit' => 'EDIT',
-  'write' || 'create' => 'WRITE',
-  'glob' || 'grep' || 'list' => 'SEARCH',
-  'subagent' || 'task' => 'SUBAGENT',
-  'skill' => 'SKILL',
-  'question' || 'ask' => 'QUESTION',
-  _ => name.toUpperCase(),
-};

@@ -20,6 +20,19 @@
 /// token son 60 rebuilds de markdown por segundo. El valor autoritativo llega
 /// en el `*.ended` (que dispara un re-fetch), así que perder un delta no
 /// corrompe el mensaje.
+///
+/// El delta se aplica al mensaje que nombra `assistantMessageID` (igual que el
+/// reducer de referencia), **no** "al último assistant": al último se le pegaba
+/// el primer delta del turno siguiente al mensaje ya terminado del anterior.
+///
+/// ## Preguntas
+/// `question.asked` trae el `id` del request (que es el `requestID` del reply) y
+/// el `QuestionInfo[]`; se responde con
+/// `POST /api/session/{id}/question/{requestID}/reply` `{answers:[[…]]}`. Medido
+/// en `:4098`: **no hay** endpoint para listar las pendientes
+/// (`GET /api/question/request` da 404), así que [answerQuestion] tiene un
+/// fallback que manda las respuestas como prompt — eso siempre funciona — y
+/// dice por cuál se fue ([lastQuestionReplyPath]).
 library;
 
 import 'dart:async';
@@ -111,16 +124,66 @@ class _GlobalSse extends SseClient {
 ChatEventSource _defaultSource(ServerConfig config, String? directory) =>
     GlobalSseSource(config: config, directory: directory);
 
-/// Eventos que traen el estado del turno. La lista es la medida en `:4098`
-/// (`session.status`) más los nombres del openapi más nuevo, que conviven sin
-/// costo (mismo criterio que en `lib/domain/models/event.dart`).
-const Set<String> kChatStatusEvents = {
-  'session.status',
-  'session.idle',
-  'session.next.status',
-  'session.execution.started',
-  'session.execution.completed',
+/// Eventos que traen el estado del turno.
+///
+/// `:4098`) y el `session.idle` deprecado. Los nombres que estaban antes acá
+/// el protocolo: nadie los emitía, pero se leían como evidencia de turno y
+/// por eso las reglas del repo no admiten eventos inventados.
+const Set<String> kChatStatusEvents = {'session.status', 'session.idle'};
+
+/// `question.asked`: el agente está esperando una respuesta (§6).
+///
+/// El dialecto v2 los publica con el prefijo de versión (`question.v2.asked`) y
+/// `lib/domain/models/event.dart`.
+const Set<String> kQuestionAskedEvents = {
+  'question.asked',
+  'question.v2.asked',
 };
+
+/// `question.replied` / `question.rejected`: la pregunta se cerró y el turno
+/// sigue. También en las dos generaciones (`§6`).
+const Set<String> kQuestionClosedEvents = {
+  'question.replied',
+  'question.v2.replied',
+  'question.rejected',
+  'question.v2.rejected',
+};
+
+/// Por dónde salió la respuesta de una pregunta.
+enum QuestionReplyPath {
+  /// `POST /api/session/{id}/question/{requestID}/reply`, que es lo que dice el
+  /// protocolo (`API_CONTRACT.md` §6).
+  api,
+
+  /// este build (404) o falla — mandar la respuesta como prompt siempre
+  /// funciona, y es lo único quearantea que el turno no quede trabado.
+  prompt,
+}
+
+/// La pregunta que el agente está esperando, tal como la mandó `question.asked`.
+final class PendingQuestion {
+  const PendingQuestion({
+    required this.requestId,
+    required this.questions,
+    this.callId,
+    this.messageId,
+  });
+
+  /// `que_…`, el `id` del `question.asked` y el `{requestID}` del reply.
+  final String requestId;
+
+  /// Los `QuestionInfo[]` **en crudo** (`{question, header, options[], …}`).
+  /// Quedan sin tipo fuerte a propósito: el shape es de la tool, y la UI es la
+  /// que lo proyecta a la card.
+  final List<Map<String, Object?>> questions;
+
+  /// `tool.callID` si vino: el `content[].id` del tool `question` que originator
+  /// la pregunta. Sirve para pegarle el `requestID` a la card correcta.
+  final String? callId;
+
+  /// `tool.messageID`: el assistant dueño de la pregunta.
+  final String? messageId;
+}
 
 class ChatViewModel extends ChangeNotifier {
   /// `ChatViewModel(api, sessionId: 'ses_…')`.
@@ -169,7 +232,24 @@ class ChatViewModel extends ChangeNotifier {
   String? _earlierCursor;
   StreamState? _streamState;
   bool _visible = true;
+
+  /// ese caso la vista no lo vuelve a prender al montar: la intencion del
   int _localSeq = 0;
+
+  /// La pregunta que el agente está esperando, si hay alguna.
+  PendingQuestion? _pendingQuestion;
+
+  /// Por dónde respondió la **última** pregunta. `null` = todavía no respondió.
+  QuestionReplyPath? _lastQuestionReplyPath;
+
+  /// `session.status` con `type: "retry"`: "Reintentando en 8s — Rate limit".
+  /// Vive acá porque el status por sí solo dice "busy" y no dice por qué.
+  String? _retryNotice;
+
+  /// Secuencia del último re-fetch **aplicado**. Un response más viejo que
+  /// éste ya no se aplica: con el merge por `id` lo que sí haría es dejar
+  /// mensajes viejos pegados al final de la lista.
+  int _appliedFetch = 0;
 
   ChatEventSource? _source;
   StreamSubscription<OcEvent>? _events;
@@ -179,7 +259,11 @@ class ChatViewModel extends ChangeNotifier {
   Timer? _pollTimer;
   String _pendingText = '';
   String _pendingReasoning = '';
+
+  /// `assistantMessageID` del turno al que pertenecen los deltas en el buffer.
+  String? _deltaMessageId;
   bool _disposed = false;
+  final Set<String> _seenEventIds = <String>{};
 
   // ───────────────────────────── lectura de estado ──────────────────────────
 
@@ -237,35 +321,99 @@ class ChatViewModel extends ChangeNotifier {
     return null;
   }
 
+  /// La pregunta que el agente está esperando, o `null` si no hay ninguna.
+  PendingQuestion? get pendingQuestion => _pendingQuestion;
+
+  /// Hay una pregunta esperando respuesta.
+  ///
+  /// El turno **sigue** `working` (§7.4: no se esconde el botón Detener sin la
+  /// evidencia real de fin de turno), pero la card de la pregunta es la salida:
+  /// el usuario contesta ahí y el turno se destraba. Sin esto lo único que había
+  /// era Detener.
+  bool get awaitingAnswer => _pendingQuestion != null;
+
+  /// Por dónde respondió la última pregunta. `null` si todavía no respondió
+  /// ninguna: así el test puede distinguir "no se intentó" de "falló el endpoint".
+  QuestionReplyPath? get lastQuestionReplyPath => _lastQuestionReplyPath;
+
+  /// Atajo booleano de [lastQuestionReplyPath] para la UI y los tests.
+  bool? get questionReplyViaApi => switch (_lastQuestionReplyPath) {
+    null => null,
+    QuestionReplyPath.api => true,
+    QuestionReplyPath.prompt => false,
+  };
+
+  /// `Reintentando en 8s — Rate limit` cuando el `session.status` es `retry`
+  /// con `action`; `null` en cualquier otro status. Sin esto un reintento es
+  /// indistinguible de un turno trabajando.
+  String? get retryNotice => _retryNotice;
+
+  /// El `requestID` de la pregunta que corresponde a este tool (`callID`).
+  ///
+  /// `null` si no hay ninguna pendiente o si la pendiente es de otro tool. El
+  /// id de la pregunta vive en el evento, no en el mensaje: la lista de
+  /// mensajes sólo tiene el `callID` del tool.
+  String? requestIdFor(String callId) {
+    final pending = _pendingQuestion;
+    if (pending == null || pending.requestId.isEmpty) return null;
+    if (pending.callId == null || pending.callId == callId) {
+      return pending.requestId;
+    }
+    return null;
+  }
+
   // ───────────────────────────────── carga ──────────────────────────────────
 
-  /// `GET /api/session/{id}/message?limit=30&order=asc`.
+  /// `GET /api/session/{id}/message?limit=30&order=desc` (primera carga).
   ///
-  /// `order: 'asc'` + el cursor `previous` que devuelve el server: la página
-  /// se muestra vieja→nueva y el botón "Cargar 30 anteriores" pide la página
-  /// anterior. El cursor es opaco y lo posee el server (§2): la app lo pasa de
-  /// vuelta, no lo interpreta.
-  Future<void> load() async {
-    _loading = true;
-    _error = null;
-    _safeNotify();
+  /// `desc` + reverse: la primera página trae los ÚLTIMOS mensajes y la lista
+  /// queda en orden cronológico. Con `asc` se abriría en el mensaje más viejo
+  /// de la sesión, que es justo lo que el contrato de scroll prohíbe ("al
+  /// entrar al chat arrancás en el último mensaje").
+  ///
+  /// Comparte el camino con [refresh]: los dos **mergean** (ver [_ingest]).
+  Future<void> load() => _fetch(loading: true);
+
+  /// Re-fetch silencioso. Es lo que dispara un `isSettledEvent` y el poll de
+  /// respaldo.
+  ///
+  /// **No puede tirar la lista**: hace un upsert por `id`, así que lo que
+  /// `loadEarlier()` metió más arriba se queda. Antes `refresh() => load()` y
+  /// `_ingest` borraba todo para volver a agregar sólo la última página: cada
+  /// `*.ended` acortaba la conversación bajo los pies del que scrolleaba.
+  Future<void> refresh() => _fetch(loading: false);
+
+  /// Número de fetch iniciado, para que un response viejo no pise uno nuevo.
+  int _fetchSeq = 0;
+
+  Future<void> _fetch({required bool loading}) async {
+    if (loading) {
+      _loading = true;
+      _error = null;
+      _safeNotify();
+    }
+    final seq = ++_fetchSeq;
     try {
-      // `desc` + reverse: la primera página trae los ÚLTIMOS mensajes y la
-      // lista queda en orden cronológico. Con `asc` se abriría en el mensaje
-      // más viejo de la sesión, que es justo lo que el contrato de scroll
-      // prohíbe ("al entrar al chat arrancás en el último mensaje").
       final page = await _api.listMessages(
         sessionId,
         limit: pageSize,
         order: 'desc',
         directory: directory,
       );
+      // Un response que ya quedó viejo no se aplica: `load()` y `refresh()`
+      // pueden solaparse (el poll de 2 s contra un `*.ended`) y el que
+      // responde primero no es necesariamente el que arrancó después.
+      if (_disposed || seq < _appliedFetch) return;
+      _appliedFetch = seq;
       _ingest(page.data.reversed.toList(growable: false));
-      _earlierCursor = page.previous;
+      // El cursor de "anteriores" sólo retrocede: un re-fetch de la última
+      // página no puede devolver el cursor hacia atrás de lo ya cargado.
+      _earlierCursor ??= page.previous;
     } on OchError catch (e) {
+      if (_disposed || seq < _appliedFetch) return;
       _error = e.message;
     } finally {
-      _loading = false;
+      if (loading) _loading = false;
       _recomputeWorking();
       _safeNotify();
     }
@@ -296,9 +444,76 @@ class ChatViewModel extends ChangeNotifier {
     }
   }
 
-  /// Re-fetch silencioso. Es lo que dispara un `isSettledEvent`: el delta es
-  /// live-only, el valor final llega con el mensaje completo (§7.5).
-  Future<void> refresh() => load();
+  // ─────────────────────────────── responder ───────────────────────────────
+
+  /// Responde la pregunta pendiente (`API_CONTRACT.md` §6).
+  ///
+  /// **Camino 1, el del protocolo**:
+  /// `POST /api/session/{id}/question/{requestID}/reply` con
+  /// `{answers: [[…]]}` — un array por pregunta, en el orden en que se
+  /// hicieron. Devuelve 204.
+  ///
+  /// **Camino 2, el que nunca falla**: si el endpoint no existe (404 en el
+  /// build medido) o el POST falla, las respuestas se mandan como un prompt
+  /// del usuario normal. El server los acepta como respuesta y el turno se
+  /// destraca igual.
+  ///
+  /// Devuelve (y deja en [lastQuestionReplyPath]) por cuál se fue. Un 404 **no**
+  /// se reporta como error: el fallback funcionó, así que no hay nada que
+  /// avisasle al usuario como error — sólo que la respuesta no fue por el
+  /// endpoint.
+  Future<QuestionReplyPath> answerQuestion(
+    String? requestId, {
+    required List<List<String>> answers,
+  }) async {
+    if (answers.isEmpty) {
+      return _lastQuestionReplyPath ?? QuestionReplyPath.prompt;
+    }
+
+    final id = requestId?.trim() ?? '';
+    if (id.isNotEmpty) {
+      try {
+        await _api.postJson(
+          '/session/$sessionId/question/$id/reply',
+          body: <String, Object?>{'answers': answers},
+          query: <String, String?>{
+            if (directory != null && directory!.isNotEmpty)
+              ServerConfig.locationParam: directory,
+          },
+        );
+        // 204: el server tomó la respuesta. La pendiente se cae ahora mismo
+        // para que la card no quede pidiendo algo que ya se contestó.
+        _pendingQuestion = null;
+        _lastQuestionReplyPath = QuestionReplyPath.api;
+        _recomputeWorking();
+        _safeNotify();
+        return QuestionReplyPath.api;
+      } on OchError {
+        // El endpoint no existe en este build (404) o no respondió: se va por
+        // el prompt. El error del POST **no** se reporta: el fallback funcionó,
+        // así que no hay nada que el usuario pueda arreglar. Queda dicho por
+        // dónde se contestó y nada más.
+        _lastQuestionReplyPath = QuestionReplyPath.prompt;
+      }
+    } else {
+      // No hay `requestID` (el evento no llegó o el tool no trae `callID`):
+      // tampoco hay a quién preguntarle, así que directo al prompt.
+      _lastQuestionReplyPath = QuestionReplyPath.prompt;
+    }
+
+    await send(_answerPrompt(answers));
+    _pendingQuestion = null;
+    _recomputeWorking();
+    _safeNotify();
+    return QuestionReplyPath.prompt;
+  }
+
+  /// El prompt del fallback: una línea por opción elegida. `Ahora no.` es el
+  /// *skip* (lista vacía) y conserva el texto que ya usaba el botón.
+  static String _answerPrompt(List<List<String>> answers) {
+    final lines = [for (final a in answers) ...a.where((l) => l.isNotEmpty)];
+    return lines.isEmpty ? 'Ahora no.' : lines.join('\n');
+  }
 
   // ───────────────────────────────── enviar ─────────────────────────────────
 
@@ -403,6 +618,7 @@ class ChatViewModel extends ChangeNotifier {
     _refetchTimer = null;
     _pendingText = '';
     _pendingReasoning = '';
+    _deltaMessageId = null;
     unawaited(_events?.cancel());
     unawaited(_states?.cancel());
     _events = null;
@@ -418,7 +634,16 @@ class ChatViewModel extends ChangeNotifier {
   /// timers. Al volver se reconecta y se re-snapshotéa, porque entre la ida y
   /// la vuelta se perdieron deltas (que son live-only, §7.5).
   void setVisible(bool visible) {
-    if (_visible == visible) return;
+    if (_visible == visible) {
+      // Idempotencia: un viewmodel que ya esta visible tiene que tener el
+      // stream arriba. Sin esto, el que nace visible (el caso normal) nunca
+      // conectaba, porque la conexion solo ocurria en la transicion.
+      if (visible && _source == null) {
+        connectStream();
+        unawaited(refresh());
+      }
+      return;
+    }
     _visible = visible;
     if (visible) {
       connectStream();
@@ -461,16 +686,43 @@ class ChatViewModel extends ChangeNotifier {
     final id = event.sessionID;
     if (id != null && id != sessionId) return;
 
+    // Dedupe por id de evento: al reconectar, el server re-emite desde el
+    // principio (no hay ?after= funcional porque su endpoint da 404) y los
+    // deltas arrival dos veces. Un evento repetido no se reaplica, asi que
+    // el texto del asistente no se duplica.
+    final key = event.id;
+    if (key.isNotEmpty && !_seenEventIds.add(key)) return;
+    if (_seenEventIds.length > 4000) {
+      _seenEventIds.clear();
+      _seenEventIds.add(key);
+    }
+
     final type = event.type;
+    final lower = type.toLowerCase();
 
     // Canal C: `session.error` — aviso no bloqueante (§5).
-    if (type == 'session.error') {
+    if (lower == 'session.error') {
       _error = OcErrorInfo.fromJson(event.data['error']).toString();
       _safeNotify();
       return;
     }
 
-    if (kChatStatusEvents.contains(type.toLowerCase())) {
+    // Preguntas (§6). Van antes que el status porque el `requestID` de la
+    // respuesta vive acá, no en el mensaje.
+    if (kQuestionAskedEvents.contains(lower)) {
+      _applyQuestionAsked(event.data);
+      // La lista de mensajes todavía no tiene el tool `question` en `pending`:
+      // el re-fetch lo trae y recién ahí se puede pintar la card.
+      _scheduleRefetch();
+      return;
+    }
+    if (kQuestionClosedEvents.contains(lower)) {
+      _clearQuestion(event.data);
+      _scheduleRefetch();
+      return;
+    }
+
+    if (kChatStatusEvents.contains(lower)) {
       _applyStatus(event.data);
       return;
     }
@@ -485,13 +737,54 @@ class ChatViewModel extends ChangeNotifier {
     if (isSettledEvent(type)) _scheduleRefetch();
   }
 
+  /// `question.asked {id, sessionID, questions[], tool?}`.
+  ///
+  /// El `id` es el `requestID` del reply y `tool.callID` es el `content[].id`
+  /// del tool `question` que la originator: sin el segundo la card no sabe a
+  /// qué pregunta pertenece.
+  void _applyQuestionAsked(Map<String, Object?> data) {
+    final tool = asMap(data['tool']);
+    final requestId = asStr(data['id']) ?? asStr(tool?['callID']) ?? '';
+    _pendingQuestion = PendingQuestion(
+      requestId: requestId,
+      questions: asMapList(data['questions']),
+      callId: asStr(tool?['callID']),
+      messageId: asStr(tool?['messageID']),
+    );
+    _recomputeWorking();
+    _safeNotify();
+  }
+
+  /// `question.replied {sessionID, requestID, answers[]}` /
+  /// `question.rejected {sessionID, requestID}`: la pregunta se cerró.
+  ///
+  /// Si el `requestID` es de **otra** pregunta, la que espera sigue esperando:
+  /// se descartan las viejas, no la viva.
+  void _clearQuestion(Map<String, Object?> data) {
+    final pending = _pendingQuestion;
+    if (pending == null) return;
+    final requestId = asStr(data['requestID']) ?? asStr(data['id']);
+    if (requestId != null &&
+        requestId.isNotEmpty &&
+        requestId != pending.requestId) {
+      return;
+    }
+    _pendingQuestion = null;
+    _recomputeWorking();
+    _safeNotify();
+  }
+
   void _applyStatus(Map<String, Object?> data) {
     final status = data['status'] ?? data['type'];
     if (isBusyStatus(status)) {
       _busyStatus = true;
+      // `retry` es un `busy` con motivo y con cuenta regresiva: sin el `action`
+      // un reintento es indistinguible de un turno trabajando.
+      _retryNotice = _statusRetryNotice(status);
     } else if (isSettledStatus(status)) {
       _busyStatus = false;
       _awaitingAssistant = false;
+      _retryNotice = null;
     } else {
       return; // un status desconocido no afirma nada
     }
@@ -499,8 +792,24 @@ class ChatViewModel extends ChangeNotifier {
     _safeNotify();
   }
 
+  /// `SessionStatus.retry` trae
+  /// `{type, attempt, message, action:{reason, provider, title, message, label, link}, next}`.
+  /// `next` es el delay en ms hasta el próximo intento: de ahí sale el "en Ns".
+  static String? _statusRetryNotice(Object? status) {
+    final map = asMap(status);
+    if (map == null || asStr(map['type'])?.toLowerCase() != 'retry') {
+      return null;
+    }
+    final nextMs = asInt(map['next']);
+    final base = nextMs == null || nextMs <= 0
+        ? 'Reintentando'
+        : 'Reintentando en ${(nextMs / 1000).ceil()}s';
+    final title = asStr(asMap(map['action'])?['title'])?.trim();
+    if (title == null || title.isEmpty) return base;
+    return '$base — $title';
+  }
+
   void _applyDelta(String type, Map<String, Object?> data) {
-    _awaitingAssistant = false;
     final chunk = asStr(data['text']) ?? asStr(data['delta']) ?? '';
     if (chunk.isEmpty) return;
 
@@ -509,10 +818,15 @@ class ChatViewModel extends ChangeNotifier {
     } else if (type.toLowerCase().contains('text')) {
       _pendingText += chunk;
     } else {
-      // `tool.input.delta` es live-only y además su valor final llega en
       // `tool.input.ended` (que dispara el re-fetch): no se aplica al modelo.
       return;
     }
+    _awaitingAssistant = false;
+
+    // A qué assistant pertenecen estos deltas. El id se lee de **cada** delta
+    // (el primero puede no traerlo) y el último que lo trajo manda.
+    final id = asStr(data['assistantMessageID']) ?? asStr(data['messageID']);
+    if (id != null && id.isNotEmpty) _deltaMessageId = id;
 
     // 20 fps: se agrupan los deltas de 50 ms en un solo rebuild.
     _deltaTimer ??= Timer(deltaInterval, _flushDeltas);
@@ -523,11 +837,13 @@ class ChatViewModel extends ChangeNotifier {
     _deltaTimer = null;
     final text = _pendingText;
     final reasoning = _pendingReasoning;
+    final target = _deltaMessageId;
     _pendingText = '';
     _pendingReasoning = '';
+    _deltaMessageId = null;
     if (text.isEmpty && reasoning.isEmpty) return;
 
-    final index = _messages.lastIndexWhere((m) => m is AssistantMessage);
+    final index = _deltaTarget(target);
     if (index < 0) return;
     final current = _messages[index] as AssistantMessage;
 
@@ -538,6 +854,30 @@ class ChatViewModel extends ChangeNotifier {
 
     _recomputeWorking();
     _safeNotify();
+  }
+
+  /// Dónde se aplica un delta.
+  ///
+  /// 1. Al `AssistantMessage` con ese `id`, como el reducer de referencia
+  ///    (`assistantMessageID`). Sin esto el primer delta de un turno nuevo se
+  ///    pegaba al mensaje **ya terminado** del turno anterior.
+  /// 2. Si el id no está en la lista todavía (el mensaje llegó después del
+  ///    delta), al último assistant **incompleto**: es el único que puede
+  ///    seguir creciendo.
+  /// 3. Si no hay ninguno incompleto, al último assistant. Antes se perdía el
+  ///    texto; ahora es el último recurso.
+  int _deltaTarget(String? id) {
+    if (id != null && id.isNotEmpty) {
+      final index = _messages.indexWhere(
+        (m) => m.id == id && m is AssistantMessage,
+      );
+      if (index >= 0) return index;
+    }
+    final incomplete = _messages.lastIndexWhere(
+      (m) => m is AssistantMessage && !m.isComplete,
+    );
+    if (incomplete >= 0) return incomplete;
+    return _messages.lastIndexWhere((m) => m is AssistantMessage);
   }
 
   /// Agrega al último item de texto (o razonamiento) del `content[]`, o crea
@@ -600,27 +940,82 @@ class ChatViewModel extends ChangeNotifier {
         SessionMessage.fromJson(m),
   ];
 
-  /// Reemplaza la lista local por la del server.
+  /// Inserta la página del server **sin perder** lo ya cargado (upsert por
+  /// `id`).
   ///
-  /// Los mensajes optimistas (`local_…`) se caen: el server persiste el prompt
-  /// al admitirlo (decisión D4), así que la re-fetch es la que los cambia por
-  /// los mensajes con id real. Si el re-fetch falla, no se toca la lista.
+  /// Antes esto **borraba** la lista y volvía a agregar sólo la última página:
+  /// cada `*.ended` y cada poll del fallback tiraban abajo todo lo que
+  /// `loadEarlier()` había cargado, y la conversación se acortaba sola debajo
+  /// del que estaba scrolleando hacia arriba.
+  ///
+  /// El orden se respeta: cada mensaje que ya estaba se reemplaza en su lugar y
+  /// los que sólo trae el server van al final, que es donde están (la página es
+  /// cronológica y su último item es el más nuevo).
+  ///
+  /// Una página vacía **no** toca la lista: es un fallo o una sesión recién
+  /// creada, y en los dos casos el mejor dato es el que ya tenemos.
+  ///
+  /// Los optimistas (`local_…`) se caen recién cuando el server trae un mensaje
+  /// del usuario con ese mismo texto: el prompt se persiste al admitirlo, pero
+  /// hasta que aparezca no tiene por qué parpadear.
   void _ingest(List<dynamic> raw) {
+    final fresh = _parseAll(raw);
+    if (fresh.isEmpty) return;
+
+    final incoming = <String, SessionMessage>{for (final m in fresh) m.id: m};
+    final serverTexts = <String>{
+      for (final m in fresh)
+        if (m is UserMessage) m.text,
+    };
+
+    final merged = <SessionMessage>[];
+    final kept = <String>{};
+    for (final message in _messages) {
+      final server = incoming.remove(message.id);
+      if (server != null) {
+        merged.add(server);
+        kept.add(server.id);
+        continue;
+      }
+      final confirmed =
+          message.id.startsWith('local_') &&
+          message is UserMessage &&
+          serverTexts.contains(message.text);
+      if (confirmed) continue;
+      merged.add(message);
+      kept.add(message.id);
+    }
+    for (final message in fresh) {
+      if (kept.add(message.id)) merged.add(message);
+    }
+
     _messages
       ..clear()
-      ..addAll(_parseAll(raw));
+      ..addAll(merged);
   }
 
   void _recomputeWorking() {
+    final last = lastAssistant;
+    // Evidencia del ultimo mensaje: el turno sigue vivo si el assistant
+    // todavia no se cerro (sin time.completed y sin finish).
+    final assistantBusy =
+        _awaitingAssistant || (last != null && !last.isComplete);
     final status = _busyStatus;
-    if (status != null) {
-      // Evidencia viva: manda el status, para que el botón Detener no quede
-      // pegado por un `time.completed` que todavía no llegó (§7.4).
-      _working = status;
+    if (status == null) {
+      _working = assistantBusy;
       return;
     }
-    final last = lastAssistant;
-    _working = _awaitingAssistant || (last != null && !last.isComplete);
+    // Un status busy mantiene el turno vivo aunque el mensaje ya se haya
+    // cerrado por un camino raro (APIError, compaction).
+    if (status) {
+      _working = true;
+      return;
+    }
+    // Status settled (idle/completed): manda el cierre, salvo que el ultimo
+    // assistant siga abierto — si el server dijo idle pero el mensaje no
+    // cerro, todavia hay trabajo y el boton Detener tiene que seguir
+    // visible (contrato 7.4: working = assistant incompleto O status busy).
+    _working = assistantBusy;
   }
 
   /// `AssistantMessage` es inmutable: para un delta hay que copiarlo entero.
@@ -651,6 +1046,9 @@ class ChatViewModel extends ChangeNotifier {
 
   @override
   void dispose() {
+    // Doble dispose (el shell descarta la vista y el widget se cierra a la
+    // vez) reventaba con el assert de ChangeNotifier. Idempotente.
+    if (_disposed) return;
     _disposed = true;
     disposeStream();
     super.dispose();
