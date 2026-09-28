@@ -1,0 +1,547 @@
+/// Tests del [ChatViewModel] con un `MockClient` de `package:http/testing` y un
+/// [ChatEventSource] falso: no hay server, no hay socket, no hay timers vivos.
+///
+/// Los JSON son los **medidos** contra `:4098` (`docs/API_CONTRACT.md` §4, §7),
+/// no inventados: el `{"data":[…]}` de `listMessages`, el `content[]` embebido
+/// del assistant, y los frames `{id, type, data}` del stream global.
+library;
+
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:openher_mobile/core/network/api_client.dart';
+import 'package:openher_mobile/core/network/server_config.dart';
+import 'package:openher_mobile/core/network/sse_client.dart';
+import 'package:openher_mobile/domain/models/event.dart';
+import 'package:openher_mobile/domain/models/message.dart';
+import 'package:openher_mobile/ui/features/chat/chat_viewmodel.dart';
+
+const ServerConfig kConfig = ServerConfig(host: '127.0.0.1', port: 4098);
+
+const String kSessionId = 'ses_0acd172ac001';
+
+/// Assistant **terminado**: `time.completed` presente ⇒ el turno no está
+/// trabajando.
+Map<String, Object?> assistantDone() => {
+  'id': 'msg_assistant_done',
+  'type': 'assistant',
+  'time': {'created': 1000, 'streamed': 1200, 'completed': 2600},
+  'agent': 'build',
+  'model': {'id': 'deepseek-v4.1-flash', 'providerID': 'opencode-go'},
+  'content': [
+    {'type': 'text', 'text': 'Ya está.'},
+    {
+      'type': 'tool',
+      'id': 'call_1',
+      'name': 'shell',
+      'executed': false,
+      'state': {
+        'status': 'completed',
+        'input': {'command': 'Get-ChildItem lib'},
+        'content': [
+          {'type': 'text', 'text': 'chat_view.dart'},
+        ],
+      },
+    },
+  ],
+  'finish': 'stop',
+  'cost': 0.011,
+  'tokens': {
+    'input': 14200,
+    'output': 300,
+    'reasoning': 0,
+    'cache': {'read': 9000, 'write': 0},
+  },
+};
+
+/// Assistant **a medio hacer**: sin `time.completed` ⇒ trabajando.
+Map<String, Object?> assistantWorking() => {
+  'id': 'msg_assistant_live',
+  'type': 'assistant',
+  'time': {'created': 5000, 'streamed': 5200},
+  'agent': 'build',
+  'model': {'id': 'deepseek-v4.1-flash', 'providerID': 'opencode-go'},
+  'content': [
+    {'type': 'text', 'text': 'Estoy'},
+  ],
+};
+
+Map<String, Object?> userMessage(String id, String text) => {
+  'id': id,
+  'type': 'user',
+  'time': {'created': 900},
+  'text': text,
+  'files': <Object?>[],
+};
+
+/// Un `MockClient` que responde con el JSON que devuelve el handler.
+MockClient jsonClient(
+  Map<String, Object?> Function(http.Request request) handler,
+) => MockClient((request) async {
+  final body = handler(request);
+  return http.Response(
+    jsonEncode(body),
+    200,
+    headers: const {'content-type': 'application/json'},
+  );
+});
+
+/// Fuente de eventos falsa: empuja frames a mano y registra si se disposal.
+class FakeEventSource implements ChatEventSource {
+  final _events = StreamController<OcEvent>.broadcast();
+  final _states = StreamController<StreamState>.broadcast();
+  int connects = 0;
+  bool disposed = false;
+
+  @override
+  Stream<OcEvent> get events => _events.stream;
+
+  @override
+  Stream<StreamState> get stateChanges => _states.stream;
+
+  @override
+  StreamState get state => StreamState.polling;
+
+  @override
+  Uri streamUri({int? after}) => kConfig.api('/event');
+
+  @override
+  void connect() => connects++;
+
+  @override
+  Future<void> dispose() async {
+    disposed = true;
+    await _events.close();
+    await _states.close();
+  }
+
+  void emit(String type, Map<String, Object?> data) {
+    if (disposed) return;
+    _events.add(
+      OcEvent(
+        id: 'evt_${type.hashCode}',
+        type: type,
+        data: {'sessionID': kSessionId, ...data},
+      ),
+    );
+  }
+
+  /// Un evento de **otra** sesión: el stream es global, el filtro es nuestro.
+  void emitOther(String type, [Map<String, Object?> data = const {}]) {
+    _events.add(
+      OcEvent(
+        id: 'evt_other',
+        type: type,
+        data: {'sessionID': 'ses_otra', ...data},
+      ),
+    );
+  }
+}
+
+/// `ApiClient` sobre el mock. El `http.Client` inyectado **no** lo cierra el
+/// cliente al hacer `close()` (no es suyo), así que el test no filtra sockets.
+ApiClient api(MockClient client) => ApiClient(
+  config: kConfig,
+  client: client,
+  timeout: const Duration(seconds: 1),
+);
+
+ChatViewModel buildVm(
+  MockClient client, {
+  FakeEventSource? source,
+  String sessionId = kSessionId,
+}) => ChatViewModel(
+  api(client),
+  sessionId: sessionId,
+  streamFactory: (config, directory) => source ?? FakeEventSource(),
+);
+
+void main() {
+  group('load()', () {
+    test(
+      'parsea el sobre {"data":[…]} y working sale de time.completed',
+      () async {
+        final requests = <Uri>[];
+        final vm = buildVm(
+          jsonClient((request) {
+            requests.add(request.url);
+            // El server con `order=desc` devuelve la página **nueva→vieja**;
+            // el mock lo replica para no mentirle al viewmodel.
+            return {
+              'data': [assistantDone(), userMessage('msg_u1', 'hola')],
+            };
+          }),
+        );
+        addTearDown(vm.dispose);
+
+        await vm.load();
+
+        // `limit=30` y `order=desc`: la primera página trae los ÚLTIMOS
+        // mensajes y el viewmodel los da vuelta para dejar la lista en orden
+        // cronológico. El cursor `previous` es el de "Cargar 30 anteriores".
+        expect(requests.single.queryParameters['limit'], '30');
+        expect(requests.single.queryParameters['order'], 'desc');
+        expect(requests.single.path, '/api/session/$kSessionId/message');
+
+        expect(vm.messages, hasLength(2));
+        expect(vm.messages.first, isA<UserMessage>());
+        expect(vm.messages.last, isA<AssistantMessage>());
+        final assistant = vm.messages.last as AssistantMessage;
+        expect(assistant.textContent, 'Ya está.');
+        expect(assistant.toolItems.single.name, 'shell');
+        // `time.completed` presente ⇒ turno terminado.
+        expect(vm.working, isFalse);
+        expect(vm.error, isNull);
+        // El resumen sale de los tokens del assistant (no hay SessionInfo).
+        expect(vm.serverTokens, 14500);
+        expect(vm.serverCost, closeTo(0.011, 1e-9));
+      },
+    );
+
+    test(
+      'el último assistant sin time.completed deja working en true',
+      () async {
+        final vm = buildVm(
+          jsonClient(
+            (_) => {
+              'data': [userMessage('msg_u1', 'hola'), assistantWorking()],
+            },
+          ),
+        );
+        addTearDown(vm.dispose);
+
+        await vm.load();
+
+        expect(vm.working, isTrue);
+      },
+    );
+
+    test(
+      'el cursor "previous" del server enciende "Cargar 30 anteriores"',
+      () async {
+        var call = 0;
+        final vm = buildVm(
+          jsonClient((_) {
+            call++;
+            if (call == 1) {
+              return {
+                'data': [userMessage('msg_u1', 'hola')],
+                'cursor': {'previous': 'eyJpZCI6Im1zZ19uMSJ9'},
+              };
+            }
+            return {
+              'data': [userMessage('msg_u0', 'anterior')],
+            };
+          }),
+        );
+        addTearDown(vm.dispose);
+
+        await vm.load();
+        expect(vm.hasEarlier, isTrue);
+        expect(vm.messages, hasLength(1));
+
+        await vm.loadEarlier();
+        expect(vm.messages.map((m) => m.id), ['msg_u0', 'msg_u1']);
+        // La segunda página no trae cursor: el botón desaparece.
+        expect(vm.hasEarlier, isFalse);
+      },
+    );
+  });
+
+  group('send()', () {
+    test('manda el body de §4 y agrega la burbuja optimista', () async {
+      String? body;
+      Uri? uri;
+      final vm = buildVm(
+        jsonClient((request) {
+          uri = request.url;
+          body = request.body;
+          // `sendPrompt` espera un objeto en `data`; `listMessages`, una lista.
+          return request.method == 'POST'
+              ? {
+                  'data': {'id': 'msg_1'},
+                }
+              : {'data': <Object?>[]};
+        }),
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+
+      await vm.send(
+        'diseñá las vistas',
+        files: const [
+          {'uri': 'file:///c.png', 'name': 'c.png', 'mime': 'image/png'},
+        ],
+      );
+
+      expect(uri!.path, '/api/session/$kSessionId/prompt');
+      final decoded = jsonDecode(body!) as Map<String, Object?>;
+      final prompt = decoded['prompt']! as Map<String, Object?>;
+      expect(prompt['text'], 'diseñá las vistas');
+      expect(prompt['files'], [
+        {'uri': 'file:///c.png', 'name': 'c.png', 'mime': 'image/png'},
+      ]);
+
+      final local = vm.messages.single as UserMessage;
+      expect(local.id, startsWith('local_'));
+      expect(local.text, 'diseñá las vistas');
+      expect(local.files.single.mime, 'image/png');
+      // Un prompt admitido ⇒ esperando el assistant ⇒ trabajando.
+      expect(vm.working, isTrue);
+      expect(vm.error, isNull);
+    });
+
+    test(
+      'un 429 saca la burbuja optimista y muestra el error de transporte',
+      () async {
+        final failing = ChatViewModel(
+          api(
+            MockClient(
+              (_) async => http.Response('{"message":"rate limit"}', 429),
+            ),
+          ),
+          sessionId: kSessionId,
+        );
+        addTearDown(failing.dispose);
+
+        await failing.send('hola');
+
+        expect(failing.messages, isEmpty);
+        expect(failing.error, contains('429'));
+        expect(failing.working, isFalse);
+      },
+    );
+  });
+
+  group('eventos del stream', () {
+    test('session.status idle termina el turno', () async {
+      final source = FakeEventSource();
+      final vm = buildVm(
+        jsonClient(
+          (_) => {
+            'data': [userMessage('msg_u1', 'hola'), assistantWorking()],
+          },
+        ),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+
+      await vm.load();
+      expect(
+        vm.working,
+        isTrue,
+        reason: 'el assistant no tiene time.completed',
+      );
+
+      vm.connectStream();
+      expect(source.connects, 1);
+
+      source.emit('session.status', {'type': 'busy'});
+      await pumpEventQueue();
+      expect(vm.working, isTrue);
+
+      source.emit('session.status', {'type': 'idle'});
+      await pumpEventQueue();
+      expect(
+        vm.working,
+        isFalse,
+        reason: 'status idle manda sobre el assistant',
+      );
+    });
+
+    test('session.text.delta agrega al texto del último assistant', () async {
+      final source = FakeEventSource();
+      final vm = buildVm(
+        jsonClient(
+          (_) => {
+            'data': [userMessage('msg_u1', 'hola'), assistantWorking()],
+          },
+        ),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+
+      await vm.load();
+      vm.connectStream();
+
+      // El buffer de deltas agrupa 50 ms: se vacía recién después.
+      source.emit('session.text.delta', {
+        'messageID': 'msg_assistant_live',
+        'text': ' leyendo',
+      });
+      expect(
+        (vm.lastAssistant!.textContent),
+        'Estoy',
+        reason: 'el delta todavía está en el buffer',
+      );
+
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      expect(vm.lastAssistant!.textContent, 'Estoy leyendo');
+      expect(vm.working, isTrue);
+    });
+
+    test(
+      'un evento de otra sesión se descarta (el stream es global)',
+      () async {
+        final source = FakeEventSource();
+        final vm = buildVm(
+          jsonClient(
+            (_) => {
+              'data': [userMessage('msg_u1', 'hola'), assistantWorking()],
+            },
+          ),
+          source: source,
+        );
+        addTearDown(vm.dispose);
+
+        await vm.load();
+        vm.connectStream();
+
+        source.emitOther('session.status', {'type': 'idle'});
+        source.emitOther('session.text.delta', {'text': 'NO'});
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+
+        expect(vm.lastAssistant!.textContent, 'Estoy');
+        expect(
+          vm.working,
+          isTrue,
+          reason: 'el idle de otra sesión no cierra este turno',
+        );
+      },
+    );
+
+    test('session.error levanta el banner del canal C', () async {
+      final source = FakeEventSource();
+      final vm = buildVm(
+        jsonClient(
+          (_) => {
+            'data': [userMessage('msg_u1', 'hola'), assistantDone()],
+          },
+        ),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+
+      await vm.load();
+      vm.connectStream();
+
+      source.emit('session.error', {
+        'error': {'type': 'plugin.reload', 'message': 'el plugin falló'},
+      });
+      await pumpEventQueue();
+
+      expect(vm.error, 'plugin.reload: el plugin falló');
+    });
+  });
+
+  test('un text/html levanta HtmlFallbackError y no revienta', () async {
+    final vm = ChatViewModel(
+      api(
+        MockClient(
+          (_) async => http.Response(
+            '<!doctype html><html><body>index</body></html>',
+            200,
+            headers: const {'content-type': 'text/html'},
+          ),
+        ),
+      ),
+      sessionId: kSessionId,
+    );
+    addTearDown(vm.dispose);
+
+    await vm.load();
+
+    expect(vm.messages, isEmpty);
+    expect(vm.working, isFalse);
+    expect(vm.error, isNotNull);
+    expect(vm.error, contains('HTML'));
+  });
+
+  test('setVisible(false) para el stream; volver lo reabre', () async {
+    final source = FakeEventSource();
+    var loads = 0;
+    final vm = buildVm(
+      jsonClient((_) {
+        loads++;
+        return {
+          'data': [userMessage('msg_u1', 'hola'), assistantWorking()],
+        };
+      }),
+      source: source,
+    );
+    addTearDown(vm.dispose);
+
+    await vm.load();
+    expect(loads, 1);
+
+    vm.connectStream();
+    expect(source.connects, 1);
+
+    vm.setVisible(false);
+    expect(source.disposed, isTrue, reason: 'sin socket fuera de pantalla');
+    expect(vm.visible, isFalse);
+
+    // Un evento que llega después no debe tocar el estado.
+    source.emit('session.text.delta', {'text': 'No debe aparecer'});
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    expect(vm.lastAssistant!.textContent, 'Estoy');
+
+    vm.setVisible(true);
+    expect(vm.visible, isTrue);
+    // Al volver se re-snapshotéa, porque los deltas son live-only (§7.5).
+    await pumpEventQueue();
+    expect(loads, 2);
+  });
+
+  test('el stream es el GLOBAL /api/event, no el por sesión (404 medido)', () {
+    // API_CONTRACT §7.1: `/api/session/{id}/event` da 404 en el build medido.
+    // La URL es parte del contrato, así que se verifica, no se supone.
+    final source = GlobalSseSource(
+      config: const ServerConfig(
+        host: '192.168.1.10',
+        port: 4098,
+        password: 's3cr3t',
+      ),
+      directory: 'C:/Proyectos/openher',
+    );
+
+    final uri = source.streamUri(after: 431);
+
+    expect(uri.path, '/api/event');
+    expect(uri.path, isNot(contains('/session/')));
+    expect(uri.queryParameters['after'], '431');
+    expect(
+      uri.queryParameters[ServerConfig.locationParam],
+      'C:/Proyectos/openher',
+    );
+    // §7.3: mandar `sessionID` en la query es un 400 del middleware.
+    expect(uri.queryParameters.containsKey('sessionID'), isFalse);
+    // La credencial viaja en `auth_token` y se redacta antes de loguearse.
+    expect(uri.queryParameters[ServerConfig.authTokenParam], isNotNull);
+    expect(
+      ServerConfig.redactAuthToken(uri).toString(),
+      contains('auth_token=REDACTED'),
+    );
+  });
+
+  test('dispose() no tira y no deja timers vivos', () async {
+    final vm = buildVm(
+      jsonClient(
+        (_) => {
+          'data': [userMessage('msg_u1', 'hola'), assistantWorking()],
+        },
+      ),
+    );
+    await vm.load();
+    vm.connectStream();
+    // Notificar o tocar el stream después de dispose no debe romper: el socket
+    // es asíncrono y puede hablar tarde.
+    vm.dispose();
+    vm.setVisible(false);
+    vm.clearError();
+  });
+}
