@@ -348,7 +348,10 @@ class _ChatViewState extends State<ChatView> {
   }
 
   String get _title {
-    final title = _vm.sessionInfo?.title.trim() ?? '';
+    // `liveTitle` trae el titulo que el server le puso a la sesion con el
+    // primer mensaje (`session.renamed`); sin el, el chat se quedaba
+    // mostrando `ses_0acd172...` hasta un re-fetch completo.
+    final title = (_vm.liveTitle ?? '').trim();
     if (title.isNotEmpty) return title;
     // Sin título el server manda el id: `ses_0acd172…` no dice nada, así que
     // se recorta al prefijo.
