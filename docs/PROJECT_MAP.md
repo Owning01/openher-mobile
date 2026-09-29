@@ -195,6 +195,16 @@ Build de Android: `ANDROID_HOME=G:\Android\SDK`, `JAVA_HOME=G:\Android\Android S
   --file AndroidManifest.xml <apk>` y mirá que no haya dos `action` seguidos.
 - PowerShell 5.1 devuelve **500** contra el redirect de assets de GitHub aunque la URL responda
   200: toda verificación de red por script va con `curl.exe`, no con `Invoke-RestMethod`.
+- **`publish-update.ps1 -Version` no bumpea `pubspec.yaml`.** Nombra los releases y escribe
+  `latest.json` bien, pero el APK compilado conserva el `versionCode` viejo (medido: release
+  v1.7.0 sirviendo `versionCode=11` con el manifiesto anunciando 12). El autoupdate entonces
+  ofrece la descarga para siempre, porque la versión interna nunca alcanza a la del manifiesto.
+  **Hay que bumpear `pubspec.yaml` antes de compilar.**
+- **GitHub sirve el asset viejo desde caché** si se re-sube con el mismo nombre: la verificación
+  tiene que llevar un cache-buster (`?nc=<epoch>`), si no lee la versión anterior y hace creer
+  que la publicación falló.
+- **`Start-Process -ArgumentList` parte los argumentos por espacios**: un `-Notes "a b c"` hay
+  que entrecomillarlo o el script aborta con *"No se encuentra ningún parámetro posicional"*.
 - Windows PowerShell 5.1 **no se puede desinstalar**: es componente del SO y su binario está en
   control de `TrustedInstaller`. La defensa es negarse a correr bajo 5.1, no borrarlo.
 - Un **test** que afirma algo que la medición desmentió se adjudica **en el lugar**, con el motivo
