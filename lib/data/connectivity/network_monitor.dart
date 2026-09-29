@@ -135,7 +135,14 @@ class DataPolicy {
   const DataPolicy.lowData()
     : onCellular = true,
       pollInterval = const Duration(seconds: 12),
-      pageSize = 15,
+      // 8, y no 15. Medido: la página de 15 mensajes pesa 25.511 bytes, o sea
+      // ~1.700 B por mensaje; 8 mensajes son ~13,6 KB contra 25,5 KB (53% menos)
+      // y salen 5 KB más baratos que 5. La diferencia entre 8 y 5 son 5 KB por
+      // carga: no se pagan con menos scrollback.
+      //
+      // Con cursor, `pageSize` sólo afecta la carga inicial: los anteriores se
+      // piden con `loadEarlier`, de a una página por toque.
+      pageSize = 8,
       streamingEnabled = false,
       imagesEnabled = false;
 

@@ -77,9 +77,12 @@ class _SessionsViewState extends State<SessionsView> {
     // `load()` pone `loading` de forma síncrona, así que el primer frame ya
     // sale con el spinner y no hay un parpadeo de "vacío" antes.
     if (!widget.viewmodel.loaded) widget.viewmodel.load();
-    // El polling arranca con la pantalla, no antes: antes de `initState` no hay
-    // árbol al que repintar.
-    widget.viewmodel.startPolling();
+    // El polling **no** se arranca acá. La pantalla no sabe si está al frente:
+    // en un `IndexedStack` las cuatro pestañas quedan montadas, así que
+    // arrancarlo en `initState` lo dejaba corriendo 62 bytes cada 5 s con el
+    // chat al frente (~45 KB/h). Lo maneja `_SessionsTab`, que sí recibe
+    // `visible`, en su `initState` y su `didUpdateWidget`.
+    //
     // Las favoritas viven en un `ChangeNotifier` propio (son un dato del
     // usuario, compartilhado con Ajustes), así que la pantalla se suscribe
     // aparte. Sin esto, marcar una favorita se guarda pero la lista no cambia
@@ -97,9 +100,10 @@ class _SessionsViewState extends State<SessionsView> {
   @override
   void dispose() {
     widget.viewmodel.favorites.removeListener(_onFavorites);
-    // El `Timer` de `active` es del viewmodel, no de la pantalla: si otro dueño
-    // lo reusa lo sigue usando, pero nadie mirando no gasta requests.
-    widget.viewmodel.stopPolling();
+    // El `Timer` de `active` lo corta `_SessionsTab`, no la pantalla: la
+    // pantalla no sabe si está al frente. Además, con el `IndexedStack` este
+    // `dispose` sólo corre cuando se cae el shell entero, que es justo cuando
+    // `_vm.dispose()` ya se encarga.
     _query.dispose();
     _queryFocus.dispose();
     super.dispose();

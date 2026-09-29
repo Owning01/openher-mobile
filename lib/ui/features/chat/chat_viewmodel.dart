@@ -305,6 +305,19 @@ class ChatViewModel extends ChangeNotifier {
   /// anteriores no daba error: daba una pÃ¡gina **vacÃ­a**. Por eso el botÃ³n
   /// no cargaba nada y daba la impresiÃ³n de que estaba roto.
   String? _earlierCursor;
+
+  /// Cursor "hacia lo nuevo", que es contra el que consulta el **poll**.
+  ///
+  /// Es el hermano de [_earlierCursor] pero en la otra dirección: `_earlier`
+  /// camina hacia atrás con `next`, este camina hacia adelante con `previous`.
+  ///
+  /// Existe por medición, no por gusto. El poll antes era un `refresh()`: un
+  /// re-fetch de la página entera, que en la sesión medida pesaba **25.511
+  /// bytes**. Con `cursor.previous` el mismo poll cuando no hay nada nuevo
+  /// pesa **50 bytes**: 510x menos. Repitido cada 2 s son 45 MB/h en vez de
+  /// 0,09 MB/h.
+  String? _newerCursor;
+
   StreamState? _streamState;
 
   /// Enviamos un prompt y todavia no llego ningun assistant.
@@ -519,14 +532,29 @@ class ChatViewModel extends ChangeNotifier {
       // responde primero no es necesariamente el que arrancó después.
       if (_disposed || seq < _appliedFetch) return;
       _appliedFetch = seq;
-      _applyTurnEndFromPage(page.data);
+      // **El orden importa**: primero la página, después el cierre de turno.
+      //
+      // Al revés, `_closeOpenAssistant()` marcaba el assistant abierto con un
+      // `finish` local y enseguida `_ingest()` lo pisaba con la versión del
+      // server de esa misma página. Cuando el server todavía no había escrito
+      // el `finish` del mensaje (medido: `completed: false, finish: null` en el
+      // assistant más reciente), el cierre local se deshacía en el mismo
+      // breath y `working` volvía a `true`: **el botón Detener no desaparecía**.
+      //
+      // Ingerido primero, `_closeOpenAssistant()` marca el mensaje recién
+      // operativo y nada lo sobrescribe.
       _ingest(page.data.reversed.toList(growable: false));
+      _applyTurnEndFromPage(page.data);
       // El cursor de "anteriores" sÃ³lo retrocede: un re-fetch de la
       // Ãºltima pÃ¡gina no puede devolver el cursor hacia atrÃ¡s de lo
       // ya cargado. Se guarda `next` (el que avanza hacia atrÃ¡s,
       // medido) y no `previous`, que va hacia lo nuevo y siempre
       // venÃ­a vacÃ­o.
       _earlierCursor ??= page.next;
+      // El de "hacia lo nuevo" sÃ­ se mueve: es el ancla del poll, y hay que
+      // actualizarlo en cada pÃ¡gina completa para que el poll no se quede
+      // mirando un mensaje viejo y no vea nunca los nuevos.
+      _newerCursor = page.previous;
     } on OchError catch (e) {
       if (_disposed || seq < _appliedFetch) return;
       _error = e.message;
@@ -537,10 +565,10 @@ class ChatViewModel extends ChangeNotifier {
     }
   }
 
-  /// La página anterior, para el botón "Cargar 30 anteriores".
   /// La página anterior, para el botón "Cargar N anteriores".
   ///
-  /// Tres cosas que se習得aron midiendo, y las tres costaban un botón muerto:
+  /// Tres cosas que se aprendieron midiendo, y las tres costaban un botón
+  /// muerto:
   ///
   /// 1. Con cursor **no** se manda `order` (medido: `InvalidCursorError:
   ///    Cursor cannot be combined with order`).
@@ -580,6 +608,87 @@ class ChatViewModel extends ChangeNotifier {
       _error = e.message;
     } finally {
       _loadingEarlier = false;
+      _safeNotify();
+    }
+  }
+
+  /// El poll: consulta **sólo lo nuevo**, con el cursor, no la página entera.
+  ///
+  /// Esto es lo que baja el costo de datos, y el número es medido contra el
+  /// server real, no estimado:
+  ///
+  /// | poll | bytes | qué trae |
+  /// |---|---|---|
+  /// | re-fetch de la página (`refresh()`) | **25.511** | 15 mensajes enteros |
+  /// | `cursor.previous` sin nada nuevo | **50** | 0 mensajes |
+  ///
+  /// Son 510x por consulta, y el poll corre cada 2 s. A la larga: 45 MB/h
+  /// donde antes eran 0,09 MB/h.
+  ///
+  /// ## Por qué no se puede usar el `previous` que devuelve la respuesta
+  ///
+  /// Cuando no hay nada nuevo el server responde con `0 ítems` y
+  /// **`cursor.previous: null`**. Null acá **no** significa "no hay cursor",
+  /// significa "no hay nada más nuevo *por ahora*". Si se guardara el null,
+  /// el poll volvería a caer en la página completa de 25 KB en cada vuelta:
+  /// la optimización se apagaría sola en silencio, que es la forma más
+  /// difícil de detectar. Por eso el cursor viejo **se conserva**.
+  ///
+  /// ## Por qué es un método aparte y no un parámetro de `_fetch`
+  ///
+  /// `refresh()` tiene que seguir siendo la página completa: es la verdad de
+  /// de fondo al volver a primer plano (`setVisible`) y no se puede recorrer
+  /// con un cursor, porque si mientras tanto otro cliente de la sesion
+  /// agrego mensajes, el cursor no los ve. El poll si puede vivir con el
+  /// cursor porque su trabajo es "?llego algo nuevo?", no "decime todo".
+  /// un cursor, porque si mientras tanto otro cliente de la sesión agregó
+  /// mensajes, el cursor no los ve. El poll sí puede vivir con el cursor
+  /// porque su trabajo es "¿llegó algo nuevo?", no "decime todo".
+  ///
+  /// Comparte [_fetchSeq] con [_fetch] a propósito: así un poll y un refresh
+  /// que se solapan no se pisan, y el que llegó primero no pisa al que arrancó
+  /// después.
+  Future<void> _pollNewer() async {
+    final cursor = _newerCursor;
+    // Sin ancla no hay a dónde mirar: se cae a la página completa, que además
+    // deja un cursor nuevo para el próximo poll.
+    if (cursor == null) return _fetch(loading: false);
+
+    final seq = ++_fetchSeq;
+    try {
+      final page = await _api.listMessages(
+        sessionId,
+        limit: _policy.pageSize,
+        // `order` se manda `null` a propósito: con cursor el server lo
+        // rechaza (medido: `Cursor cannot be combined with order`).
+        order: null,
+        cursor: cursor,
+        directory: directory,
+      );
+      if (_disposed || seq < _appliedFetch) return;
+      _appliedFetch = seq;
+
+      if (page.data.isEmpty) {
+        // No hay nada nuevo. Se conserva el cursor viejo: ver el doc.
+        return;
+      }
+      // El orden de la respuesta con `previous` es **DESC** (medido: se tomó
+      // una página vieja, se le pidió su `previous` y volvieron los 15
+      // mensajes del más nuevo al más viejo), o sea el mismo que `order:'desc'`.
+      // Por eso el `.reversed`, igual que en `_fetch`.
+      _ingest(page.data.reversed.toList(growable: false));
+      _applyTurnEndFromPage(page.data);
+      // Acá sí hay `previous` nuevo: el ancla avanza al mensaje más nuevo.
+      if (page.previous != null) _newerCursor = page.previous;
+    } on OchError catch (e) {
+      if (_disposed || seq < _appliedFetch) return;
+      // Un cursor que el server ya no entiende (400) dejaría el poll roto en
+      // silencio para siempre. Se tira el ancla y el próximo poll vuelve a la
+      // página completa, que es el camino caro pero seguro.
+      _newerCursor = null;
+      _error = e.message;
+    } finally {
+      _recomputeWorking();
       _safeNotify();
     }
   }
@@ -701,13 +810,81 @@ class ChatViewModel extends ChangeNotifier {
         directory: directory,
       );
     } on OchError catch (e) {
-      _messages.removeWhere((m) => m.id == local.id);
+      // **El mensaje NO se borra.** Antes se hacía `removeWhere`, y con eso lo
+      // que el usuario había escrito desaparecía: al mandar con el agente
+      // trabajando el server responde 409 Conflict y el prompt se perdía sin
+      // dejar rastro, que es exactamente lo que reportó.
+      //
+      // Un texto del usuario no se borra por un fallo de transporte: se marca
+      // `notDelivered`, se avisa, y queda el reintento a un toque.
+      _markNotDelivered(local.id);
       _awaitingAssistant = false;
       _recomputeWorking();
       _error = e.message;
       _safeNotify();
     }
   }
+
+  /// Marca un mensaje local como no entregado, sin sacarlo de la lista.
+  void _markNotDelivered(String id) {
+    for (var i = 0; i < _messages.length; i++) {
+      final m = _messages[i];
+      if (m is! UserMessage || m.id != id) continue;
+      _messages[i] = m.copyWith(notDelivered: true);
+      return;
+    }
+  }
+
+  /// Vuelve a mandar un mensaje que el server no tomó.
+  ///
+  /// Es el camino del 409 (sesión ocupada) y del 429 (rate limit): el texto
+  /// estaba en pantalla todo el tiempo, marcado, esperando este toque.
+  Future<void> retrySend(String localId) async {
+    final at = _messages.indexWhere((m) => m is UserMessage && m.id == localId);
+    if (at < 0) return;
+    final m = _messages[at];
+    if (m is! UserMessage) return;
+
+    _messages[at] = m.copyWith(notDelivered: false);
+    _error = null;
+    _awaitingAssistant = true;
+    _busyStatus = null;
+    _recomputeWorking();
+    _safeNotify();
+
+    try {
+      await _api.sendPrompt(
+        sessionId,
+        text: m.text,
+        // `sendPrompt` toma adjuntos como mapas crudos, no como
+        // `UserFileAttachment`: se traduce, no se pasa la lista tal cual.
+        files: m.files.isEmpty
+            ? null
+            : [
+                for (final f in m.files) {
+                  'uri': f.uri,
+                  if (f.name != null) 'name': f.name!,
+                  if (f.mime != null) 'mime': f.mime!,
+                },
+              ],
+        agents: m.agents.isEmpty ? null : m.agents,
+        directory: directory,
+      );
+    } on OchError catch (e) {
+      _markNotDelivered(localId);
+      _awaitingAssistant = false;
+      _recomputeWorking();
+      _error = e.message;
+      _safeNotify();
+    }
+  }
+
+  /// Los mensajes del usuario que el server todavía no tomó, en orden.
+  List<UserMessage> get undelivered => [
+    for (final m in _messages)
+      if (m is UserMessage && m.notDelivered) m,
+  ];
+
 
   /// `POST /api/session/{id}/interrupt`. No-op si el server ya estaba idle.
   Future<void> abort() async {
@@ -828,7 +1005,12 @@ class ChatViewModel extends ChangeNotifier {
 
   void _startPolling() {
     if (_pollTimer != null || _disposed) return;
-    _pollTimer = Timer.periodic(_policy.pollInterval, (_) => refresh());
+    // `_pollNewer()` y no `refresh()`: el timer es lo que corre cada 2 s sin
+    // parar, y `refresh()` re-descarga la página entera (medido: 25.511 bytes
+    // por vuelta). `_pollNewer()` pregunta con el cursor y, cuando no hay nada
+    // nuevo, pesa 50 bytes. `refresh()` sigue siendo la verdad de fondo y se
+    // sigue llamando desde `setVisible` y desde los eventos del stream.
+    _pollTimer = Timer.periodic(_policy.pollInterval, (_) => _pollNewer());
   }
 
   void _stopPolling() {
