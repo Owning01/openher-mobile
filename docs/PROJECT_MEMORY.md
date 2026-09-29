@@ -179,3 +179,41 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   adb en el medio de la sesion. El codigo esta medido contra el server y con `flutter analyze` y los
   686 tests en verde, pero el render en pantalla no esta comprobado.
 - **Pendiente**: `FileAction.diff` sigue sin destino (ahora lo dice con un toast en vez de fingir).
+
+## 2026-09-29 — HTML al navegador, filtro de subagentes, favoritas y aviso de Tailscale
+
+- **Visor de HTML**: se parsea el DOM con `html` (Dart puro) y se dibuja con widgets; hay toggle
+  **Vista/Fuente**. El escritorio **no** hace esto (`mediaKindFromPath` cae `.html` en `text`): es
+  capacidad nueva. El `.html` además se puede **abrir en el navegador del sistema** (acción
+  `FileAction.openInBrowser`), que es donde hay CSS y JS de verdad.
+- **CORRECCION IMPORTANTE, medí mal dos veces**: (1) dije que `?auth_token=` daba 404; era porque
+  no pasé `location[directory]`. Repetido bien: **funciona en todo `/api/*`**, incluido `fs/read`,
+  y el server **no emite cookie**. (2) dije que `parentID` no venía en la lista; sí viene, y **se
+  omite cuando está vacío**. Miré una sesión principal y concluí que el campo no existía. Las dos
+  decisiones que tomé sobre esas premisas estaban mal.
+- **El filtro de subagentes es gratis**: `parentID` en la lista, 483 principales / 517 subagentes
+  sobre 1000, sin un request extra. Regla textual del escritorio (`SessionList.tsx`): principales =
+  `!parentID`, ni hijas con padre vivo ni huérfanas. La app suma un interruptor para verlos.
+- **Favoritas**: un `string[]` **ordenado** de ids en `shared_preferences` — port exacto de
+  `useLocalStorage(FAVORITES_KEY, [])` del escritorio. Sección FAVORITAS arriba, y una sesión
+  marcada **no** se repite en su día. El server no tiene favoritas (medido), así que las del
+  escritorio y las del celu son listas distintas: no hay puente.
+- **Aviso de Tailscale**: en Android **Tailscale se registra como VPN** (medido: hay un
+  `NetworkAgent` de VPN en `dumpsys connectivity` y el ícono VPN en el status bar), así que la señal
+  es `ConnectivityResult.vpn`, sin ping ni heurística. Se avisa **sólo** si el server no responde
+  **y** no hay VPN: con VPN prendida el problema es el server y culpar a Tailscale sería mentira.
+  El botón abre `tailscale://` y, si no está, la ficha en Play. `url_launcher` ya estaba en el APK
+  como transitiva.
+- **BUG QUE SOLO APARECIÓ EN EL TELÉFONO**: `FileAction.open` y `diff` estaban con
+  `onPressed: null`, o sea `clickable="false"` en el árbol de accesibilidad: el visor era
+  **inalcanzable al toque** aunque `analyze` y los tests de contenido estuvieran en verde. Hay un
+  guard (`ninguna accion de la hoja queda sin destino`) que se verificó rompiéndolo a propósito.
+- **Guard systemic nuevo**: `test/layer_keys_test.dart` compara cada `LayerGate`/`isOn` contra
+  `spec/layers.json`. Encontró que `isOn` devuelve `false` para claves desconocidas, así que un
+  typo deja un control **invisible sin error**. Se verificó rompiéndolo.
+- **Workspace del E2E**: el server sirve desde su cwd (el home), no desde el proyecto, así que el
+  material de prueba vive en `%USERPROFILE%\openher_e2e\`. `adb reverse tcp:4098 tcp:4098` es lo
+  que hace que el teléfono llegue al server.
+- **Sin verificar en el handset**: la lista de sesiones filtrada, las favoritas y la banda de
+  Tailscale (el Xiaomi se desconectó de USB al final de la sesión). El visor de HTML **sí** quedó
+  verificado con capturas.

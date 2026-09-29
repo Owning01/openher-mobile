@@ -1,5 +1,5 @@
 name: openher_mobile
-description: "OpenHer Mobile â€” cliente delgado Android para el server de opencode (dialecto v2)."
+description: "OpenHer Mobile ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â cliente delgado Android para el server de opencode (dialecto v2)."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.3.0+8
+version: 1.6.0+11
 
 environment:
   sdk: ^3.12.2
@@ -42,15 +42,15 @@ dependencies:
   # Dictado por voz es-ES en el composer (capas chat.composer.mic).
   speech_to_text: ^7.0.0
 
-  # Cero emojis en la UI: sÃ³lo SVG. Paquete de iconos para eso.
+  # Cero emojis en la UI: sÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â³lo SVG. Paquete de iconos para eso.
   flutter_svg: ^2.0.10
 
-  # Preferencia de tema/tamaÃ±o de texto y switch de capas por clave.
+  # Preferencia de tema/tamaÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â±o de texto y switch de capas por clave.
   shared_preferences: ^2.3.2
 
   # Markdown real para el texto del asistente. Sin esto, un chat de agente
-  # pierde justo lo que mÃ¡s se ve: bloques de cÃ³digo, tÃ­tulos y tablas.
-  # (`flutter_markdown` quedÃ³ discontinuado: Ã©ste es el sucesor mantenido.)
+  # pierde justo lo que mÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡s se ve: bloques de cÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â³digo, tÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â­tulos y tablas.
+  # (`flutter_markdown` quedÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â³ discontinuado: ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©ste es el sucesor mantenido.)
   flutter_markdown_plus: ^1.0.0
 
   # The following adds the Cupertino Icons font to your application.
@@ -60,6 +60,8 @@ dependencies:
   image_picker: ^1.2.3
   video_player: ^2.14.0
   pdfrx: ^2.4.8
+  html: ^0.15.7
+  url_launcher: ^6.3.2
 
 dev_dependencies:
   flutter_test:
@@ -83,7 +85,7 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # IconografÃ­a formal (Lucide 1.5px, 24x24, currentColor) extraÃ­da del
+  # IconografÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â­a formal (Lucide 1.5px, 24x24, currentColor) extraÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â­da del
   # prototipo aprobado: cero emojis en la UI. `AppIcon` los carga por nombre.
   assets:
     - assets/icons/

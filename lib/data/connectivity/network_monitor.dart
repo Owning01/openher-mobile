@@ -28,15 +28,47 @@ class NetworkMonitor extends ChangeNotifier {
   /// bajo: Ethernet y Wi-Fi no lo activan nunca.
   bool get onCellular => _kind == NetworkKind.mobile;
 
+  /// `true` si el sistema reporta una VPN activa.
+  ///
+  /// En Android **Tailscale se registra como VPN**, asi que esto es la senal
+  /// directa de "Tailscale esta prendido", sin ping ni heuristicas (medido: con
+  /// Tailscale prendido hay un `NetworkAgent` de VPN en `dumpsys connectivity`
+  /// y el icono VPN en el status bar del handset).
+  ///
+  /// Se trackea **aparte** de [kind] a proposito: `_classify` le da prioridad a
+  /// `mobile` y despues a `wifi`, asi que con Tailscale y Wi-Fi prendidos a la
+  /// vez `kind` queda en `wifi` y el VPN se pierde. Aca se guarda sin mezclarse.
+  bool get vpnUp => _vpnUp;
+  bool _vpnUp = false;
+
+  void _apply(List<ConnectivityResult> results) {
+    _vpnUp = results.contains(ConnectivityResult.vpn);
+  }
+
   /// Empieza a escuchar cambios de red.
   Future<void> start() async {
-    _kind = _classify(await _connectivity.checkConnectivity());
+    final first = await _connectivity.checkConnectivity();
+    _apply(first);
+    _kind = _classify(first);
     _sub = _connectivity.onConnectivityChanged.listen((results) {
+      final wasVpn = _vpnUp;
+      _apply(results);
       final next = _classify(results);
-      if (next == _kind) return;
+      // Se notifica si **cualquiera** de los dos cambio: el VPN solo tambien es
+      // una novedad para quien lo mira.
+      if (next == _kind && wasVpn == _vpnUp) return;
       _kind = next;
       notifyListeners();
     });
+  }
+
+  /// Fija el VPN sin tocar [kind], que es como lo cambia el sistema: el tipo de
+  /// red puede seguir siendo `wifi` con Tailscale prendido.
+  @visibleForTesting
+  void debugSetVpnUp(bool up) {
+    if (_vpnUp == up) return;
+    _vpnUp = up;
+    notifyListeners();
   }
 
   @visibleForTesting

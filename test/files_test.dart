@@ -510,7 +510,6 @@ void main() {
 
       expect(find.text('Añadir al chat'), findsOneWidget);
       expect(find.text('Copiar ruta'), findsOneWidget);
-      // Sin visor ni diff todavía: se muestran pero no se pueden apretar.
       expect(find.text('Abrir'), findsOneWidget);
 
       await tester.tap(
@@ -525,6 +524,97 @@ void main() {
         reason: 'la hoja cerró',
       );
     });
+
+    /// Cada accion de la hoja tiene que ser apretable.
+    ///
+    /// Salio de un bug real: "Abrir" y "Ver diff" estaban con `onPressed: null`
+    /// (el `switch` de arriba ya hacia su parte), asi que en el handset la fila
+    /// salia `clickable="false"` y apretarla no hacia nada. `flutter analyze` y
+    /// los tests de contenido no lo detectan porque el texto "Abrir" seguia
+    /// estando igual; lo detecta el arbol de accesibilidad. Este test lo cierra.
+    testWidgets('ninguna accion de la hoja queda sin destino', (tester) async {
+      await pumpFiles(
+        tester,
+        body: '{"data":[{"path":"docs/pagina.html","type":"file"}]}',
+      );
+
+      await tester.longPress(find.byKey(FilesView.rowKey('docs/pagina.html')));
+      await tester.pumpAndSettle();
+
+      for (final action in FileAction.values) {
+        final finder = find.byKey(FilesView.sheetActionKey(action.name));
+        expect(finder, findsOneWidget, reason: 'la hoja no muestra ${action.name}');
+        // El `InkWell` **es** el widget con la key (no un descendiente), y un
+        // item deshabilitado tiene `onTap: null`: no recibe toques. Ese es
+        // exactamente el sintoma del bug.
+        expect(
+          tester.widget<InkWell>(finder).onTap,
+          isNotNull,
+          reason: '${action.name} esta en la hoja pero no tiene destino',
+        );
+      }
+    });
+
+    /// Pump de UN archivo y la hoja de acciones ya abierta. Es el atajo que
+    /// necesitan los tests de la accion de navegador.
+    Future<void> pumpSheet(WidgetTester tester, String name) async {
+      await pumpFiles(
+        tester,
+        body: '{"data":[{"path":"$name","type":"file"}]}',
+      );
+      await tester.tap(find.byKey(FilesView.rowKey(name)));
+      await tester.pumpAndSettle();
+    }
+
+    /// "Abrir en el navegador": cuando la fila aparece.
+    ///
+    /// El riesgo no es que la URL este mal (eso lo cubre
+    /// `browser_open_test.dart`), es que la fila aparezca donde el navegador
+    /// no va a poder mostrar nada, o que falte donde si va a poder.
+    group('abrir en el navegador', () {
+      testWidgets('aparece para un .html, que es lo que la pide', (
+        tester,
+      ) async {
+        await pumpSheet(tester, 'pagina.html');
+        expect(find.text('Abrir en el navegador'), findsOneWidget);
+      });
+
+      testWidgets('aparece para imagen, PDF, markdown y codigo', (
+        tester,
+      ) async {
+        for (final name in <String>['a.png', 'b.pdf', 'c.md', 'd.dart']) {
+          await pumpSheet(tester, name);
+          expect(
+            find.text('Abrir en el navegador'),
+            findsOneWidget,
+            reason: '\$name se abre bien en el navegador',
+          );
+          await tester.tapAt(const Offset(10, 10));
+          await tester.pumpAndSettle();
+        }
+      });
+
+      testWidgets('no aparece para un binario', (tester) async {
+        await pumpSheet(tester, 'app.apk');
+        expect(find.text('Abrir en el navegador'), findsNothing);
+        expect(find.text('Abrir'), findsOneWidget);
+      });
+
+      testWidgets('no aparece para video ni audio: el reproductor propio es mejor',
+          (tester) async {
+        for (final name in <String>['c.mp4', 'd.mp3']) {
+          await pumpSheet(tester, name);
+          expect(
+            find.text('Abrir en el navegador'),
+            findsNothing,
+            reason: name,
+          );
+          await tester.tapAt(const Offset(10, 10));
+          await tester.pumpAndSettle();
+        }
+      });
+    });
+
 
     testWidgets('el error del server se muestra y reintenta', (tester) async {
       await pumpFiles(tester, body: kSpaHtml, contentType: 'text/html');

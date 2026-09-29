@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
+import 'data/connectivity/tailscale_monitor.dart';
 import 'data/connectivity/network_monitor.dart';
+import 'ui/core/tailscale_banner.dart';
 import 'ui/core/low_data_banner.dart';
 import 'ui/core/update_banner.dart';
 import 'core/network/api_client.dart';
@@ -214,12 +216,28 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   /// móviles entra en modo bajo (sin streaming, polling lento, página chica).
   final NetworkMonitor _network = NetworkMonitor();
 
+  /// Detecta "no hay Tailscale" y reacomoda el aviso. Comparte el
+  /// [NetworkMonitor] porque en Android la senal de Tailscale es la VPN que el
+  /// sistema ya reporta: no hace falta ni ping ni adivinar.
+  late final TailscaleMonitor _tailscale = TailscaleMonitor(
+    config: widget.config,
+    network: _network,
+  );
+
   /// El usuario puede desactivar el modo a mano aunque siga con datos
   /// móviles; eso manda por encima de la red hasta que cambie de tipo.
   bool _lowDataOverride = false;
 
   /// `true` = consumir poco. La red manda; el override solo puede **bajar**.
   bool get _lowData => !_lowDataOverride && _network.kind == NetworkKind.mobile;
+
+  /// El monitor de Tailscale tiene que estirar su reintento con datos
+  /// moviles: cada probe es datos que el usuario no pidio gastar.
+  void _syncTailscaleCellular() {
+    final want = _lowData;
+    if (_tailscale.onCellular == want) return;
+    _tailscale.onCellular = want;
+  }
 
   DataPolicy get _policy =>
       _lowData ? const DataPolicy.lowData() : const DataPolicy.normal();
@@ -235,6 +253,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _network.addListener(_onNetwork);
     _network.start();
+    _tailscale.start();
     // El chequeo arranca después del primer frame: si se hiciera en
     // `initState`, la app espera a GitHub antes de pintar el chat.
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkForUpdate());
@@ -264,6 +283,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   void _onNetwork() {
+    // El reintento se estira con datos moviles: el probe es un request.
+    _syncTailscaleCellular();
     if (!mounted) return;
     setState(() {});
   }
@@ -274,6 +295,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     _network
       ..removeListener(_onNetwork)
       ..dispose();
+    _tailscale.dispose();
     _updates.dispose();
     super.dispose();
   }
@@ -309,6 +331,27 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     ),
                   ),
                 // Sólo aparece con datos móviles: explica por qué la app se
+                // Aviso de Tailscale: solo cuando el server no responde y el
+                // sistema no ve VPN. Si hay VPN, el problema es el server y
+                // esta banda seria mentirosa.
+                ListenableBuilder(
+                  listenable: _tailscale,
+                  builder: (context, _) {
+                    final notice = _tailscale.notice;
+                    if (notice == null) return const SizedBox.shrink();
+                    return TailscaleBanner(
+                      message: notice,
+                      onRetry: _tailscale.recheck,
+                      onOpenTailscale: () async {
+                        final ok = await TailscaleBanner.openTailscale();
+                        if (!ok || !mounted) return;
+                        // Se re-chequea despues de abrir: si el usuario lo
+                        // prende ahi, la banda se va sola al primer probe.
+                        await _tailscale.recheck();
+                      },
+                    );
+                  },
+                ),
                 // recorta, en vez de que el usuario adivine que anda lento.
                 LowDataBanner(
                   onCellular: _lowData,

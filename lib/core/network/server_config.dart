@@ -85,6 +85,42 @@ class ServerConfig {
     query: buildQuery(query),
   );
 
+  /// La misma URL de [fileUrl] pero con el token en el query, para que la
+  /// pueda abrir **otro proceso** (el navegador del sistema) sin poder mandarle
+  /// un header Basic.
+  ///
+  /// **Medido 2026-09-28**: `?auth_token=<base64(user:pass)>` autentica en
+  /// `/api/fs/read/*` igual que el header (200 con y sin; 401 sin ninguno), y
+  /// tambien en `/api/location`, `/api/model`, `/api/agent` y `/api/session`.
+  /// El server no emite ninguna cookie (no hay `Set-Cookie`), asi que el query
+  /// es la unica via de auth para un cliente que no puede mandar headers.
+  ///
+  /// ## Por que esto **no** alcanza para un WebView embebido y si para el
+  /// navegador del sistema
+  ///
+  /// Un WebView dentro de la app podria cargar esta URL y tendria CSS y JS de
+  /// verdad. No se hace, y el motivo es el subrecurso: una pagina con
+  /// `<link rel=stylesheet href="estilo.css">` pide `/api/fs/read/estilo.css`,
+  /// que resuelve a la raiz del location y no a la carpeta del archivo (404), y
+  /// una hoja de estilo con `@import` o `url()` choca con lo mismo. El navegador
+  /// del sistema se abre **con su barra de direcciones y su contexto**, es una
+  /// pestana real: el usuario ve de que URL viene y puede cerrarla. Por eso el
+  /// HTML se abre ahi y no adentro.
+  ///
+  /// ## El costo: la password viaja en la URL
+  ///
+  /// Es el precio de no tener cookies, y es real: la URL puede quedar en el
+  /// historial del navegador, y si el usuario la copia y la manda, manda la
+  /// password del server. Por eso la app **no** la copia al portapapeles (la
+  /// accion "Copiar ruta" copia el path pelado) y por eso el aviso va escrito.
+  Uri browserFileUrl(String path, {String? directory}) => api(
+    '/fs/read/${path.startsWith('/') ? path.substring(1) : path}',
+    query: <String, String?>{
+      'location[directory]': directory,
+      'auth_token': authTokenQuery,
+    },
+  );
+
   /// La URL directa de un archivo del workspace: `GET /api/fs/read/<path>`.
   ///
   /// **Medido 2026-09-28**: este endpoint no devuelve texto, devuelve los

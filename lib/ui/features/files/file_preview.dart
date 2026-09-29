@@ -11,6 +11,43 @@ import '../../../core/network/server_config.dart';
 import '../../../domain/models/file_type.dart';
 import '../../core/app_icon.dart';
 import '../../core/tokens.dart';
+import 'html_view.dart';
+
+/// El techo del HTML, 2 MB de marcado. Mas que el de un `.txt` a proposito: una
+/// pagina de 300 KB de HTML es normal, y lo que no se debe dejar pasar es el
+/// `.log` gigante, que usa [_TextView._kTextMaxChars].
+///
+/// Lo usan **las dos** vistas del HTML: si la vista y la fuente tuvieran topes
+/// distintos, al alternar se veria el texto cambiar de largo solo.
+const int kHtmlMaxChars = 2000000;
+
+/// Baja un archivo de texto y lo devuelve recortado a [maxChars].
+///
+/// Compartida por la vista de texto y la de HTML, para que el corte por tamaño
+/// y el `utf8` tolerante esten **una sola vez**: si divergen, un HTML gigante
+/// pasa por un lado y se ve entero, y el otro lo corta.
+///
+/// `utf8` con `allowMalformed`: un byte raro se muestra con el caracter de
+/// reemplazo en vez de romper la pantalla entera.
+Future<String> loadTextFile(
+  Uri url,
+  Map<String, String> headers, {
+  required int maxChars,
+}) async {
+  final res = await http.get(url, headers: headers);
+  if (res.statusCode != 200) {
+    throw StateError('HTTP ${res.statusCode}');
+  }
+  final text = utf8.decode(res.bodyBytes, allowMalformed: true);
+  if (text.length <= maxChars) return text;
+  // Un `.log` de 20 MB renderizado en un `Text` mata la pantalla: se corta y se
+  // dice cuanto falto, en vez de dejar que el frame se caiga.
+  return '${text.substring(0, maxChars)}\n\n'
+      '[... ${_fmt(text.length - maxChars)} caracteres mas. '
+      'El archivo completo tiene ${_fmt(text.length)}.]';
+}
+
+String _fmt(int n) => n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}k' : '$n';
 
 /// El visor de archivos del workspace.
 ///
@@ -20,7 +57,7 @@ import '../../core/tokens.dart';
 /// La fuente de los bytes es `GET /api/fs/read/<path>`, que **medido** devuelve
 /// los bytes crudos con el `Content-Type` correcto (verificado con un APK de
 /// 56 MB), así que el visor puede trabajar contra la URL directo.
-class FilePreview extends StatelessWidget {
+class FilePreview extends StatefulWidget {
   const FilePreview({
     super.key,
     required this.config,
@@ -33,6 +70,22 @@ class FilePreview extends StatelessWidget {
   final String name;
 
   @override
+  State<FilePreview> createState() => _FilePreviewState();
+}
+
+class _FilePreviewState extends State<FilePreview> {
+  /// El HTML alterna entre renderizado y fuente. Se ofrece porque medio HTML del
+  /// workspace son plantillas (Vue, Handlebars, JSX) donde el **codigo** es lo
+  /// que se quiere ver, y el otro medio son paginas donde lo es la pagina.
+  bool _htmlSource = false;
+
+  ServerConfig get config => widget.config;
+  String get path => widget.path;
+  String get name => widget.name;
+  Uri get url => config.fileUrl(path);
+  Map<String, String> get headers => config.binaryHeaders;
+
+  @override
   Widget build(BuildContext context) {
     final type = FileType.of(name);
     return Scaffold(
@@ -43,9 +96,23 @@ class FilePreview extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
-            Text(type.label, style: Theme.of(context).textTheme.labelSmall),
+            Text(
+              type.kind == FileKind.html && _htmlSource
+                  ? '${type.label} - fuente'
+                  : type.label,
+              style: Theme.of(context).textTheme.labelSmall,
+            ),
           ],
         ),
+        actions: <Widget>[
+          if (type.kind == FileKind.html)
+            AppIconButton(
+              icon: _htmlSource ? 'image' : 'terminal',
+              tooltip: _htmlSource ? 'Ver la pagina' : 'Ver el codigo',
+              selected: _htmlSource,
+              onPressed: () => setState(() => _htmlSource = !_htmlSource),
+            ),
+        ],
       ),
       body: switch (type.kind) {
         FileKind.image => _ImageView(url: url, headers: headers),
@@ -58,6 +125,19 @@ class FilePreview extends StatelessWidget {
             isAudio: type.kind == FileKind.audio,
           ),
         FileKind.pdf => _PdfView(url: url, headers: headers),
+        FileKind.html => _htmlSource
+            ? _TextView(
+                  url: url,
+                  headers: headers,
+                  isMarkdown: false,
+                  maxChars: kHtmlMaxChars,
+                )
+            : _HtmlPreview(
+                config: config,
+                path: path,
+                url: url,
+                headers: headers,
+              ),
         FileKind.markdown ||
         FileKind.text ||
         FileKind.code =>
@@ -71,8 +151,55 @@ class FilePreview extends StatelessWidget {
     );
   }
 
-  Uri get url => config.fileUrl(path);
-  Map<String, String> get headers => config.binaryHeaders;
+}
+
+/// Carga el HTML una vez y lo muestra renderizado.
+///
+/// El texto se baja **una** sola vez y se reusa para las dos vistas: alternar
+/// Vista/Fuente no puede volver a pegarle al server. Por eso vive aca y no
+/// adentro de [HtmlView], que es puro.
+class _HtmlPreview extends StatefulWidget {
+  const _HtmlPreview({
+    required this.config,
+    required this.path,
+    required this.url,
+    required this.headers,
+  });
+
+  final ServerConfig config;
+  final String path;
+  final Uri url;
+  final Map<String, String> headers;
+
+  @override
+  State<_HtmlPreview> createState() => _HtmlPreviewState();
+}
+
+class _HtmlPreviewState extends State<_HtmlPreview> {
+
+  late Future<String> _html = _load();
+
+  Future<String> _load() => loadTextFile(
+    widget.url,
+    widget.headers,
+    maxChars: kHtmlMaxChars,
+  );
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<String>(
+    future: _html,
+    builder: (context, snapshot) {
+      if (snapshot.hasError) {
+        return _LoadError(error: '${snapshot.error}');
+      }
+      if (!snapshot.hasData) return const Center(child: _Spinner());
+      return HtmlView(
+        config: widget.config,
+        path: widget.path,
+        source: snapshot.data!,
+      );
+    },
+  );
 }
 
 /// Imagen: `Image.network` decodifica jpg, png, gif y webp sin mas.
@@ -243,40 +370,28 @@ class _TextView extends StatefulWidget {
     required this.url,
     required this.headers,
     required this.isMarkdown,
+    this.maxChars = _kTextMaxChars,
   });
   final Uri url;
   final Map<String, String> headers;
   final bool isMarkdown;
+
+  /// Techo de texto renderizado. Medido: 200 KB ya son ~12.000 lineas de `Text`,
+  /// que en un handset son segundos de frame.
+  final int maxChars;
+
+  static const int _kTextMaxChars = 200000;
 
   @override
   State<_TextView> createState() => _TextViewState();
 }
 
 class _TextViewState extends State<_TextView> {
-  late Future<String> _text = _load();
-
-  Future<String> _load() async {
-    final res = await http.get(widget.url, headers: widget.headers);
-    if (res.statusCode != 200) {
-      throw StateError('HTTP ${res.statusCode}');
-    }
-    // utf8 con replacement: un byte raro se muestra con el caracter de
-    // reemplazo en vez de romper la pantalla entera.
-    final text = utf8.decode(res.bodyBytes, allowMalformed: true);
-    if (text.length <= _kMaxChars) return text;
-    // Un `.log` de 20 MB renderizado en un `Text` mata la pantalla: se corta y
-    // se dice cuanto falto, en vez de dejar que el frame se caiga.
-    final cut = text.substring(0, _kMaxChars);
-    return '$cut\n\n[... ${_fmt(text.length - _kMaxChars)} caracteres mas. '
-        'El archivo completo tiene ${_fmt(text.length)}.]';
-  }
-
-  /// Techo de texto renderizado. Medido: 200 KB de texto ya son ~12.000 lineas
-  /// de `Text`, que en un handset es seconds de frame.
-  static const int _kMaxChars = 200000;
-
-  static String _fmt(int n) =>
-      n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}k' : '$n';
+  late final Future<String> _text = loadTextFile(
+    widget.url,
+    widget.headers,
+    maxChars: widget.maxChars,
+  );
 
   @override
   Widget build(BuildContext context) {

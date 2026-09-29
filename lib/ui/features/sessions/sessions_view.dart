@@ -80,10 +80,23 @@ class _SessionsViewState extends State<SessionsView> {
     // El polling arranca con la pantalla, no antes: antes de `initState` no hay
     // árbol al que repintar.
     widget.viewmodel.startPolling();
+    // Las favoritas viven en un `ChangeNotifier` propio (son un dato del
+    // usuario, compartilhado con Ajustes), así que la pantalla se suscribe
+    // aparte. Sin esto, marcar una favorita se guarda pero la lista no cambia
+    // hasta el próximo `load()`.
+    widget.viewmodel.favorites.addListener(_onFavorites);
+  }
+
+  /// Las favoritas son un `ChangeNotifier` aparte del viewmodel: sin este
+  /// listener, `toggleFavorite` no repinta la lista.
+  void _onFavorites() {
+    if (!mounted) return;
+    setState(() {});
   }
 
   @override
   void dispose() {
+    widget.viewmodel.favorites.removeListener(_onFavorites);
     // El `Timer` de `active` es del viewmodel, no de la pantalla: si otro dueño
     // lo reusa lo sigue usando, pero nadie mirando no gasta requests.
     widget.viewmodel.stopPolling();
@@ -134,11 +147,21 @@ class _SessionsViewState extends State<SessionsView> {
       widget.onAction?.call(action, session);
 
   void _openMenu(SessionInfo session) {
+    // El rótulo de la acción de favorito depende del estado: decir "Marcar
+    // como favorita" sobre algo que ya lo es invita a apretar dos veces.
+    final isFav = widget.viewmodel.isFavorite(session.id);
     showModalBottomSheet<void>(
       context: context,
       builder: (sheetContext) => _SessionMenu(
+        isFavorite: isFav,
         onPick: (action) {
           Navigator.of(sheetContext).pop();
+          // Marcar y desmarcar lo resuelve el viewmodel: el menú devuelve la
+          // acción y la vista no sabe nada de favoritas.
+          if (action == SessionAction.toggleFavorite) {
+            widget.viewmodel.toggleFavorite(session.id);
+            return;
+          }
           _action(action, session);
         },
       ),
@@ -158,6 +181,26 @@ class _SessionsViewState extends State<SessionsView> {
           child: AppBar(
             title: const Text('Sesiones'),
             actions: [
+              LayerGate(
+                // La capa del **app bar** y no una propia: la spec aprobada tiene
+                // 94 claves fijadas por un test, y `isOn` devuelve `false` para
+                // una clave desconocida, o sea que inventar `sessions.appbar
+                // .subagents` dejaba el botón **invisible sin error**.
+                'sessions.appbar',
+                // El interruptor de subagentes. Apagado por defecto: son más de
+                // la mitad de las sesiones del server (medido: 517 de 1000) y
+                // casi nunca son las que se busca abrir.
+                child: AppIconButton(
+                  icon: 'user',
+                  tooltip: widget.viewmodel.showSubagents
+                      ? 'Ocultar subagentes'
+                      : 'Mostrar subagentes',
+                  selected: widget.viewmodel.showSubagents,
+                  onPressed: () =>
+                      widget.viewmodel.showSubagents =
+                          !widget.viewmodel.showSubagents,
+                ),
+              ),
               LayerGate(
                 'sessions.appbar.search',
                 child: AppIconButton(
@@ -220,42 +263,78 @@ class _SessionsViewState extends State<SessionsView> {
     );
   }
 
-  Widget _groupedList(SessionsViewModel vm, List<SessionGroup> groups) =>
-      ListView.builder(
-        key: SessionsView.listKey,
-        // `alwaysScrollable`: con una lista corta que no llena la pantalla, el
-        // pull-to-refresh no llegaría sin esto.
-        physics: const AlwaysScrollableScrollPhysics(),
-        itemCount: groups.length,
-        itemBuilder: (context, index) {
-          final group = groups[index];
+  /// La lista: **FAVORITAS** arriba y después los grupos por día.
+  ///
+  /// Las favoritas van como sección propia y no como un grupo más porque no son
+  /// un día: son una decisión del usuario sobre el orden, y mezcladas con "HOY"
+  /// su lugar dependería de cuándo se usó cada una.
+  ///
+  /// Una sesión que ya está arriba como favorita **no** se repite en su día: la
+  /// misma conversación en dos lugares hace dudar de cuál de los dos es el
+  /// bueno.
+  Widget _groupedList(SessionsViewModel vm, List<SessionGroup> groups) {
+    final favorites = vm.favoriteSessions;
+    final favoriteIds = {for (final s in favorites) s.id};
+    final days = <SessionGroup>[
+      for (final g in groups)
+        if (g.sessions.any((s) => !favoriteIds.contains(s.id)))
+          SessionGroup(
+            g.bucket,
+            g.sessions.where((s) => !favoriteIds.contains(s.id)).toList(),
+          ),
+    ];
+    return ListView.builder(
+      key: SessionsView.listKey,
+      // `alwaysScrollable`: con una lista corta que no llena la pantalla, el
+      // pull-to-refresh no llegaría sin esto.
+      physics: const AlwaysScrollableScrollPhysics(),
+      itemCount: days.length + (favorites.isEmpty ? 0 : 1),
+      itemBuilder: (context, index) {
+        if (favorites.isNotEmpty && index == 0) {
           return _Group(
-            bucket: group.bucket,
-            children: [
-              for (final session in group.sessions)
-                _SessionRow(
-                  key: ValueKey<String>(session.id),
-                  session: session,
-                  running: vm.isRunning(session),
-                  attention: vm.needsAttention(session),
-                  relativeTime: vm.relativeTime(session),
-                  cost: vm.costOf(session),
-                  onTap: () => widget.onOpen(session),
-                  onMenu: () => _openMenu(session),
-                  onArchive: () => _swiped(session),
-                ),
-            ],
+            bucket: SessionBucket.today,
+            label: 'FAVORITAS',
+            children: [for (final session in favorites) _row(vm, session)],
           );
-        },
-      );
+        }
+        final group = days[favorites.isEmpty ? index : index - 1];
+        return _Group(
+          bucket: group.bucket,
+          children: [for (final session in group.sessions) _row(vm, session)],
+        );
+      },
+    );
+  }
+
+  /// Una fila, con el estado de favorita ya resuelto.
+  Widget _row(SessionsViewModel vm, SessionInfo session) => _SessionRow(
+    key: ValueKey<String>(session.id),
+    session: session,
+    running: vm.isRunning(session),
+    attention: vm.needsAttention(session),
+    relativeTime: vm.relativeTime(session),
+    cost: vm.costOf(session),
+    favorite: vm.isFavorite(session.id),
+    onTap: () => widget.onOpen(session),
+    onMenu: () => _openMenu(session),
+    onArchive: () => _swiped(session),
+  );
 }
 
 /// Encabezado de grupo + sus filas.
 class _Group extends StatelessWidget {
-  const _Group({required this.bucket, required this.children});
+  const _Group({
+    required this.bucket,
+    required this.children,
+    this.label,
+  });
 
   final SessionBucket bucket;
   final List<Widget> children;
+
+  /// Encabezado propio. Cuando está, pisa [SessionBucket.label]: la sección de
+  /// favoritas no es un día, es una decisión del usuario sobre el orden.
+  final String? label;
 
   @override
   Widget build(BuildContext context) {
@@ -273,7 +352,7 @@ class _Group extends StatelessWidget {
               AppSpacing.xs,
             ),
             child: Text(
-              bucket.label,
+              label ?? bucket.label,
               style: theme.textTheme.labelSmall?.copyWith(
                 fontWeight: FontWeight.w700,
                 // `.grouphead` del prototipo: 11px uppercase con
@@ -301,7 +380,13 @@ class _SessionRow extends StatelessWidget {
     required this.onTap,
     required this.onMenu,
     required this.onArchive,
+    this.favorite = false,
   });
+
+  /// Marcada como favorita: pinta la estrella. El toggle vive en el menú de la
+  /// fila, porque acá un toque es "abrir el chat" y marcar de pasada sería
+  /// una sorpresa.
+  final bool favorite;
 
   final SessionInfo session;
   final bool running;
@@ -450,6 +535,16 @@ class _SessionRow extends StatelessWidget {
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
+                      if (favorite)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 2),
+                          child: AppIcon(
+                            'star',
+                            size: 14,
+                            color: theme.colorScheme.primary,
+                          ),
+                        ),
+
                       LayerGate(
                         'sessions.row.time',
                         child: Text(
@@ -725,9 +820,13 @@ class _ErrorBanner extends StatelessWidget {
 
 /// Las cinco acciones del menú contextual de una fila.
 class _SessionMenu extends StatelessWidget {
-  const _SessionMenu({required this.onPick});
+  const _SessionMenu({required this.onPick, required this.isFavorite});
 
   final ValueChanged<SessionAction> onPick;
+
+  /// Sólo para el rótulo de la acción de favorito: el mismo item dice una cosa
+  /// u otra según el estado, y se arma aparte de [_items] por eso.
+  final bool isFavorite;
 
   static const List<(SessionAction, String, String)> _items = [
     (SessionAction.rename, 'Renombrar', 'edit'),
@@ -746,6 +845,24 @@ class _SessionMenu extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // La de favorito va **primera**: es la que se usa todos los días, y
+          // el escritorio también la tiene arriba del menú.
+          ListTile(
+            key: const Key('sessions-menu-toggleFavorite'),
+            dense: true,
+            leading: AppIcon(
+              'star',
+              size: 16,
+              color: isFavorite ? theme.colorScheme.primary : null,
+            ),
+            title: Text(
+              isFavorite
+                  ? 'Quitar de favoritas'
+                  : 'Marcar como favorita',
+              style: theme.textTheme.bodyMedium,
+            ),
+            onTap: () => onPick(SessionAction.toggleFavorite),
+          ),
           for (final (action, label, icon) in _items)
             ListTile(
               key: Key('sessions-menu-${action.name}'),

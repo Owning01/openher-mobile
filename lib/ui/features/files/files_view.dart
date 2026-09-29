@@ -31,9 +31,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/network/server_config.dart';
 import '../../../data/repositories/file_repository.dart';
+import '../../../domain/models/file_type.dart';
 import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
 import '../../core/theme.dart';
@@ -42,7 +44,7 @@ import 'file_preview.dart';
 import 'files_viewmodel.dart';
 
 /// Qué se pidió desde la hoja de acciones de una fila.
-enum FileAction { open, copyPath, diff, addToChat }
+enum FileAction { open, openInBrowser, copyPath, diff, addToChat }
 
 class FilesView extends StatefulWidget {
   const FilesView({
@@ -203,16 +205,45 @@ class _FilesViewState extends State<FilesView> {
   /// El gate va como pregunta y no como [LayerGate]: una hoja modal vacía es un
   /// borde redondeado sin nada adentro, así que si la capa está apagada no se
   /// abre.
+  /// Abre una URL en la app que el sistema elija para ese esquema.
+  ///
+  /// `LaunchMode.externalApplication` es lo que manda la URL **afuera** de la
+  /// app: sin eso el launcher puede resolverla adentro y el usuario no ve que
+  /// salio. Devuelve `false` en vez de tirar: el toast tiene que poder decir
+  /// "no se pudo" sin que la app se caiga.
+  static Future<bool> _openExternally(Uri url) async {
+    try {
+      return await launchUrl(url, mode: LaunchMode.externalApplication);
+    } on Object {
+      return false;
+    }
+  }
+
   Future<void> _openSheet(FileNode node) async {
     if (!LayerCatalog.instance.isOn(FilesView.layerSheet)) return;
     final action = await showModalBottomSheet<FileAction>(
       context: context,
-      builder: (sheet) => _FileActionsSheet(title: _labelOf(node)),
+      builder: (sheet) => _FileActionsSheet(
+        title: _labelOf(node),
+        type: FileType.of(node.name),
+      ),
     );
     if (!mounted || action == null) return;
     switch (action) {
       case FileAction.addToChat:
         widget.onAddToChat(node.path);
+        break;
+      case FileAction.openInBrowser:
+        // Se abre en el navegador del sistema, no en un WebView embebido: asi
+        // el CSS y el JS son de verdad y el usuario ve la URL de la que viene.
+        // La password viaja en el query porque el server no emite cookie, asi
+        // que la app no la copia a ningun lado (ver `browserFileUrl`).
+        final url = widget.config.browserFileUrl(node.path);
+        final opened = await _openExternally(url);
+        if (!mounted) return;
+        _toast(
+          opened ? 'Abierto en el navegador' : 'No se pudo abrir el navegador',
+        );
         break;
       case FileAction.copyPath:
         await Clipboard.setData(ClipboardData(text: node.path));
@@ -628,9 +659,27 @@ class _FilesViewState extends State<FilesView> {
 /// Hoja de acciones de una fila. Sólo sabe mostrar y devolver: resolver las
 /// acciones es de la vista, que tiene el `context` y el callback del chat.
 class _FileActionsSheet extends StatelessWidget {
-  const _FileActionsSheet({required this.title});
+  const _FileActionsSheet({required this.title, required this.type});
 
   final String title;
+
+  /// El tipo del archivo: decide si aparece la accion de navegador.
+  final FileType type;
+
+  /// Un navegador puede mostrar esto con su propio motor: HTML, SVG, imagen,
+  /// PDF y texto. Video y audio tambien se abririan, pero el reproductor de la
+  /// app es mejor que el del navegador, asi que no se ofrecen: no es que no se
+  /// pueda, es que no es lo mejor.
+  bool get _browserCanShow => switch (type.kind) {
+    FileKind.html ||
+    FileKind.svg ||
+    FileKind.image ||
+    FileKind.pdf ||
+    FileKind.markdown ||
+    FileKind.text ||
+    FileKind.code => true,
+    FileKind.video || FileKind.audio || FileKind.binary => false,
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -662,8 +711,16 @@ class _FileActionsSheet extends StatelessWidget {
             name: FileAction.open.name,
             icon: 'external-link',
             label: 'Abrir',
-            onPressed: null,
+            onPressed: () => Navigator.of(context).pop(FileAction.open),
           ),
+          if (_browserCanShow)
+            _SheetAction(
+              name: FileAction.openInBrowser.name,
+              icon: 'external-link',
+              label: 'Abrir en el navegador',
+              onPressed: () =>
+                  Navigator.of(context).pop(FileAction.openInBrowser),
+            ),
           _SheetAction(
             name: FileAction.copyPath.name,
             icon: 'copy',
@@ -674,7 +731,13 @@ class _FileActionsSheet extends StatelessWidget {
             name: FileAction.diff.name,
             icon: 'git-branch',
             label: 'Ver diff',
-            onPressed: null,
+
+            // "Ver diff" todavia no hace nada, pero **si** devuelve la accion:
+            // el `switch` de arriba muestra el aviso. Con `onPressed: null` la
+            // fila ni siquiera era clickable y el aviso no existia (medido en
+            // el handset: `clickable="false"` en el arbol de accesibilidad, con
+            // la accion ya implementada en el `switch`).
+            onPressed: () => Navigator.of(context).pop(FileAction.diff),
           ),
           _SheetAction(
             name: FileAction.addToChat.name,
