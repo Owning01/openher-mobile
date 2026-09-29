@@ -55,6 +55,7 @@ class MessageBubble extends StatelessWidget {
     this.onQuestionAnswer,
     this.questionRequestId,
     this.onRetrySend,
+    this.isOpenAssistant,
   });
 
   /// Reintenta un mensaje del usuario que el server no tomó (409 al mandar
@@ -63,6 +64,15 @@ class MessageBubble extends StatelessWidget {
   /// Antes ese mensaje se borraba de la lista y el texto se perdía sin que el
   /// usuario llegara a ver por qué.
   final ValueChanged<String>? onRetrySend;
+
+  /// Este mensaje es el assistant que está recibiendo deltas ahora.
+  ///
+  /// Los puntos de escritura se pintan **sólo** en éste. Antes la
+  /// condición era `working && texto vacío`, sin mirar de quién era el mensaje:
+  /// como `working` es del turno entero, **todos** los assistant sin texto
+  /// pintaban puntos a la vez. Y un assistant que sólo trae tool calls tiene el
+  /// texto vacío por diseño, así que el fenómeno no era raro: era la norma.
+  final bool? isOpenAssistant;
 
   final SessionMessage message;
 
@@ -192,7 +202,14 @@ class MessageBubble extends StatelessWidget {
     // texto ES el indicador. Y con una pregunta esperando tampoco: el modelo no
     // está escribiendo, está esperando que el usuario conteste, y parpadear
     // "pensando" en ese estado es mentir.
-    if (working && pending == null && assistant.textContent.trim().isEmpty) {
+    //
+    // Y sólo en el assistant **abierto**: ver [isOpenAssistant]. Sin esto se
+    // veían varios juegos de puntos a la vez y todos se iban juntos al
+    // terminar el turno.
+    if (working &&
+        isOpenAssistant != false &&
+        pending == null &&
+        assistant.textContent.trim().isEmpty) {
       children.add(const LayerGate('chat.typing', child: TypingDots()));
     }
 

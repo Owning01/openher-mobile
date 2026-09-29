@@ -17,7 +17,6 @@ import 'core/storage/prefs_store.dart';
 import 'ui/core/app_icon.dart';
 import 'ui/core/layer_gate.dart';
 import 'ui/core/theme.dart';
-import 'ui/core/theme_variants.dart';
 import 'ui/core/tokens.dart';
 import 'ui/features/chat/chat_view.dart';
 import 'ui/features/chat/chat_viewmodel.dart';
@@ -87,16 +86,14 @@ class _OpenHerMobileAppState extends State<OpenHerMobileApp> {
     await ApiClient(config: config).probeServer();
   }
 
-  /// La variante de color para un brillo, o `null` si no hay ninguna.
+  /// La variante de color elegida, traducida a los dos brillos que pide el
+  /// `MaterialApp`, o `null` si el id no está en el catálogo.
   ///
-  /// La resolución va por el catálogo y no por un `switch` sobre el id: un id
-  /// desconocido (variante borrada, typo, prefs de una versión vieja) tiene que
-  /// caerse al chrome por defecto, no romper la app.
-  ThemeData? _variant(ThemeVariantKind kind) {
-    final v = ThemeVariants.byId(_variantId);
-    if (v == null || v.kind != kind) return null;
-    return AppTheme.variantOf(v);
-  }
+  /// La resolución vive en [AppTheme.variantPair] y no acá: `test/theme_applies_test.dart`
+  /// la llama y tiene que ser **la misma** que usa la app, o el test no probaría
+  /// nada.
+  ({ThemeData light, ThemeData dark})? get _variant =>
+      AppTheme.variantPair(_variantId);
 
   @override
   Widget build(BuildContext context) {
@@ -111,8 +108,12 @@ class _OpenHerMobileAppState extends State<OpenHerMobileApp> {
           // con un id que el catálogo ya no conoce) se sigue con
           // light()/dark(), así que borrar el catálogo no deja la
           // app sin tema.
-          theme: _variant(ThemeVariantKind.light) ?? AppTheme.light(),
-          darkTheme: _variant(ThemeVariantKind.dark) ?? AppTheme.dark(),
+          //
+          // La variante se pinta en **los dos** slots, no en el que le toca por
+          // su brillo: medido sobre las 61 variantes, asignarla por `kind`
+          // dejaba 61 de 122 casos con el chrome gris, o sea la mitad.
+          theme: _variant?.light ?? AppTheme.light(),
+          darkTheme: _variant?.dark ?? AppTheme.dark(),
           themeMode: switch (prefs.themeMode) {
             AppThemeMode.system => ThemeMode.system,
             AppThemeMode.light => ThemeMode.light,
