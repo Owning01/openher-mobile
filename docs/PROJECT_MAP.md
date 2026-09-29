@@ -17,19 +17,20 @@ App **id**: `ai.openher.openher_mobile` · versión `1.2.0+7` (`versionCode=7`).
 | `lib/core/network/` | `api_client.dart` (REST v2), `sse_client.dart` (stream global), `server_config.dart` |
 | `lib/core/storage/` | `creds_store.dart` (secure storage), `prefs_store.dart` (capas, tema) |
 | `lib/core/update/` | `update_service.dart`: manifiesto, descarga, instalación vía canal nativo |
-| `lib/data/connectivity/` | `network_monitor.dart` + `DataPolicy`: modo bajo consumo **sólo** con datos móviles |
+| `lib/data/connectivity/` | `network_monitor.dart` + `DataPolicy`: modo bajo consumo **sólo** con datos móviles. Cellular: poll 12 s, página de **8** mensajes (de 15), sin streaming, sin imágenes |
 | `lib/data/repositories/` | `session_repository`, `file_repository`, `catalog_repository` |
 | `lib/domain/models/` | `session`, `message`, `tool`, `event`, `errors`, `agent_catalog`, `model_catalog`, `turn_activity` |
 | `lib/ui/core/` | `tokens.dart`, `theme.dart`, `theme_variants.dart` (61 paletas), `layer_gate.dart`, `app_icon.dart`, `low_data_banner.dart`, `update_banner.dart` |
-| `lib/ui/features/chat/` | `chat_view`, `chat_viewmodel`, `composer`, `message_bubble`, `turn_activity`, `tool_card`, `model_sheet`, `agent_sheet` |
+| `lib/ui/features/chat/` | `chat_view`, `chat_viewmodel`, `composer`, `message_bubble`, `squares_spinner`, `turn_activity`, `tool_card`, `model_sheet`, `agent_sheet` |
 | `lib/ui/features/` | `sessions/`, `files/`, `settings/`, `connect/`, `navigation/` |
 | `docs/API_CONTRACT.md` | Contrato **medido** contra el server real |
 | `docs/SUPER_PLAN.md` | Decisiones, arquitectura, fases M0–M10 |
 | `prototype/mobile.html` | Maqueta navegable con toggles de capas |
 | `scripts/publish-update.ps1` | Compila, sube APK + manifiesto, **verifica con `curl`** y **exige PowerShell 7+** |
 
-**Tamaños medidos:** 43 archivos Dart en `lib/` (17.778 líneas), 28 archivos de test (14.860
-líneas), 39 iconos SVG, **686 tests**, `flutter analyze lib` en cero errores y cero warnings.
+**Tamaños medidos:** 50 archivos Dart en `lib/` (18.655 líneas), 44 archivos de test (15.443
+líneas), 40 iconos SVG, 10 goldens en `test/goldens/`, **759 tests** (6 skipped),
+`flutter analyze lib` en cero errores y cero warnings.
 
 ## Capas
 
@@ -81,7 +82,13 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
   la única señal de fin cuando no hay SSE (modo de bajo consumo).
 - **Paginación (medido con 200 mensajes):** `order=desc` = los más nuevos; `cursor.previous` va
   hacia lo **nuevo** (0 ítems desde la última), `cursor.next` va hacia lo **atrás**. Con cursor,
-  `order` **no** se manda (`InvalidCursorError`). Las páginas llegan de más nuevo a más viejo.
+  `order` **no** se manda (`InvalidCursorError`). Las páginas llegan de más nuevo a más viejo,
+  **incluida la de `previous`** (medido: se tomó una página vieja, se pidió su `previous` y
+  volvieron los 15 del más nuevo al más viejo). Un poll vacío trae `previous: null`, y eso
+  significa "nada más nuevo por ahora", no "no hay cursor".
+- **Prompt con la sesión ocupada:** `/api/session/{id}/prompt` declara **409 Conflict**. Por eso
+  mandar mientras el agente trabaja es un caso real, y el mensaje **no se borra**: queda en
+  pantalla marcado `notDelivered` con reintento a un toque.
 - **Bodies:** `POST /api/session/{id}/prompt` exige `text` en la **raíz**; `createSession` quiere
   `location` como **objeto** `{directory}`; `compact` y `revert/commit` exigen un body `{}`;
   `revert/stage` exige `messageID`. Sin body: 400 `Expected object`.
@@ -97,10 +104,22 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 - **Herramientas agrupadas:** una caja por **turno**, montada en el primer assistant del turno
   (los resultados de shell nunca la poseen). Dueño y absorciones: `lib/domain/models/turn_activity.dart`.
 - **Costo de los mensajes (medido 2026-09-29 con `test/data_probe_test.dart`):** una página de
-  `message` pesa **entre 17 KB y 220 KB** según la conversación, y en cellular se re-pide entera
-  cada 12 s. El server ya devuelve `cursor.previous`, y `?cursor=` con 0 mensajes pesa **50 B**:
-  esa es la palanca (2.268x). **El stream es global** y trae los eventos de todas las sesiones, que
+  `message` pesa **entre 17 KB y 220 KB** según la conversación. El server ya devuelve
+  `cursor.previous`, y `?cursor=` con 0 mensajes pesa **50 B** contra **25.511 B** de la página
+  completa: **510x**. El poll del chat **ya usa el cursor** (`_pollNewer`), y `refresh()` sigue
+  siendo la página entera porque es la verdad de fondo al volver a primer plano. El orden de la
+  respuesta con `previous` es **DESC**, igual que `order:'desc'`.
+  **El stream es global** y trae los eventos de todas las sesiones, que
   el cliente filtra **después** de descargarlos; no hay endpoint por sesión.
+- **Los 4 cursores del server:** la respuesta trae `cursor.previous` y `cursor.next`. `previous` va
+  hacia lo **nuevo**, `next` hacia lo **atrás**, y con cursor **no** se puede mandar `order`
+  (400). Cuando no hay nada nuevo, `previous` viene **`null`**: eso significa "no hay nada más
+  nuevo *por ahora*", **no** "no hay cursor", y hay que **conservar el cursor viejo**.
+  Dueño de los dos: `_newerCursor` (poll) y `_earlierCursor` (botón de anteriores).
+- **El polling sigue a la pestaña visible:** las 4 pestañas viven en un `IndexedStack`, así que
+  `dispose` no se llama al cambiar de pestaña. Chat y sessions reciben `visible` del shell y frenan
+  su poll con `setVisible` / `didUpdateWidget`. Sin eso, el poll de `/api/session/active` (62 B
+  cada 5 s) seguía corriendo con el chat al frente.
 - **Subagentes:** `GET /api/session` trae `parentID` **sólo cuando no está vacío**. Principales =
   la clave ausente; subagentes = la clave con un `ses_…`. Medido sobre 1000 sesiones: 483 sin la
   clave, 517 con la clave, y el spot-check contra `GET /api/session/{id}` coincidió. El filtro sale
@@ -139,6 +158,8 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 $env:ProgramFiles(x86) = (Join-Path $env:TEMP 'vs_shim')   # solo para flutter test/analyze
 flutter analyze
 flutter test
+# regenerar los PNG del spinner (los compara como golden; sin el flag fallan)
+flutter test test/squares_spinner_test.dart --update-goldens
 # build + publicar (el script exige PowerShell 7+, o se niega a correr)
 pwsh -File .\scripts\publish-update.ps1 -Notes "..."
 ```
@@ -148,6 +169,17 @@ Build de Android: `ANDROID_HOME=G:\Android\SDK`, `JAVA_HOME=G:\Android\Android S
 
 ## Trampas conocidas
 
+- **Un golden sin `RepaintBoundary` se come la pantalla entera.** `matchesGoldenFile` sube hasta
+  el borde del nodo más cercano: sin un `RepaintBoundary` ceñido, los 800x600 del test default
+  entran en el PNG (medido: 41x19 de grilla en un archivo de 800x600).
+- **Editar Dart con un script Python: `io.open(p,'w')` trunca el archivo** y un error posterior lo
+  deja en **0 bytes**. Hay que armar el contenido entero y escribir una sola vez. Y copiar
+  indentación a ojo falla en silencio.
+- Un spinner tiene que verificarse **mirándolo**: la primera versión de `SquaresSpinner` tenía la
+  onda al revés y el frente deslizándose entre cuadrados, y ambos defectos pasaban el test de
+  "son 8 cuadrados". `test/goldens/` tiene un golden por cada uno de los 8 pasos del ciclo.
+- Un guard que mira el canal **alfa** es vacío si los colores son opacos: el spinner mezcla dos
+  colores sólidos, así que los 8 alfa dan 1.0. Hay que medir **luminancia**.
 - `/api/health` no existe ⇒ `/api/location`.
 - Un control dibujado sin destino es un bug, no un TODO. `FileAction.diff` sigue sin destino
   y **lo dice** con un toast; `FileAction.open` ya no.

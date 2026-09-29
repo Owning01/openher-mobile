@@ -252,3 +252,63 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
 - **Confusión que casi reporto como bug**: la primera corrida dio 0 polls y parecía que el polling
   no arrancaba. No era así: `_startPolling` sale de `setVisible(true)` (lo llama `chat_view` en su
   `initState`), no de `load()`. La sonda no lo llamaba.
+
+## 2026-09-29 — Mensajes en cola, spinner de 8 cuadrados, y el poll con cursor
+
+- **Los mensajes en cola se perdían** (el bug reportado): al mandar con el agente trabajando, el
+  server responde **409 Conflict** (declarado en el spec de `/api/session/{id}/prompt`) y la app
+  **borraba el mensaje optimista**. El texto que el usuario acababa de escribir desaparecía sin
+  rastro. Ahora `send()` marca `UserMessage.notDelivered` y lo deja en pantalla con un chip
+  "No se envío · Reintentar" **dentro de la burbuja** (un banner no diría cuál de los mensajes
+  falló). `retrySend(id)` vuelve a hacer el POST. Hay un test nuevo del reintento.
+- **Test adjudicado, no editado para pasar**: `chat_viewmodel_test.dart` afirmaba que un 429
+  tenía que *sacar* la burbuja optimista, y eso era lo implementado. La medición lo desmentía.
+  Se reescribió **en el lugar, con el motivo escrito en el archivo**, y se agregó el caso del
+  reintento al lado.
+- **Spinner rectangular de 8 cuadrados** (`lib/ui/features/chat/squares_spinner.dart`), en el pie
+  de la lista mientras el agente piensa. Va **sin `LayerGate`**: la línea de progreso de 2 px
+  vivía en `chat.header.progress`, que es una de las 4 capas apagadas del catálogo, y por eso
+  no se veía nunca.
+- **Dos defectos del spinner que sólo aparecieron al mirar la imagen** (`test/goldens/`):
+  1. La primera versión usaba `d = head - index`, con lo cual **todo** cuadrado por delante del
+     frente salía en brillo pleno: la grilla se veía entera encendida y no se leía movimiento.
+  2. El frente **se deslizaba** entre cuadrados, así que en las fases intermedias ninguno
+     llegaba a brillo pleno (máximo ~0.72) y en tema oscuro la grilla se **desaparecía**. Ahora
+     la cabeza **salta** (`.round()`), y la distancia es **módulo `squares`**: el final del
+     ciclo y el principio dan la misma imagen, así que el reinicio no se ve.
+- **Medido, no estimado**: contraste entre la cabeza y la grilla 92.7 en claro y 120.6 en oscuro
+  (luminancia 0..255). La versión con gris translúcido daba 25.6: la grilla pesaba más que la
+  cabeza. La grilla en reposo pasó a ser un **tinte del fondo** (`Color.lerp(surface, …)`), que
+  funciona igual en los dos temas.
+- **El poll del chat no re-descarga la página**: era un `refresh()` de 25.511 bytes cada 2 s. Ahora
+  pregunta con `cursor.previous`, que sin nada nuevo pesa **50 bytes**: **510x**. Medido contra el
+  server real, no estimado. `refresh()` sigue siendo la verdad de fondo para `setVisible` y los
+  eventos del stream.
+- **La trampa de esta optimización** (y el guard que la cubre): cuando no hay nada nuevo el server
+  devuelve `0 ítems` y **`cursor.previous: null`**. Null ahí significa "no hay nada más nuevo *por
+  ahora*", **no** "no hay cursor". Si se guardara el null, el poll volvería a la página completa
+  de 25 KB en cada vuelta y la optimización se apagaría sola, en silencio. El cursor viejo **se
+  conserva**. El guard (`test/poll_cost_test.dart`) afirma el invariante real: *una vez que el
+  ancla está, no vuelve a pedir la página completa*. Mirar sólo "cada poll trae cursor" NO
+  alcanza, porque al perderse el ancla el poll cae a la página completa, **que restaura** el
+  cursor: la regresión se camufla en una vuelta.
+- **Orden de la respuesta con `previous`**: **DESC** (medido: se tomó una página vieja, se le
+  pidió su `previous` y volvieron los 15 mensajes del más nuevo al más viejo), o sea igual que
+  `order:'desc'`. Por eso el `.reversed`, igual que en `_fetch`.
+- **El poll de `/api/session/active` corría con el chat al frente**: las 4 pestañas viven en un
+  `IndexedStack`, así que `dispose` no se llama al cambiar de pestaña. `SessionsView` arrancaba el
+  poll en su `initState` sin saber si estaba visible: 62 B cada 5 s (~45 KB/h) que nadie mira.
+  Ahora el polling lo maneja `_SessionsTab`, que sí recibe `visible`, en `initState` y
+  `didUpdateWidget` (y repregunta `pollActive()` al volver al frente).
+- **Página en datos móviles de 15 a 8 mensajes**: medido, la página de 15 pesa 25.511 B, o sea
+  ~1.700 B por mensaje. 8 son ~13,6 KB (53% menos) y salen 5 KB más baratos que 5. Con cursor,
+  `pageSize` sólo afecta la carga inicial; los anteriores van con `loadEarlier`.
+- **Errores míos que costaron tiempo, para no repetirlos**: (1) `io.open(p,'w')` **trunca** el
+  archivo y un error posterior lo deja en **0 bytes**: armá el contenido entero y escribí una
+  sola vez. (2) Leer la indentación a ojo y escribir `6 espacios` donde eran `4` falla en
+  silencio. (3) Dos veces se me colaron caracteres CJK en comentarios.
+- **Estado**: `flutter analyze` limpio; suite completa **759 verdes, 6 skipped** (incluye 5 guards
+  nuevos del poll, 6 del spinner y 2 de la cola, todos verificados rompiéndolos).
+- **Lo que NO se pudo verificar**: el APK no se corrió en un teléfono real. El Xiaomi
+  `aaiz5tbuq8dqyxqs` sigue cayéndose de USB/adb, así que el spinner y el chip de reintento están
+  verificados **por golden y por test**, no en pantalla.
