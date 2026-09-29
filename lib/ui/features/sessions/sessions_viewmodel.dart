@@ -13,6 +13,8 @@ library;
 
 import 'dart:async';
 
+import '../../../core/storage/prefs_store.dart';
+import 'session_favorites.dart';
 import 'package:flutter/foundation.dart';
 
 import '../../../data/repositories/session_repository.dart';
@@ -45,15 +47,37 @@ final class SessionGroup {
 /// `/api/session` ([ApiClient] no tiene esos endpoints), así que la pantalla no
 /// finge hacerlos: los reporta y vuelve. Cuando `ApiClient` crezca, la app los
 /// cablea por [SessionsView.onAction] sin tocar la lista.
-enum SessionAction { rename, fork, exportMarkdown, archive, close }
+enum SessionAction { toggleFavorite, rename, fork, exportMarkdown, archive, close }
 
 class SessionsViewModel extends ChangeNotifier {
   SessionsViewModel({
     required this.repository,
+    SessionFavorites? favorites,
     this.pollInterval = const Duration(seconds: 5),
     DateTime Function()? clock,
-  }) : _clock = clock ?? DateTime.now;
+  }) : _clock = clock ?? DateTime.now,
+       _favorites = favorites ?? SessionFavorites(InMemoryPrefs());
 
+  /// Las favoritas del usuario, **en su orden**. Vienen de afuera porque son un
+  /// dato del usuario y no de esta pantalla: las comparte con Ajustes.
+  final SessionFavorites _favorites;
+
+  SessionFavorites get favorites => _favorites;
+
+  /// Mostrar también los subagentes.
+  ///
+  /// Apagado por defecto, que es lo mismo que hace el escritorio con "Recientes":
+  /// lista sólo sesiones principales. El interruptor existe porque a veces lo
+  /// que uno quiere abrir **es** un subagente (para leer qué encontró), y sin
+  /// esto no habría forma de llegar.
+  bool _showSubagents = false;
+  bool get showSubagents => _showSubagents;
+
+  set showSubagents(bool value) {
+    if (_showSubagents == value) return;
+    _showSubagents = value;
+    _notify();
+  }
   /// La capa de datos. Pública para que un test pueda assertar contra el mismo
   /// repository, no para que la UI lo use: la pantalla sólo lee el estado.
   final SessionRepository repository;
@@ -88,15 +112,58 @@ class SessionsViewModel extends ChangeNotifier {
     return null;
   }
 
-  /// [sessions] con el filtro de [query] aplicado (por título).
+  /// Las sesiones **principales**, en el orden del server.
+  ///
+  /// `parentID` presente ⇒ la sesión cuelga de otra: es un subagente, y su
+  /// contenido es parte de la sesión que la lanzó.
+  ///
+  /// **Medido 2026-09-29 contra el server real**: `GET /api/session` trae
+  /// `parentID` en la lista y **lo omite cuando está vacío**. De 1000 sesiones,
+  /// 483 vinieron sin la clave (principales) y 517 con la clave (subagentes), y
+  /// el spot-check contra `GET /api/session/{id}` coincidió en los tres casos.
+  /// El filtro sale gratis: cero requests extra.
+  ///
+  /// Ojo con el patrón: la clave **ausente** y la clave **vacía** significan las
+  /// dos "principal". Medir sobre una principal y concluir que el campo no
+  /// existe en la respuesta fue el error que se cometió acá una vez.
+  List<SessionInfo> get mainSessions => [
+    for (final s in _sessions)
+      if (!s.isSubagent) s,
+  ];
+
+  /// Sólo los subagentes, para el interruptor.
+  List<SessionInfo> get subagentSessions => [
+    for (final s in _sessions)
+      if (s.isSubagent) s,
+  ];
+
+  /// Las marcadas como favoritas, **en el orden que puso el usuario**, y sin
+  /// las que ya no están (la sesión se borró del server).
+  List<SessionInfo> get favoriteSessions {
+    final byId = <String, SessionInfo>{for (final s in _sessions) s.id: s};
+    return <SessionInfo>[
+      for (final id in _favorites.order)
+        if (byId[id] case final SessionInfo s) s,
+    ];
+  }
+
+  bool isFavorite(String sessionId) => _favorites.contains(sessionId);
+
+  /// Marca o desmarca una favorita. La lista se repinta y el orden se persiste.
+  void toggleFavorite(String sessionId) => _favorites.toggle(sessionId);
+
+  /// Principales con el filtro de [query] por título, más los subagentes si el
+  /// interruptor está prendido.
   List<SessionInfo> get visible {
     final q = _query.trim().toLowerCase();
-    if (q.isEmpty) return _sessions;
-    return [
-      for (final s in _sessions)
+    final base = _showSubagents ? _sessions : mainSessions;
+    if (q.isEmpty) return base;
+    return <SessionInfo>[
+      for (final s in base)
         if (s.title.toLowerCase().contains(q)) s,
     ];
   }
+
 
   /// [visible] agrupado por día calendario de `time.updated`.
   List<SessionGroup> get groups => groupSessions(visible, _clock());

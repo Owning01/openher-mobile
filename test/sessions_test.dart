@@ -6,12 +6,14 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:openher_mobile/core/network/api_client.dart';
 import 'package:openher_mobile/core/network/server_config.dart';
+import 'package:openher_mobile/core/storage/prefs_store.dart';
 import 'package:openher_mobile/data/repositories/session_repository.dart';
 import 'package:openher_mobile/domain/models/errors.dart';
 import 'package:openher_mobile/domain/models/message.dart';
 import 'package:openher_mobile/domain/models/session.dart';
 import 'package:openher_mobile/ui/core/layer_gate.dart';
 import 'package:openher_mobile/ui/core/theme.dart';
+import 'package:openher_mobile/ui/features/sessions/session_favorites.dart';
 import 'package:openher_mobile/ui/features/sessions/sessions_view.dart';
 import 'package:openher_mobile/ui/features/sessions/sessions_viewmodel.dart';
 
@@ -416,6 +418,164 @@ void main() {
       expect(vm.attention, {'hijo'});
       expect(vm.needsAttention(vm.sessions.first), isFalse);
       vm.dispose();
+    });
+
+    test('la lista muestra sólo las principales: los subagentes se ocultan', () async {
+      // La regla del escritorio, textual: "Recientes lista SOLO sesiones
+      // principales (sin parentID), ni hijas con padre vivo ni huérfanas"
+      // (`web/src/components/SessionList.tsx`).
+      final vm = SessionsViewModel(
+        repository: repoWith(
+          server(
+            list: listJson([
+              sessionJson(id: 'p1', title: 'principal uno', updatedMs: 0),
+              sessionJson(
+                id: 's1',
+                title: 'subagente',
+                updatedMs: 0,
+                parent: 'p1',
+              ),
+              // Huérfana: el padre se borró del server pero el `parentID` sigue
+              // apuntando a él. La regla del escritorio también la oculta.
+              sessionJson(
+                id: 's2',
+                title: 'huerfana',
+                updatedMs: 0,
+                parent: 'p9',
+              ),
+              sessionJson(id: 'p2', title: 'principal dos', updatedMs: 0),
+            ]),
+          ),
+        ),
+        clock: () => kNow,
+      );
+      addTearDown(vm.dispose);
+
+      await vm.load();
+
+      expect(
+        vm.visible.map((s) => s.id),
+        <String>['p1', 'p2'],
+        reason: 'por defecto sólo las principales',
+      );
+      expect(vm.mainSessions, hasLength(2));
+      expect(vm.subagentSessions.map((s) => s.id), <String>['s1', 's2']);
+    });
+
+    test('el interruptor deja ver los subagentes', () async {
+      final vm = SessionsViewModel(
+        repository: repoWith(
+          server(
+            list: listJson([
+              sessionJson(id: 'p1', title: 'principal', updatedMs: 0),
+              sessionJson(
+                id: 's1',
+                title: 'subagente',
+                updatedMs: 0,
+                parent: 'p1',
+              ),
+            ]),
+          ),
+        ),
+        clock: () => kNow,
+      );
+      addTearDown(vm.dispose);
+
+      await vm.load();
+      expect(vm.showSubagents, isFalse);
+
+      vm.showSubagents = true;
+      expect(vm.visible, hasLength(2), reason: 'con el interruptón prendido, todas');
+
+      vm.showSubagents = false;
+      expect(vm.visible, hasLength(1));
+    });
+
+    test('el filtro por título también mira las principales', () async {
+      final vm = SessionsViewModel(
+        repository: repoWith(
+          server(
+            list: listJson([
+              sessionJson(id: 'p1', title: 'Zip del proyecto', updatedMs: 0),
+              sessionJson(
+                id: 's1',
+                title: 'Zip del subagente',
+                updatedMs: 0,
+                parent: 'p1',
+              ),
+            ]),
+          ),
+        ),
+        clock: () => kNow,
+      );
+      addTearDown(vm.dispose);
+
+      await vm.load();
+      vm.search('zip');
+
+      // El subagente sigue oculto con el interruptor apagado: si no, buscar
+      // "zip" devolvería resultados que después no aparecen en la lista.
+      expect(vm.visible.map((s) => s.id), <String>['p1']);
+    });
+
+    test('favoritas: van en el orden del usuario y fuera de su día', () async {
+      final prefs = InMemoryPrefs();
+      final favorites = SessionFavorites(prefs)
+        ..toggle('p2')
+        ..toggle('p1');
+      addTearDown(favorites.dispose);
+
+      final vm = SessionsViewModel(
+        repository: repoWith(
+          server(
+            list: listJson([
+              sessionJson(id: 'p1', title: 'primero en el server', updatedMs: 0),
+              sessionJson(id: 'p2', title: 'segundo en el server', updatedMs: 0),
+              sessionJson(id: 'p3', title: 'sin marcar', updatedMs: 0),
+            ]),
+          ),
+        ),
+        favorites: favorites,
+        clock: () => kNow,
+      );
+      addTearDown(vm.dispose);
+
+      await vm.load();
+
+      expect(
+        vm.favoriteSessions.map((s) => s.id),
+        <String>['p2', 'p1'],
+        reason: 'el orden es el del usuario, no el del server',
+      );
+      expect(vm.isFavorite('p1'), isTrue);
+      expect(vm.isFavorite('p3'), isFalse);
+
+      // La sesión no marcada sigue en la lista de siempre.
+      expect(vm.visible.map((s) => s.id), contains('p3'));
+    });
+
+    test('una favorita que ya no existe no aparece', () async {
+      final favorites = SessionFavorites(InMemoryPrefs())
+        ..toggle('borrada')
+        ..toggle('viva');
+      addTearDown(favorites.dispose);
+
+      final vm = SessionsViewModel(
+        repository: repoWith(
+          server(
+            list: listJson([sessionJson(id: 'viva', title: 'viva', updatedMs: 0)]),
+          ),
+        ),
+        favorites: favorites,
+        clock: () => kNow,
+      );
+      addTearDown(vm.dispose);
+
+      await vm.load();
+
+      // Un id guardado de una sesión que el server ya no devuelve tiene que
+      // filtrarse: si no, la lista de favoritas miente sobre lo que hay.
+      expect(vm.favoriteSessions.map((s) => s.id), <String>['viva']);
     });
 
     test('create() llama al server y devuelve el id nuevo', () async {

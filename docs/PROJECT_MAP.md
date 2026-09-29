@@ -59,7 +59,7 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 | D4 | POST del prompt y después escuchar; el POST no devuelve el turno |
 | D5 | Bottom nav de 4 destinos + hojas inferiores |
 | D6 | Tokens y **variantes de tema** reusados del escritorio (espejo de `tokens.css`) |
-| D7 | Deps directos: `http`, `flutter_secure_storage`, `speech_to_text`, `flutter_svg`, `shared_preferences`, `flutter_markdown_plus`, `connectivity_plus`, `image_picker`, `video_player`, `pdfrx` |
+| D7 | Deps directos: `http`, `flutter_secure_storage`, `speech_to_text`, `flutter_svg`, `shared_preferences`, `flutter_markdown_plus`, `connectivity_plus`, `image_picker`, `video_player`, `pdfrx`, `html`, `url_launcher` |
 | D8 | Los 3 canales de error visibles (el escritorio se come `session.error`) |
 | D9 | Modo de bajo consumo **automático** sólo con red celular; el usuario puede desactivarlo a mano |
 | D10 | Autoupdate contra el manifiesto de la release, sin diálogos ni bloqueos |
@@ -96,6 +96,17 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
   Un agente **no** trae modelo.
 - **Herramientas agrupadas:** una caja por **turno**, montada en el primer assistant del turno
   (los resultados de shell nunca la poseen). Dueño y absorciones: `lib/domain/models/turn_activity.dart`.
+- **Subagentes:** `GET /api/session` trae `parentID` **sólo cuando no está vacío**. Principales =
+  la clave ausente; subagentes = la clave con un `ses_…`. Medido sobre 1000 sesiones: 483 sin la
+  clave, 517 con la clave, y el spot-check contra `GET /api/session/{id}` coincidió. El filtro sale
+  **gratis**, sin requests extra. Regla del escritorio, textual (`web/src/components/SessionList.tsx`):
+  "Recientes lista SOLO sesiones principales (sin parentID), ni hijas con padre vivo ni huérfanas".
+  La app lo lleva con un interruptor porque un subagente a veces es justo lo que se quiere abrir.
+- **Favoritas:** **no hay ninguna en el server** (medido 2026-09-29: `GET /shell/fs/favorites` devuelve
+  el HTML del SPA y el `openapi.json` no menciona `favorite`). El escritorio las guarda en
+  `localStorage[STORAGE_KEYS.FAVORITES]` como `string[]` **ordenado**
+  (`web/src/hooks/useSessions.ts`); la app lo porta a `shared_preferences` con la misma forma.
+  No hay puente entre las dos listas: son dos almacenes distintos.
 - **Visor de archivos:** los bytes salen de **`GET /api/fs/read/<path>`**, que **medido**
   devuelve los bytes **crudos** con el `Content-Type` correcto (verificado con un APK de
   56 MB = `application/vnd.android.package-archive`, y con PNG, SVG, PDF y `.md`). No hay otra
@@ -106,6 +117,11 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
   aviso, en vez de renderizar bytes como texto.
 - Los cargadores de red del visor (imagen, svg, video, pdf) necesitan el header Basic
   explícito; sin él el server responde 401. Lo arma `ServerConfig.binaryHeaders`.
+- **`?auth_token=<base64(user:pass)>` autentica en todo `/api/*`, incluido `fs/read`** (medido:
+  200 con y sin header, 401 sin ninguno) y el server **no emite cookie**. Por eso el HTML se puede
+  abrir en el navegador del sistema y por eso se **ignora** el `&style` de sus `<link>`: un CSS
+  externo no es un `.html` y el server lo sirve literal. El costo es que la password viaja en la URL,
+  así que la app nunca la copia al portapapeles.
 
 ## Server de desarrollo
 
@@ -130,6 +146,11 @@ Build de Android: `ANDROID_HOME=G:\Android\SDK`, `JAVA_HOME=G:\Android\Android S
 - `/api/health` no existe ⇒ `/api/location`.
 - Un control dibujado sin destino es un bug, no un TODO. `FileAction.diff` sigue sin destino
   y **lo dice** con un toast; `FileAction.open` ya no.
+- `LayerCatalog.isOn` es `_overrides[key] ?? _defaults[key] ?? false`: una clave **desconocida
+  apaga el control en silencio**. Por eso `test/layer_keys_test.dart` compara cada `LayerGate` y
+  cada `isOn` contra `spec/layers.json`: sin ese gate, un typo deja un botón invisible y la app
+  "anda". La spec tiene 94 claves y un contrato que las cuenta: una capa nueva se agrega ahí
+  primero, no después.
 - El APK se compila **arm64-only** (`publish-update.ps1`): 26,8 MB contra 73,6 MB del universal.
   Medido en el publicado: `arm64-v8a` 24,8 MB y 0,1 MB de restos en las otras dos ABIs.
 - `flutter build apk` compila **feliz** un manifest inválido. El parser de Android solo avisa al
