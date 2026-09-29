@@ -312,3 +312,39 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
 - **Lo que NO se pudo verificar**: el APK no se corrió en un teléfono real. El Xiaomi
   `aaiz5tbuq8dqyxqs` sigue cayéndose de USB/adb, así que el spinner y el chip de reintento están
   verificados **por golden y por test**, no en pantalla.
+
+## 2026-09-29 — Publicado 1.7.0+12: el bump de versión no lo hacía el script
+
+- **Al publicar, `publish-update.ps1 -Version 1.7.0+12` NO bumpea `pubspec.yaml`.** Nombra los
+  releases y escribe `latest.json` correctamente, pero el APK compilado conserva el `versionCode`
+  viejo. Medido: el release v1.7.0 quedó sirviendo `versionCode=11` / `versionName=1.6.0` con el
+  manifiesto anunciando 12 / 1.7.0.
+- **Cómo rompe**: el autoupdate compara la versión del manifiesto contra la interna. Como la
+  interna nunca llega a la del manifiesto, la app **ofrece la actualización para siempre** y
+  vuelve a descargar el mismo APK. Es la peor falla posible en autoupdate: no se ve, sólo se
+  siente en la factura de datos.
+- **Corregido**: `pubspec.yaml` en `1.7.0+12`, recompilado y republicado. Verificado con `aapt2`
+  **sobre el archivo BAJADO del release** (no sobre el local): `versionCode=12`,
+  `versionName=1.7.0`, 28.581.299 bytes, descargable desde los dos repos.
+- **La verificación del propio script dio un falso negativo** la primera vez: el error fue
+  *"el manifiesto publicado dice versionCode 11 y esperábamos 12"*, cuando el manifiesto ya
+  decía 12. Es **caché de GitHub**: el asset re-subido con el mismo nombre se sirve viejo. Hay que
+  verificar con cache-buster. La segunda corrida, con el pubspec ya bumpeado, dio
+  "OK 1.7.0 (12) publicado y verificado".
+- **Manifest verificado antes de publicar** (la trampa del APK no instalable): 12 `<intent>` en
+  `<queries>`, **todos con exactamente 1 `<action>`**. arm64 pesa 26.495.544 B; armeabi-v7a y
+  x86_64 son restos de 86 KB y 123 KB. APK final 27,26 MB.
+- **Dos trampas de Powershell**: `Start-Process -ArgumentList` parte los argumentos por espacios,
+  así que un `-Notes "a b c"` hay que entrequillarlo (si no, *"No se encuentra ningún parámetro
+  posicional que acepte el argumento"*), y `Set-Content -Encoding UTF8` mete **BOM** en los
+  archivos de mensaje de commit, que queda pegado al asunto en `git log`.
+- **El commit del arreglo del botón Detener se coló** en el commit de performance: los dos cambios
+  están en `_fetch`. Lo rehíce como un commit `fix+perf` con el mensaje exacto, porque partirlo
+  exigía cirugía de hunks sobre el mismo método y dejaba estados intermedios que no compilan.
+- **Estado final**: 5 commits, un solo push, `flutter analyze` limpio, **759 tests verdes
+  (6 skipped)**, árbol limpio, publicado en `Owning01/openher-mobile` (v1.7.0) y en
+  `Owning01/mis-apps` (openher-mobile-v1.7.0).
+- **Lo que sigue sin poder verificarse**: nada se probó en un teléfono real. El Xiaomi
+  `aaiz5tbuq8dqyxqs` sigue sin aparecer en `adb devices`. El spinner y el chip de reintento están
+  verificados por golden y por test, no en pantalla. La primera vez que se abra el APK hay que
+  mirar esos dos elementos.
