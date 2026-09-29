@@ -301,8 +301,15 @@ void main() {
       expect(vm.error, isNull);
     });
 
+    // **Adjudicado 2026-09-29.** Este test afirmaba que un 429 tenía que
+    // *sacar* la burbuja optimista, y eso es lo que se implementó. La medición
+    // lo desmentía: al mandar con el agente trabajando el server responde
+    // **409 Conflict** (declarado en el spec de `/api/session/{id}/prompt`) y el
+    // mensaje que el usuario acababa de escribir desaparecía de la pantalla sin
+    // dejar rastro. Un texto del usuario no se borra por un fallo de
+    // transporte: se marca y se reintenta.
     test(
-      'un 429 saca la burbuja optimista y muestra el error de transporte',
+      'un 429 deja el mensaje en pantalla, marcado, con el error a la vista',
       () async {
         final failing = ChatViewModel(
           api(
@@ -316,11 +323,54 @@ void main() {
 
         await failing.send('hola');
 
-        expect(failing.messages, isEmpty);
+        expect(
+          failing.messages,
+          hasLength(1),
+          reason: 'el texto del usuario no puede desaparecer por un 429',
+        );
+        final m = failing.messages.single as UserMessage;
+        expect(m.text, 'hola');
+        expect(m.notDelivered, isTrue);
+        expect(failing.undelivered, hasLength(1));
         expect(failing.error, contains('429'));
         expect(failing.working, isFalse);
       },
     );
+
+    test('retrySend vuelve a mandar el mensaje que el server no tomó', () async {
+      var posts = 0;
+      var fail = true;
+      final vm = ChatViewModel(
+        api(
+          MockClient((req) async {
+            if (req.url.path.endsWith('/prompt')) {
+              posts++;
+              if (fail) {
+                return http.Response('{"message":"busy"}', 409);
+              }
+              return http.Response('{"data":{}}', 200);
+            }
+            return http.Response('{"data":[]}', 200,
+                headers: {'content-type': 'application/json'});
+          }),
+        ),
+        sessionId: kSessionId,
+      );
+      addTearDown(vm.dispose);
+
+      await vm.send('hola');
+      final local = (vm.messages.single as UserMessage).id;
+      expect(posts, 1);
+      expect((vm.messages.single as UserMessage).notDelivered, isTrue);
+
+      // El server ahora acepta: el reintento lo manda y saca la marca.
+      fail = false;
+      await vm.retrySend(local);
+
+      expect(posts, 2, reason: 'el reintento tiene que volver a hacer el POST');
+      expect(vm.undelivered, isEmpty);
+      expect(vm.working, isTrue, reason: 'un prompt admitido deja el turno vivo');
+    });
   });
 
   group('eventos del stream', () {

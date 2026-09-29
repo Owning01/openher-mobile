@@ -54,7 +54,15 @@ class MessageBubble extends StatelessWidget {
     this.onOpenDiff,
     this.onQuestionAnswer,
     this.questionRequestId,
+    this.onRetrySend,
   });
+
+  /// Reintenta un mensaje del usuario que el server no tomó (409 al mandar
+  /// con el agente trabajando, o 429 de rate limit).
+  ///
+  /// Antes ese mensaje se borraba de la lista y el texto se perdía sin que el
+  /// usuario llegara a ver por qué.
+  final ValueChanged<String>? onRetrySend;
 
   final SessionMessage message;
 
@@ -261,6 +269,10 @@ class MessageBubble extends StatelessWidget {
               color: scheme.onPrimary,
             ),
           ),
+          if (user.notDelivered) ...[
+            const SizedBox(height: 6),
+            _NotDeliveredChip(onRetry: () => onRetrySend?.call(user.id)),
+          ],
         ],
       ),
     );
@@ -1249,6 +1261,57 @@ class _TypingDotsState extends State<TypingDots>
             ),
         ],
       ),
+    );
+  }
+}
+
+
+
+/// Aviso de "este mensaje todavía no lo tomó el server", con reintento.
+///
+/// Va **dentro** de la burbuja y no como banner: el aviso pertenece a ese
+/// mensaje, no a toda la conversación. Con un banner el usuario no sabe
+/// cuál de sus mensajes falló.
+class _NotDeliveredChip extends StatelessWidget {
+  const _NotDeliveredChip({required this.onRetry});
+
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final dim = scheme.onPrimary.withValues(alpha: 0.85);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Icon(Icons.error_outline, size: 13, color: dim),
+        const SizedBox(width: 4),
+        Text(
+          'No se envío',
+          style: theme.textTheme.labelSmall?.copyWith(fontSize: 11, color: dim),
+        ),
+        const SizedBox(width: 6),
+        // Botón chico y explícito: el usuario tiene que poder reintentar
+        // sin volver a escribir el mensaje.
+        InkWell(
+          onTap: onRetry,
+          borderRadius: BorderRadius.circular(4),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+            child: Text(
+              'Reintentar',
+              style: theme.textTheme.labelSmall?.copyWith(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: scheme.onPrimary,
+                decoration: TextDecoration.underline,
+                decorationColor: scheme.onPrimary,
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
