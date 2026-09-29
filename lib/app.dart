@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'data/connectivity/tailscale_monitor.dart';
@@ -364,6 +366,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                       _SessionsTab(
                         config: widget.config,
                         onOpen: _nav.openSession,
+                        // El `IndexedStack` mantiene las cuatro pestañas
+                        // montadas, así que sin esto el poll de
+                        // `/api/session/active` seguía corriendo con el chat al
+                        // frente: 62 bytes cada 5 s que nadie mira (medido:
+                        // ~45 KB/h). El chat ya frenaba el suyo con `setVisible`;
+                        // acá faltaba el mismo corte.
+                        visible: _nav.tab == MobileTab.sessions,
                       ),
                       _ChatTab(
                         sessionInfo: _nav.chatSession,
@@ -419,9 +428,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 }
 
 class _SessionsTab extends StatefulWidget {
-  const _SessionsTab({required this.config, required this.onOpen});
+  const _SessionsTab({
+    required this.config,
+    required this.onOpen,
+    required this.visible,
+  });
 
   final ServerConfig config;
+  final bool visible;
   final void Function(SessionInfo session) onOpen;
 
   @override
@@ -432,6 +446,29 @@ class _SessionsTabState extends State<_SessionsTab> {
   late final SessionsViewModel _vm = SessionsViewModel(
     repository: SessionRepository(ApiClient(config: widget.config)),
   );
+
+  @override
+  void initState() {
+    super.initState();
+    // El poll arranca con la pestaña, no antes. La pantalla también lo pide en
+    // su `initState`; acá está el corte por visibilidad, que es el que importa
+    // en un `IndexedStack` donde `dispose` no se llama al cambiar de pestaña.
+    if (widget.visible) _vm.startPolling();
+  }
+
+  @override
+  void didUpdateWidget(covariant _SessionsTab old) {
+    super.didUpdateWidget(old);
+    if (old.visible == widget.visible) return;
+    if (widget.visible) {
+      _vm.startPolling();
+      // Al volver al frente hay que repreguntar: mientras la pestaña estuvo
+      // apagada el mundo siguió avanzando.
+      unawaited(_vm.pollActive());
+    } else {
+      _vm.stopPolling();
+    }
+  }
 
   @override
   void dispose() {
