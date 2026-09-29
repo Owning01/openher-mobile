@@ -110,6 +110,7 @@ final class UserMessage extends SessionMessage {
     required this.text,
     this.files = const [],
     this.agents = const [],
+    this.notDelivered = false,
   });
 
   factory UserMessage.fromJson(Map<String, Object?> json) => UserMessage(
@@ -133,6 +134,26 @@ final class UserMessage extends SessionMessage {
 
   /// Nombres de los `@agente` mencionados. Acepta `["build"]` y `[{name}]`.
   final List<String> agents;
+
+  /// El server **no** lo tomó: sigue en pantalla esperando que se reintente.
+  ///
+  /// Antes el mensaje optimista se borraba solo si el POST fallaba, y con eso
+  /// lo que el usuario habia escrito se perdia sin dejar rastro. Es lo que
+  /// pasaba al mandar con el agente trabajando: el server responde **409
+  /// Conflict** (declarado en el spec de `/api/session/{id}/prompt`) y el
+  /// mensaje desaparecia de la pantalla. Un texto que el usuario escribio no se
+  /// borra por un fallo de transporte: se marca y se reintenta.
+  final bool notDelivered;
+
+  UserMessage copyWith({bool? notDelivered}) => UserMessage(
+    id: id,
+    time: time,
+    metadata: metadata,
+    text: text,
+    files: files,
+    agents: agents,
+    notDelivered: notDelivered ?? this.notDelivered,
+  );
 }
 
 /// Adjunto del prompt del usuario.

@@ -38,6 +38,7 @@ import '../../core/tokens.dart';
 import 'chat_viewmodel.dart';
 import 'composer.dart';
 import 'message_bubble.dart';
+import 'squares_spinner.dart';
 import 'agent_sheet.dart';
 import 'model_sheet.dart';
 
@@ -421,7 +422,11 @@ class _ChatViewState extends State<ChatView> {
     // `0` = aviso de reintento, `1` = botón de "Cargar 30 anteriores".
     final notice = _vm.retryNotice;
     final lead = (notice != null ? 1 : 0) + (_vm.hasEarlier ? 1 : 0);
-    final count = lead + messages.length;
+    // La fila de la grilla va al **pie**: es donde el usuario mira cuando
+    // espera. No va detrás de `chat.header.progress` porque esa capa está
+    // apagada por diseño (una de las cuatro del catálogo) y no se vería nunca.
+    final thinking = _vm.working ? 1 : 0;
+    final count = lead + messages.length + thinking;
 
     // Una caja por TURNO, no por mensaje: es el diseno de
     // 	urnActivity.ts del cliente React, al pie de la letra. Sin esto,
@@ -452,6 +457,12 @@ class _ChatViewState extends State<ChatView> {
             if (offset == 0) return _loadMore();
             offset--;
           }
+          // La última fila es la grilla de "pensando". Va después de restar las
+          // filas de encabezado, así que se compara contra el largo de la lista
+          // de mensajes y no contra `index`.
+          if (thinking == 1 && offset == messages.length) {
+            return const _ThinkingRow();
+          }
           final message = messages[offset];
           return Padding(
             padding: const EdgeInsets.only(bottom: AppSpacing.md),
@@ -468,6 +479,10 @@ class _ChatViewState extends State<ChatView> {
               onOpenDiff: widget.onOpenDiff == null ? null : _onOpenDiff,
               onQuestionAnswer: _onQuestion,
               questionRequestId: _requestIdFor(message),
+              // El mensaje que el server no tomó queda en pantalla marcado, con
+              // su reintento. Antes se borraba y el texto se perdía (409 al
+              // mandar con el agente trabajando).
+              onRetrySend: _vm.retrySend,
             ),
           );
         },
@@ -1114,4 +1129,34 @@ class _Stat extends StatelessWidget {
       ],
     ),
   );
+}
+
+/// La fila de "el agente está pensando": la grilla de 8 cuadrados.
+///
+/// Va al pie de la lista y **no** detrás de una capa. La línea de progreso de
+/// 2 px vivía en `chat.header.progress`, que es una de las cuatro capas
+/// apagadas del catálogo, y por eso no se veía: un spinner que no aparece no
+/// es un spinner.
+class _ThinkingRow extends StatelessWidget {
+  const _ThinkingRow();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.xs, bottom: AppSpacing.md),
+      child: Row(
+        children: <Widget>[
+          const SquaresSpinner(),
+          const SizedBox(width: AppSpacing.md),
+          Text(
+            'Pensando',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
