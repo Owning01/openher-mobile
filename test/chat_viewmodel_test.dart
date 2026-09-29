@@ -199,8 +199,12 @@ void main() {
         // `time.completed` presente ⇒ turno terminado.
         expect(vm.working, isFalse);
         expect(vm.error, isNull);
-        // El resumen sale de los tokens del assistant (no hay SessionInfo).
-        expect(vm.serverTokens, 14500);
+        // El contexto sale de los tokens del assistant (no hay SessionInfo).
+        // Es `input + cache.read + reasoning` = 14.200 + 9.000 + 0, **no**
+        // `input + output + reasoning` = 14.500: el `output` es lo que se
+        // generó, no lo que está cargado en la ventana. Ver
+        // `TokenUsage.context` y el motivo medido en `context_measure_test.dart`.
+        expect(vm.contextTokens, 14200 + 9000);
         expect(vm.serverCost, closeTo(0.011, 1e-9));
       },
     );
@@ -1282,9 +1286,10 @@ void main() {
       });
       await pumpEventQueue();
       expect(vm.serverCost, 0.42);
-      // El contexto es input + output + cache leido: sin el cache el
-      // contador se queda en cero con sesiones largas.
-      expect(vm.serverTokens, 9200);
+      // El contexto del turno en vuelo es `input + cache.read + reasoning`:
+      // 1.000 + 8.000 + 50. Antes sumaba `output` y daba 9.200, y el mismo
+      // rótulo mezclaba dos fórmulas según el SSE estuviera conectado o no.
+      expect(vm.contextTokens, 1000 + 8000 + 50);
     });
 
     test('session.renamed muestra el titulo que pone el server', () async {

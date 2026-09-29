@@ -175,6 +175,99 @@ class ApiClient {
     ];
   }
 
+  /// `GET /api/command` - los comandos de barra que el server acepta.
+  ///
+  /// **Medido 2026-09-29** contra el server real: devuelve `[{name,
+  /// description}]` y, en esta máquina, son **tres**: `init`, `review` y
+  /// `debate` (los declarados en `AGENTS.md`). Con y sin `directory` da lo
+  /// mismo, así que el parámetro no cambia el resultado y se manda igual que
+  /// en el resto de las llamadas.
+  ///
+  /// La lista es la **verdad del server**, y hay que respetarla. El cliente web
+  /// de OpenHer la mezcla con 13 comandos hardcodeados (`compact`, `undo`,
+  /// `redo`, `themes`, `history`, …) que este server **no tiene**: medido, dan
+  /// **404** en `POST /api/session/{id}/command`. Ofrecer un comando que el
+  /// server va a rechazar es peor que no ofrecerlo, así que la app muestra
+  /// exactamente esta lista y nada más.
+  ///
+  /// `compact` y el deshacer son reales pero **no son comandos**: son
+  /// [compactSession] y [stageRevert] + [commitRevert]. Se igualan en el menú
+  /// porque son las acciones a las que uno va de verdad, cada una a su endpoint.
+  Future<List<Map<String, dynamic>>> listCommands({String? directory}) async {
+    final page = await _page('/command', const <String, String?>{}, directory);
+    return [
+      for (final item in page.data)
+        if (item is Map<String, dynamic>) item,
+    ];
+  }
+
+  /// `GET /api/skill` - las skills que el `@` puede mencionar.
+  ///
+  /// **Medido 2026-09-29**: 438 KB en esta máquina. Se carga **una vez por
+  /// chat** y solo la primera vez que se abre el menú `@`; los campos que se
+  /// usan son `id`, `name` y `description`, y la lista queda cacheada en la
+  /// vista. Filtrar 438 KB de JSON en cada tecla sería tirar la CPU, así que el
+  /// filtro corre sobre la lista ya decodificada, no sobre el texto crudo.
+  Future<List<Map<String, dynamic>>> listSkills({String? directory}) async {
+    final page = await _page('/skill', const <String, String?>{}, directory);
+    return [
+      for (final item in page.data)
+        if (item is Map<String, dynamic>) item,
+    ];
+  }
+
+  /// `GET /api/mcp/resource` - los recursos MCP que el `@` puede mencionar.
+  ///
+  /// **Medido 2026-09-29**: la respuesta **no** es una lista, es un objeto
+  /// `{resources: [...], templates: [...]}` (84 B sin ningún server MCP
+  /// conectado). Una comprensión de lista sobre eso daría un menú vacío en
+  /// silencio, así que las dos listas se leen explícitamente.
+  Future<List<Map<String, dynamic>>> listMcpResources({
+    String? directory,
+  }) async {
+    final obj = await _object(
+      '/mcp/resource',
+      directory: directory,
+    );
+    final raw = obj['resources'];
+    if (raw is! List) return const [];
+    return [
+      for (final item in raw)
+        if (item is Map<String, dynamic>) item,
+    ];
+  }
+
+  /// `POST /api/session/{id}/command` - corre un comando de barra.
+  ///
+  /// **Contrato medido 2026-09-29** del propio OpenAPI del server
+  /// (`GET /openapi.json`): el body exige **`name`** y **`text`**, y
+  /// `additionalProperties: false`. El comentario del cliente web dice que
+  /// recibió un 400 `Missing key ["name"]` al mandar `{command, text}`; por eso
+  /// el campo se llama `name` acá y no `command`.
+  ///
+  /// El `name` viaja **sin la barra inicial**: el lookup del server es exacto,
+  /// así que `/review` no emparejaría con `review`.
+  ///
+  /// Medido: `init` y `review` contestan **204** (el trabajo corre como un
+  /// turno); los nombres desconocidos contestan **404**.
+  Future<void> runCommand(
+    String sessionId, {
+    required String name,
+    String text = '',
+    String? directory,
+  }) => postJson(
+    '/session/$sessionId/command',
+    query: _withLocation(const {}, directory),
+    body: <String, dynamic>{
+      // El `name` va **sin la barra**: el lookup del server es exacto, así que
+      // `/review` no empareja con `review` (medido: 404). El strip va acá y no
+      // en el caller porque la UI pasa naturalmente lo que el usuario escribió,
+      // que incluye la barra.
+      'name': name.replaceFirst(RegExp('^/+'), ''),
+      'text': text,
+    },
+  );
+
   /// `POST /api/session/{id}/agent` - cambia el agente de una sesión **viva**.
   ///
   /// Medido: responde **204 sin cuerpo** (igual que `interrupt`), no un

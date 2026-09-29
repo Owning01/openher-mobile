@@ -403,23 +403,42 @@ class ChatViewModel extends ChangeNotifier {
   /// ¿El chat está en pantalla? En `false` no hay socket ni timers (batería).
   bool get visible => _visible;
 
-  /// Contexto en tokens. `session.tokens` si el shell lo trajo; si no, la suma
-  /// en memoria de los `assistant.tokens` que ya tenemos.
-  int get serverTokens {
-    // El valor en vivo manda: el server lo manda en cada paso y el de la
-    // pagina de mensajes va atras.
-    final live = _liveTokens;
-    if (live != null) return live;
-    final info = sessionInfo;
-    if (info != null) return info.tokens.total;
-    var total = 0;
-    for (final m in _messages) {
-      if (m case final AssistantMessage a) total += a.tokens.total;
+  /// **Contexto en tokens**: lo que el modelo tiene cargado ahora mismo.
+  ///
+  /// Antes esto se llamaba `serverTokens` y devolvía la **suma acumulada de
+  /// tokens de toda la sesión**, etiquetada como "contexto". Medido contra el
+  /// server real sobre una sesión larga: la app mostraba **15.538.680** donde
+  /// el contexto real era **102.924**, o sea **151×** inflado.
+  ///
+  /// La causa: `session.tokens` es un **contador acumulado** (input, output y
+  /// `cache.read` de *todos* los turnos, sumados), no una foto de la ventana.
+  /// Sólo crece, y en una sesión larga crece sin techo.
+  ///
+  /// El contexto de verdad es el prompt del **último** turno del assistant:
+  /// `input + cache.read + reasoning`. Ver [TokenUsage.context] para por qué
+  /// `cache.write` y `output` quedan fuera.
+  ///
+  /// Pasa primero por el valor del SSE ([_liveTokens]) porque durante un turno
+  /// en vuelo el mensaje del assistant todavía no cerró y no tiene tokens: sin
+  /// eso el contador quedaría congelado en el turno anterior justo cuando más
+  /// se lo mira. Las dos fuentes usan la misma fórmula, así que el número sólo
+  /// salta si el server accounta distinto el prompt, no porque la app mezclara
+  /// dos definiciones (que es lo que pasaba antes: el vivo sumaba `output` y el
+  /// de respaldo no leía `cache` en absoluto).
+  int get contextTokens => _liveTokens ?? _contextFromMessages;
+
+  /// El contexto del último assistant que cerró. Sin ninguno, `0`.
+  int get _contextFromMessages {
+    for (var i = _messages.length - 1; i >= 0; i--) {
+      if (_messages[i] case final AssistantMessage a) {
+        return a.tokens.context;
+      }
     }
-    return total;
+    return 0;
   }
 
-  /// Gasto en USD, con el mismo fallback que [serverTokens].
+  /// El costo acumulado de la sesión, en USD. Esto **sí** es un acumulado y por
+  /// eso es correcto: el costo gastado no se reread de la ventana.
   double get serverCost {
     final live = _liveCost;
     if (live != null) return live;
@@ -750,7 +769,9 @@ class ChatViewModel extends ChangeNotifier {
       _lastQuestionReplyPath = QuestionReplyPath.prompt;
     }
 
-    await send(_answerPrompt(answers));
+    // Sin encolar: es la respuesta a lo que el server está preguntando, no un
+    // mensaje nuevo. Encolarla lo dejaba esperando para siempre.
+    await send(_answerPrompt(answers), encolable: false);
     _pendingQuestion = null;
     _recomputeWorking();
     _safeNotify();
@@ -771,13 +792,41 @@ class ChatViewModel extends ChangeNotifier {
   /// El POST devuelve el "admitido", **no** el turno: el turno llega por el
   /// stream (decisión D4). Por eso la burbuja optimista se queda hasta el
   /// primer re-fetch, que la reemplaza por el mensaje con id real.
+  /// [encolable] es lo que separa "mensaje nuevo del usuario" de "respuesta a
+  /// una pregunta del server".
+  ///
+  /// El segundo caso **nunca** se encola: el server no está trabajando, está
+  /// bloqueado esperando esa respuesta, y mandarla por el prompt la
+  /// convertiría en un mensaje nuevo en vez de la respuesta, dejando el turno
+  /// trabado. Por eso `answerQuestion` manda con `encolable: false`.
+  ///
+  /// No alcanza con mirar `_pendingQuestion`: `answerQuestion` acepta un
+  /// `requestId` explícito y se puede llamar sin que el app haya registrado la
+  /// pendiente (medido: 3 tests de "preguntas" caían con esa regla).
   Future<void> send(
     String text, {
     List<Map<String, String>>? files,
     List<String>? agents,
+    bool encolable = true,
   }) async {
     final body = text.trim();
     if (body.isEmpty) return;
+
+    // **Si hay un turno en curso, el prompt NO se manda.** Se queda en el
+    // chat como pendiente, con las tres acciones (enviar / editar /
+    // eliminar), y lo manda el usuario cuando quiere.
+    //
+    // Medido contra el server real: mandar con la sesión ocupada **no da
+    // 409**, da 200 y el mensaje vuelve con `"delivery": "steer"`, o sea que
+    // el server no lo encola: redirige el turno que está corriendo. Mandarlo
+    // sin que el usuario lo pida desvía la conversación en curso, que es
+    // justo lo contrario de "encolar". Frenar antes del POST es lo único que
+    // lo evita.
+    //
+    // **Excepción: hay una pregunta esperando.** Cubierta por [encolable]: la
+    // respuesta a una pregunta va con `encolable: false` y nunca queda
+    // pendiente.
+    final enCurso = encolable && working && _pendingQuestion == null;
 
     final local = UserMessage(
       id: 'local_${++_localSeq}',
@@ -792,9 +841,24 @@ class ChatViewModel extends ChangeNotifier {
           ),
       ],
       agents: agents ?? const <String>[],
+
+      pendingSend: enCurso,
+
     );
+
     _messages.add(local);
+    _recomputeWorking();
+
+    _safeNotify();
+
+
+    // Pendiente: no hay POST. Sale acá, antes de tocar la red.
+
+    if (enCurso) return;
+
+
     _awaitingAssistant = true;
+
     // El status del turno anterior quedó viejo: a partir de acá decide el
     // prompt nuevo.
     _busyStatus = null;
@@ -878,6 +942,101 @@ class ChatViewModel extends ChangeNotifier {
       _safeNotify();
     }
   }
+
+  /// El id del assistant **abierto**: el último de la lista, que es al que
+  /// le llegan los deltas del stream.
+  ///
+  /// Lo necesita la burbuja para no pintar los puntos de escritura en todos los
+  /// lados. Antes la condición era `working && texto vacío`, y `working` es
+  /// del turno entero: un mensaje de assistant que **sólo tiene tool calls**
+  /// tiene el texto vacío por diseño, así que cada uno pintaba sus puntos
+  /// durante todo el turno y todos desaparecían al terminar. Con varios
+  /// mensajes así era "muchos spinner en el chat que luego desaparecen".
+  String? get openAssistantId {
+    for (var i = _messages.length - 1; i >= 0; i--) {
+      if (_messages[i] is AssistantMessage) return _messages[i].id;
+    }
+    return null;
+  }
+
+  /// Los mensajes que el usuario todavía no mandó: los que están esperando
+  /// que los mande, editar o borrar. En orden de aparición.
+  List<UserMessage> get pendings => [
+    for (final m in _messages)
+      if (m is UserMessage && m.pendingSend) m,
+  ];
+
+  /// El texto de un pendiente, para devolverlo al compositor a editar.
+  ///
+  /// Editar **cancela** el pendiente: el mensaje se saca del chat y el texto
+  /// vuelve al campo. Si el usuario no lo manda de nuevo, no vuelve a
+  /// aparecer: no queda nada de él guardado.
+  String? takePendingText(String localId) {
+    final at = _indexOfUser(localId);
+    if (at < 0) return null;
+    final m = _messages[at];
+    if (m is! UserMessage || !m.pendingSend) return null;
+    _messages.removeAt(at);
+    _safeNotify();
+    return m.text;
+  }
+
+  /// Borra un pendiente y no vuelve a aparecer.
+  ///
+  /// No queda ni rastro local: el mensaje nunca estuvo en el server, así que
+  /// ningún re-fetch lo puede resucitar. El `removeWhere` por id es lo que
+  /// garantiza eso.
+  void discardPending(String localId) {
+    final at = _indexOfUser(localId);
+    if (at < 0) return;
+    _messages.removeAt(at);
+    _safeNotify();
+  }
+
+  /// Manda un pendiente que el usuario confirmó.
+  ///
+  /// Recibe el `delivery: steer` del server como una aceptación normal: acá el
+  /// server guardó el mensaje y lo procesa. Si el POST falla, el mensaje no se
+  /// borra: pasa a `notDelivered` con su reintento, como cualquier otro.
+  Future<void> confirmSend(String localId) async {
+    final at = _indexOfUser(localId);
+    if (at < 0) return;
+    final m = _messages[at];
+    if (m is! UserMessage || !m.pendingSend) return;
+
+    _messages[at] = m.copyWith(pendingSend: false);
+    _awaitingAssistant = true;
+    _busyStatus = null;
+    _recomputeWorking();
+    _safeNotify();
+
+    try {
+      await _api.sendPrompt(
+        sessionId,
+        text: m.text,
+        files: m.files.isEmpty
+            ? null
+            : [
+                for (final f in m.files) {
+                  'uri': f.uri,
+                  if (f.name != null) 'name': f.name!,
+                  if (f.mime != null) 'mime': f.mime!,
+                },
+              ],
+        agents: m.agents.isEmpty ? null : m.agents,
+        directory: directory,
+      );
+    } on OchError catch (e) {
+      _markNotDelivered(localId);
+      _awaitingAssistant = false;
+      _recomputeWorking();
+      _error = e.message;
+      _safeNotify();
+    }
+  }
+
+  int _indexOfUser(String id) =>
+      _messages.indexWhere((m) => m is UserMessage && m.id == id);
 
   /// Los mensajes del usuario que el server todavía no tomó, en orden.
   List<UserMessage> get undelivered => [
@@ -1031,13 +1190,23 @@ class ChatViewModel extends ChangeNotifier {
     if (cost is num) _liveCost = cost.toDouble();
     final tokens = asMap(data['tokens']);
     if (tokens != null) {
+      // Contexto del turno **en vuelo**: `input + cache.read + reasoning`, la
+      // misma fórmula que [TokenUsage.context].
+      //
+      // Antes sumaba `output` y saltaba `reasoning`. El `output` no es
+      // contexto: es lo que se está generando, así que contaminaba el número
+      // mientras el turno corría, y el `reasoning` faltando hacía que una
+      // sesión con mucho razonamiento mostrara menos de lo que tenía.
+      //
+      // Y antes de esto el valor vivo y el de respaldo significaban cosas
+      // **distintas** (`input + output + cache.read` en vivo contra el
+      // acumulado de la sesión sin cache), así que el mismo rótulo cambiaba de
+      // número según el SSE estuviera conectado o no. Ahora los dos caminos
+      // usan la misma definición.
       final input = asNum(tokens['input']) ?? 0;
-      final output = asNum(tokens['output']) ?? 0;
-      final cache = asMap(tokens['cache']);
-      // El contexto es lo que entra mas lo que se relee de cache: es el
-      // numero que el server manda como `input` mas `cache.read`, y sin el
-      // cache el contador se queda en cero con sesiones largas.
-      _liveTokens = (input + output + (asNum(cache?['read']) ?? 0)).toInt();
+      final reasoning = asNum(tokens['reasoning']) ?? 0;
+      final cacheRead = asNum(asMap(tokens['cache'])?['read']) ?? 0;
+      _liveTokens = (input + cacheRead + reasoning).toInt();
     }
     _safeNotify();
   }
