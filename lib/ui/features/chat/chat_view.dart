@@ -25,6 +25,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+
+import 'composer_suggestions.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../../data/repositories/catalog_repository.dart';
@@ -154,6 +156,40 @@ class _ChatViewState extends State<ChatView> {
   /// apertura de la hoja reusa la caché en vez de pegarle al server.
   CatalogRepository? _ownCatalog;
 
+  /// La ventana de contexto del modelo elegido, para el porcentaje.
+  ///
+  /// `null` si el catálogo no la tiene: el rótulo omite el `%` en vez de
+  /// inventar una ventana. Buscar el modelo es una lectura de la caché del
+  /// [CatalogRepository] (`findModel` la resuelve sin red cuando ya está
+  /// cargado), así que no agrega un request por repintado.
+  int? _contextWindow;
+  String? _contextWindowFor;
+
+  Future<void> _resolveContextWindow() async {
+    final model = _vm.currentModel;
+    final ref = model?.id;
+    if (ref == null || ref.isEmpty) return;
+    // La clave incluye el provider: dos providers pueden tener modelos con el
+    // mismo `id` y ventanas distintas, y con sólo el `id` se cachearía la
+    // ventana del provider anterior.
+    final key = '${model!.providerID}/$ref';
+    if (key == _contextWindowFor) return;
+    _contextWindowFor = key;
+    try {
+      final info = await _catalog.findModel(
+        providerId: model.providerID,
+        modelId: ref,
+      );
+      if (!mounted || _contextWindowFor != key) return;
+      setState(() => _contextWindow = info?.contextLimit);
+    } catch (e) {
+      // Sin ventana no hay porcentaje, y eso está bien: el número de tokens
+      // sigue siendo cierto. Un fallo del catálogo no vale un error en
+      // pantalla.
+      _contextWindow = null;
+    }
+  }
+
   /// Espejo de widget.visible: el post-frame del initState lo consulta.
   late bool _visible = true;
   bool _atBottom = true;
@@ -206,6 +242,12 @@ class _ChatViewState extends State<ChatView> {
 
   void _onVm() {
     if (!mounted) return;
+    // La ventana del modelo se resuelve una vez por modelo, no en cada tick del
+    // poll: el catálogo ya está cacheado, así que no agrega un request, pero
+    // `setState` en cada tick lo hace 30 veces por segundo, que es trabajo
+    // tirado. El `unawaited` es a propósito: no se espera al catálogo para
+    // pintar, y el número de tokens ya es cierto sin la ventana.
+    unawaited(_resolveContextWindow());
     setState(() {});
     // Antes del primer frame siempre se ancla al final (una lista que abre a la
     // mitad se siente rota); después, sólo si el usuario ya estaba abajo.
@@ -617,7 +659,14 @@ class _ChatViewState extends State<ChatView> {
         canSend: true,
         modelLabel: _modelLabel,
         agentLabel: _agentLabel,
-        contextLabel: contextLabel(_vm.serverTokens, _vm.serverCost),
+        // Con `window` para que aparezca el porcentaje: "102.9k contexto · 51%"
+        // informa mucho más que el número solo, porque sin la ventana no se
+        // sabe si 102k es mucho o poco.
+        contextLabel: contextLabel(
+          _vm.contextTokens,
+          _vm.serverCost,
+          window: _contextWindow,
+        ),
         // Los adjuntos van con el prompt y se vacian recien cuando el envio
         // se admite: si falla, el usuario los conserva y reintenta sin
         // volver a elegirlos.
@@ -630,8 +679,320 @@ class _ChatViewState extends State<ChatView> {
         onPickModel: _openModelSheet,
         onPickAgent: _openAgentSheet,
         onAttach: _pickAttachment,
+        suggestions: _suggestions,
+        suggestionsLoading: _suggestionsLoading,
+        onTrigger: _onTrigger,
+        onCommand: _runServerCommand,
+        onLocalAction: _runLocalAction,
       ),
     );
+  }
+
+  // ──────────────────────────── menú de / y @ ────────────────────────────
+
+  /// Lo que se está escribiendo bajo el cursor, y los ítems ya filtrados.
+  ///
+  /// Vive en la vista y no en el compositor porque el compositor no tiene
+  /// cliente HTTP: el `GET /api/command`, el `GET /api/skill` y la búsqueda de
+  /// archivos salen de acá. Lo que el compositor hace es detectar el
+  /// disparador ([detectComposerTrigger]) y avisar.
+  ComposerTrigger? _trigger;
+  List<ComposerSuggestion> _suggestions = const [];
+  bool _suggestionsLoading = false;
+
+  /// Carga perezosa. Cada fuente se pide **una vez** por sesión de chat: el
+  /// `GET /api/skill` pesa 438 KB y el `GET /api/agent` 87 KB, y tipear `@a` no
+  /// puede provocar dos requests por tecla.
+  ///
+  /// Ojo con el nombre: `_agents` (abajo, en `_loadAgents`) es el
+  /// [AgentCatalog] que usa la hoja de agente. Éste es otra cosa: los ítems del
+  /// menú, ya tipados. Mezclarlos fue un error de nombre, no de diseño.
+  List<ComposerSuggestion>? _commandItems;
+  List<ComposerSuggestion>? _skillItems;
+  List<ComposerSuggestion>? _agentItems;
+
+  void _onTrigger(ComposerTrigger? t) {
+    if (t == null) {
+      if (_trigger != null) setState(() {
+        _trigger = null;
+        _suggestions = const [];
+        _suggestionsLoading = false;
+      });
+      return;
+    }
+    // Cambió el disparador: se olvida el fallo anterior, porque el nuevo puede
+    // ser un directorio que sí funciona.
+    final cambioDeDisparador =
+        _trigger?.kind != t.kind || _trigger?.start != t.start;
+    if (cambioDeDisparador) _suggestionsFailed = false;
+    setState(() {
+      _trigger = t;
+      _suggestions = filterSuggestions(_candidates(t), t.query);
+    });
+    if (_needsLoad(t)) _loadSources(t);
+  }
+
+  /// Los candidatos que casan con un disparador, sin filtrar todavía.
+  ///
+  /// `_fileItems` no lleva `?` porque arranca vacío y nunca es nulo: los tres
+  /// que sí pueden no haber cargado todavía (comandos, agentes, skills) lo
+  /// llevan, y por eso un menú recién abierto se pinta con lo que hay sin
+  /// esperar a la red.
+  ///
+  /// Las acciones locales van **primero** y no se mezclan con la lista del
+  /// server: son las tres que el usuario pidió y las que ya funcionaban desde
+  /// el action sheet. Que el server no las anuncie en `GET /api/command` (medido:
+  /// `compact`, `undo` y `redo` dan 404 por `POST .../command`) no significa que
+  /// no existan: existen como endpoints, y ofrecerlas por nombre es justamente
+  /// lo que el usuario pidió.
+  List<ComposerSuggestion> _candidates(ComposerTrigger t) =>
+      t.kind == ComposerTriggerKind.slash
+      ? [..._localActions, ...?_commandItems]
+      : [...?_agentItems, ...?_skillItems, ..._fileItems];
+
+  /// Las tres acciones locales, con el id que el compositor enruta.
+  ///
+  /// El `insert` lleva la barra porque es lo que se ve en el campo; el
+  /// compositor la saca para el `name` del POST (ver
+  /// [ApiClient.runCommand] y [ChatComposer._dispatchSlash]).
+  static const List<ComposerSuggestion> _localActions = [
+    ComposerSuggestion(
+      label: 'compact',
+      insert: '/compact',
+      kind: ComposerSuggestionKind.action,
+      detail: 'Resume la conversación',
+    ),
+    ComposerSuggestion(
+      label: 'undo',
+      insert: '/undo',
+      kind: ComposerSuggestionKind.action,
+      detail: 'Deshacer el último mensaje',
+    ),
+    ComposerSuggestion(
+      label: 'redo',
+      insert: '/redo',
+      kind: ComposerSuggestionKind.action,
+      detail: 'Rehacer lo deshecho',
+    ),
+  ];
+
+  /// ¿Falta alguna fuente para este disparador?
+  ///
+  /// Para `/` alcanza con la lista de comandos. Para `@` hacen falta los agentes
+  /// siempre, las skills y los archivos recién con dos letras tipeadas: con una
+  /// sola, la búsqueda de archivos trae el árbol entero del proyecto.
+  ///
+  /// [_suggestionsFailed] es lo que corta la insistencia: si una fuente falló
+  /// (un `directory` roto da 500, medido), no se reintenta en cada tecla del
+  /// mismo disparador. Volver a intentar es cambiar de disparador.
+  bool _needsLoad(ComposerTrigger t) {
+    if (_suggestionsFailed) return false;
+    if (t.kind == ComposerTriggerKind.slash) return _commandItems == null;
+    if (t.query.trim().length < kMentionMinQuery) return _agentItems == null;
+    return _skillItems == null || _fileQuery != t.query.trim();
+  }
+
+  /// Ya se avisó que una fuente no carga. Se limpia al cambiar de disparador.
+  bool _suggestionsFailed = false;
+
+  static const int kMentionMinQuery = 2;
+
+  /// La búsqueda de archivos, 150 ms después de la última tecla.
+  ///
+  /// El debounce es del cliente web medido, no una invención: sin él, `@a`
+  /// dispara un `GET /api/fs/find` por tecla. Cada request lleva su [_fileToken]
+  /// y se descarta si al llegar ya no es el último, sin lo cual una búsqueda
+  /// lenta que llega tarde pisa el resultado de la nueva y el menú muestra
+  /// archivos que no se tipearon.
+  Timer? _fileDebounce;
+  int _fileToken = 0;
+  String? _fileQuery;
+  List<ComposerSuggestion> _fileItems = const [];
+
+  Future<void> _loadSources(ComposerTrigger t) async {
+    setState(() => _suggestionsLoading = true);
+    final api = _vm.api;
+    final dir = _vm.directory;
+    final token = ++_fileToken;
+    try {
+      if (t.kind == ComposerTriggerKind.slash) {
+        if (_commandItems == null) {
+          final raw = await api.listCommands(directory: dir);
+          _commandItems = [
+            for (final c in raw)
+              if ((c['name'] as String? ?? '').isNotEmpty)
+                ComposerSuggestion(
+                  label: c['name']! as String,
+                  kind: ComposerSuggestionKind.command,
+                  detail: c['description'] as String? ?? '',
+                  // El `name` viaja sin barra: el lookup del server es exacto.
+                  runCommand: c['name']! as String,
+                ),
+          ];
+        }
+      } else {
+        if (_agentItems == null) _agentItems = await _agentSuggestions(dir);
+        final q = t.query.trim();
+        if (q.length >= kMentionMinQuery) {
+          if (_skillItems == null) {
+            final raw = await api.listSkills(directory: dir);
+            _skillItems = [
+              for (final s in raw)
+                if ((s['name'] as String? ?? '').isNotEmpty)
+                  ComposerSuggestion(
+                    label: s['name']! as String,
+                    kind: ComposerSuggestionKind.skill,
+                    detail: s['description'] as String? ?? '',
+                    insert: '@${s['name']}',
+                  ),
+            ];
+          }
+          _fileDebounce?.cancel();
+          final completer = Completer<void>();
+          _fileDebounce = Timer(const Duration(milliseconds: 150), () {
+            unawaited(
+              api
+                  .findFiles(query: q, directory: dir, limit: 12)
+                  .then((page) {
+                    // Descarte por token: una búsqueda vieja que llega tarde no
+                    // puede pisar el resultado de la actual.
+                    if (token != _fileToken) return;
+                    _fileQuery = q;
+                    _fileItems = [
+                      for (final f in page.data)
+                        if (f is Map<String, dynamic>)
+                          ComposerSuggestion(
+                            label: f['path'] as String? ?? '',
+                            kind: ComposerSuggestionKind.file,
+                            detail: f['type'] as String? ?? 'archivo',
+                            insert: '@${f['path']}',
+                          ),
+                    ];
+                    completer.complete();
+                  })
+                  .catchError((Object e) {
+                    if (token == _fileToken) {
+                      _fileQuery = q;
+                      _fileItems = const [];
+                    }
+                    completer.complete();
+                  }),
+            );
+          });
+          unawaited(completer.future);
+        }
+      }
+    } catch (e) {
+      // El menú no es un servicio crítico, pero un fallo **sí** se dice: en
+      // silencio el usuario tipea `@` y no entiende por qué no aparece nada.
+      //
+      // Medido: un `directory` que no existe da **500** (no una lista vacía), y
+      // el menú se pide al tipear, así que sin este guardia el mismo error
+      // saldría en pantalla en cada tecla. Por eso el aviso es de una vez: se
+      // marca [_suggestionsFailed] y no se vuelve a pedir hasta que el
+      // disparador cambie.
+      if (!_suggestionsFailed) {
+        _suggestionsFailed = true;
+        _vm.reportError('No se pudieron cargar las sugerencias: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _suggestionsLoading = false;
+          final t2 = _trigger;
+          if (t2 != null) {
+            _suggestions = filterSuggestions(_candidates(t2), t2.query);
+          }
+        });
+      }
+    }
+  }
+
+  /// Los agentes del server como ítems de menú. Los ocultos se filtran: un
+  /// agente `hidden` es interno y no tiene que aparecer en el `@`.
+  Future<List<ComposerSuggestion>> _agentSuggestions(String? dir) async {
+    final raw = await _vm.api.listAgents(directory: dir);
+    return [
+      for (final a in raw)
+        if ((a['id'] as String? ?? '').isNotEmpty && a['hidden'] != true)
+          ComposerSuggestion(
+            label: a['name'] as String? ?? a['id']! as String,
+            kind: ComposerSuggestionKind.agent,
+            detail: a['description'] as String? ?? '',
+            insert: '@${a['name'] ?? a['id']}',
+          ),
+    ];
+  }
+
+  /// `POST /api/session/{id}/command` - un comando de barra del server.
+  ///
+  /// El `name` va **sin barra** (el lookup del server es exacto) y los
+  /// argumentos en `text`, que es lo que exige el schema: `name` y `text`
+  /// requeridos, `additionalProperties: false`.
+  Future<void> _runServerCommand(String name, String args) async {
+    try {
+      await _vm.api.runCommand(
+        _vm.sessionId,
+        name: name,
+        text: args,
+        directory: _vm.directory,
+      );
+      await _vm.refresh();
+    } catch (e) {
+      _vm.reportError('No se pudo correr /$name: $e');
+    }
+  }
+
+  /// Una acción local escrita con barra. Cada una tiene su endpoint y su
+  /// semántica, y por eso **no** van por [_runServerCommand]: `POST
+  /// /session/{id}/command` con estos nombres da 404 (medido).
+  Future<void> _runLocalAction(String id, String args) async {
+    switch (id) {
+      case 'compact':
+        try {
+          await _vm.api.compactSession(
+            _vm.sessionId,
+            directory: _vm.directory,
+          );
+          await _vm.refresh();
+        } catch (e) {
+          _vm.reportError('No se pudo compactar: $e');
+        }
+      case 'undo':
+        await _revert();
+      case 'redo':
+        try {
+          await _vm.api.commitRevert(
+            _vm.sessionId,
+            directory: _vm.directory,
+          );
+          await _vm.refresh();
+        } catch (e) {
+          _vm.reportError('No se pudo rehacer: $e');
+        }
+    }
+  }
+
+  /// El Deshacer: `revert/stage` + `revert/commit`. No es un undo de un paso
+  /// (medido: no existe tal endpoint), son dos etapas, y el commit va después
+  /// del stage a propósito.
+  Future<void> _revert() async {
+    try {
+      final anchor = _lastUserMessageId();
+      if (anchor == null) {
+        _vm.reportError('No hay ningun mensaje al que volver.');
+        return;
+      }
+      await _vm.api.stageRevert(
+        _vm.sessionId,
+        messageId: anchor,
+        directory: _vm.directory,
+      );
+      await _vm.api.commitRevert(_vm.sessionId, directory: _vm.directory);
+      await _vm.refresh();
+    } catch (e) {
+      _vm.reportError('No se pudo deshacer: $e');
+    }
   }
 
   // ──────────────────────────── hojas ────────────────────────────
@@ -782,10 +1143,20 @@ class _ChatViewState extends State<ChatView> {
               label: 'Costo',
               value: '\$${_vm.serverCost.toStringAsFixed(4)}',
             ),
-            _Stat(label: 'Tokens de entrada', value: '${_vm.serverTokens}'),
+            // "Tokens de entrada" era el acumulado de la sesión, y por eso no
+            // se podía llamar "contexto": son dos cosas distintas y la app las
+            // mostraba con el mismo número. Acá cada una con su nombre.
+            _Stat(
+              label: 'Contexto actual',
+              value: '${_vm.contextTokens} tok',
+            ),
             _Stat(
               label: 'Contexto',
-              value: contextLabel(_vm.serverTokens, _vm.serverCost),
+              value: contextLabel(
+                _vm.contextTokens,
+                _vm.serverCost,
+                window: _contextWindow,
+              ),
             ),
             const SizedBox(height: AppSpacing.sm),
             Align(
@@ -941,7 +1312,25 @@ class _ChatViewState extends State<ChatView> {
 /// `14.2k contexto · $0.38`, el formato del prototipo. Una decimal hasta las
 /// 100k: `14.2k` informa, `14k` esconde el margen; de 100k en adelante el
 /// decimal ya es ruido.
-String contextLabel(int tokens, double cost) {
+///
+/// ## Por qué vive en un archivo de widgets
+///
+/// Porque es formato de UI, no cálculo: la aritmética va en
+/// [TokenUsage.context] y el getter del viewmodel. Acá sólo se decide qué
+/// redondeo y qué separador, que es exactamente lo que cambia cuando cambia el
+/// prototipo. Por eso se puede probar sin montar un solo widget, y por eso el
+/// test mide las dos cosas por separado: si el número está mal, el bug está en
+/// [TokenUsage.context]; si el rótulo está mal, está acá.
+///
+/// [tokens] es el **contexto actual** ([ChatViewModel.contextTokens]), no el
+/// acumulado de la sesión. Antes se pasaba `session.tokens` y el número era el
+/// total gastado en toda la vida de la sesión, con la etiqueta de "contexto":
+/// medido, marcaba 151× de más.
+///
+/// Cuando se conoce la ventana del modelo ([window]) se agrega el porcentaje,
+/// que es el número que uno realmente quiere: de 200k, saber que vas por 51%
+/// dice mucho más que "102.9k".
+String contextLabel(int tokens, double cost, {int? window}) {
   final String count;
   if (tokens >= 1000) {
     final k = tokens / 1000;
@@ -949,7 +1338,10 @@ String contextLabel(int tokens, double cost) {
   } else {
     count = '$tokens';
   }
-  return '$count contexto · \$${cost.toStringAsFixed(2)}';
+  final pct = (window != null && window > 0)
+      ? ' · ${(tokens * 100 / window).round()}%'
+      : '';
+  return '$count contexto$pct · \$${cost.toStringAsFixed(2)}';
 }
 
 /// La hoja de las 12 acciones (`surfaces.sheet.actions`). `.arow`: 48 px, glifo

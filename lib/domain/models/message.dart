@@ -99,6 +99,22 @@ final class TokenUsage {
   /// `input + output + reasoning`. Excluye `cache` a propósito: lo releído del
   /// cache no son tokens nuevos de este turno.
   int get total => input + output + reasoning;
+
+  /// **El contexto de este turno**: lo que el modelo tenía cargado.
+  ///
+  /// Es `input + cache.read + reasoning`, y no [total] por dos razones medidas
+  /// contra el server real:
+  ///
+  /// - `cache.read` es el prefijo que el modelo **releyó del cache**, y es
+  ///   la mayor parte de la ventana en una sesión larga (medido: `input=1.450`
+  ///   contra `cache.read=101.376` en el mismo turno). Sin él, el contador dice
+  ///   1,5k donde hay 102k.
+  /// - `cache.write` queda **fuera**: lo que este turno escribe en el cache es
+  ///   lo que el *siguiente* va a leer como `cache.read`. Contarlo ahora cuenta
+  ///   el mismo prefijo dos veces.
+  ///
+  /// `output` tampoco entra: es lo que se generó, no lo que está cargado.
+  int get context => input + cacheRead + reasoning;
 }
 
 /// Mensaje del usuario. `files` son adjuntos (`PromptFileAttachment`).
@@ -111,6 +127,7 @@ final class UserMessage extends SessionMessage {
     this.files = const [],
     this.agents = const [],
     this.notDelivered = false,
+    this.pendingSend = false,
   });
 
   factory UserMessage.fromJson(Map<String, Object?> json) => UserMessage(
@@ -145,7 +162,21 @@ final class UserMessage extends SessionMessage {
   /// borra por un fallo de transporte: se marca y se reintenta.
   final bool notDelivered;
 
-  UserMessage copyWith({bool? notDelivered}) => UserMessage(
+  /// El mensaje **aún no se mandó**, a propósito del usuario.
+  ///
+  /// Es un estado distinto de [notDelivered]: acá el POST se intentó y falló,
+  /// acá ni se intentó porque hay un turno en curso. Se muestra en el chat con
+  /// tres acciones (enviar / editar / eliminar) y desaparece solo cuando el
+  /// usuario elige una: no hay temporizador ni se manda por su cuenta.
+  ///
+  /// Medido: con la sesión ocupada el server **acepta** el prompt (HTTP 200) y lo
+  /// marca con `"delivery": "steer"`, o sea que no lo encola: redirige el turno
+  /// que está corriendo. Por eso la app frena antes del POST, que es lo único
+  /// que evita que "encolar" desvíe la conversación en curso.
+  final bool pendingSend;
+
+  UserMessage copyWith({bool? notDelivered, bool? pendingSend}) =>
+      UserMessage(
     id: id,
     time: time,
     metadata: metadata,
@@ -153,6 +184,7 @@ final class UserMessage extends SessionMessage {
     files: files,
     agents: agents,
     notDelivered: notDelivered ?? this.notDelivered,
+    pendingSend: pendingSend ?? this.pendingSend,
   );
 }
 

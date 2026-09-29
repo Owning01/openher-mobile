@@ -21,11 +21,13 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
 import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
 import '../../core/tokens.dart';
+import 'composer_suggestions.dart';
 
 /// Un adjunto pendiente de enviar (`PromptFileAttachment`).
 class ComposerAttachment {
@@ -60,6 +62,11 @@ class ChatComposer extends StatefulWidget {
     this.onRemoveAttachment,
     this.onPickModel,
     this.onPickAgent,
+    this.suggestions = const <ComposerSuggestion>[],
+    this.suggestionsLoading = false,
+    this.onCommand,
+    this.onLocalAction,
+    this.onTrigger,
   });
 
   /// Hay un turno en curso: el botón derecho pasa a Detener.
@@ -93,6 +100,33 @@ class ChatComposer extends StatefulWidget {
   /// habia forma de elegir un agente.
   final VoidCallback? onPickAgent;
 
+  /// Los ítems del menú de `/` y `@`, ya filtrados por lo escrito.
+  ///
+  /// Los carga el shell, no el compositor: el compositor no tiene cliente HTTP
+  /// y no debe. Lo único que hace es detectar el disparador
+  /// ([detectComposerTrigger]), filtrar lo que llega y pintar la lista.
+  final List<ComposerSuggestion> suggestions;
+
+  /// El menú se está armando (buscando archivos en el server). Se pinta una
+  /// línea de "buscando" para que el menú no aparezca y desaparezca.
+  final bool suggestionsLoading;
+
+  /// Se eligió un **comando del server**: `POST /api/session/{id}/command`
+  /// con [name] **sin barra** y [args] como texto.
+  final void Function(String name, String args)? onCommand;
+
+  /// Se eligió una **acción local** (`compact`, deshacer, rehacer). No viaja al
+  /// server como comando: cada una tiene su endpoint y su semántica.
+  final void Function(String id, String args)? onLocalAction;
+
+  /// Avisa que cambió el disparador bajo el cursor (o que se cerró el menú).
+  ///
+  /// Es la ida del menú: el compositor detecta **qué** se está escribiendo y
+  /// la vista carga **qué** hay para ofrecer. La separación es a propósito: el
+  /// compositor no tiene cliente HTTP, y meterlo lo convertiría en un widget
+  /// que además de pintar pide 438 KB de skills.
+  final ValueChanged<ComposerTrigger?>? onTrigger;
+
   /// Tope del campo. `20000` es el del prototipo; el server corta el prompt con
   /// 413 antes, así que es sólo una guarda visual.
   static const int charLimit = 20000;
@@ -114,6 +148,30 @@ class ChatComposer extends StatefulWidget {
   static const Key attachKey = Key('composer-attach');
   static const Key micKey = Key('composer-mic');
   static const Key attachmentsKey = Key('composer-attachments');
+  static const Key suggestionsKey = Key('composer-suggestions');
+  static const Key suggestionItemKey = Key('composer-suggestion-item');
+  static const Key suggestionEmptyKey = Key('composer-suggestion-empty');
+
+  /// Los tres nombres de acción local, sin barra. Ver [kLocalActions] para por
+  /// qué existen aunque el server no los anuncie.
+  static const String kSlashCompact = 'compact';
+  static const String kSlashUndo = 'undo';
+  static const String kSlashRedo = 'redo';
+
+  /// Las tres acciones que el server **no** anuncia pero que existen como
+  /// endpoint, y que el usuario pidió poder escribir con barra.
+  ///
+  /// Medido: `GET /api/command` devuelve `init`, `review` y `debate`, y
+  /// `POST /api/session/{id}/command` con `compact` / `undo` / `redo` responde
+  /// **404**. No son comandos: son `POST /compact` y
+  /// `POST /revert/stage` + `/revert/commit`, que la app ya tenía en el action
+  /// sheet. Aparecen en el menú como [ComposerSuggestionKind.action] y por eso
+  /// viajan con `runCommand: null`.
+  static const List<String> kLocalActions = [
+    kSlashCompact,
+    kSlashUndo,
+    kSlashRedo,
+  ];
 
   @override
   State<ChatComposer> createState() => _ChatComposerState();
@@ -201,6 +259,63 @@ class _ChatComposerState extends State<ChatComposer> {
       widget.canSend &&
       (_controller.text.trim().isNotEmpty || widget.attachments.isNotEmpty);
 
+  /// El disparador bajo el cursor, o `null` si el menú está cerrado.
+  ///
+  /// Se recalcula en cada cambio del texto, no en cada tecla: el `onChanged`
+  /// de un `TextField` es la única señal fiable de dónde quedó el cursor, y
+  /// leer `_controller.selection` desde un `Listener` de teclado llega antes de
+  /// que el texto esté actualizado, con la posición vieja.
+  ComposerTrigger? _trigger;
+
+  /// Los ítems ya filtrados, con el primero como seleccionado.
+  int _highlight = 0;
+
+  /// El menú se abre para `/` y para `@`, pero **no se reabre** cuando el
+  /// comando ya está elegido y hay argumentos en camino. Sin esto, elegir
+  /// `/compact` reabriera el menú y el Enter quedaba atrapado en un ciclo
+  /// completar → reabrir → completar: había que apretarlo dos o tres veces.
+  ///
+  /// La regla se apoya en [parseSlashCommand] y no en contar espacios a mano,
+  /// para que el test pueda verificarla sin montar el árbol de widgets.
+  bool get _menuOpen {
+    final t = _trigger;
+    if (t == null) return false;
+    if (t.kind == ComposerTriggerKind.slash) {
+      // "/compact" se completa; "/compact foco" ya está elegido y se cierra.
+      final text = _controller.text;
+      if (text.startsWith('/') && text.contains(' ')) return false;
+    }
+    // Con algo que mostrar, el menú está. Sin nada, sólo se abre si hay una
+    // consulta o si está cargando: un "Sin coincidencias" de la barra recién
+    // tipeada, antes de que llegue la lista, sería un parpadeo que miente.
+    if (widget.suggestions.isNotEmpty) return true;
+    if (widget.suggestionsLoading) return true;
+    return t.query.trim().isNotEmpty;
+  }
+
+  /// Reemplaza el disparador por lo elegido y deja el cursor atrás.
+  void _accept(ComposerSuggestion s) {
+    final t = _trigger;
+    if (t == null) return;
+    final text = _controller.text;
+    final before = text.substring(0, t.start);
+    final after = text.substring(t.end);
+    final ins = '${s.insertion} ';
+    final next = '$before$ins$after';
+    _controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: before.length + ins.length),
+    );
+    setState(() {
+      _trigger = null;
+      _highlight = 0;
+    });
+  }
+
+  /// Manda el texto. Si es un comando de barra completo, lo **corre** en vez de
+  /// mandarlo como prompt: `/review` no es un mensaje que el modelo lee, es una
+  /// orden para el server (medido: `POST /api/session/{id}/command` devuelve
+  /// 204 y el trabajo corre como un turno).
   void _submit() {
     if (widget.working) {
       widget.onStop?.call();
@@ -208,8 +323,76 @@ class _ChatComposerState extends State<ChatComposer> {
     }
     if (!_canSend) return;
     final text = _controller.text.trim();
+    if (widget.attachments.isNotEmpty) {
+      widget.onSend?.call(text, widget.attachments);
+      _controller.clear();
+      return;
+    }
+
+    final command = parseSlashCommand(text);
+    if (command != null) {
+      final taken = _dispatchSlash(command.name, command.args);
+      // Si nadie lo recibe (shell de sólo lectura), cae al prompt normal en
+      // vez de perder el texto: un comando que se traga solo es peor.
+      if (taken) {
+        _controller.clear();
+        return;
+      }
+    }
+
     widget.onSend?.call(text, widget.attachments);
     _controller.clear();
+  }
+
+  /// Enruta un comando a su destino. Devuelve `true` si alguien lo recibió.
+  ///
+  /// Dos callbacks y no uno con un prefijo mágico: la diferencia entre "esto lo
+  /// corre el server" y "esto lo corre la app" es exactamente la que se rompió
+  /// al mandar `/compact` por el endpoint de comandos (404, medido).
+  bool _dispatchSlash(String name, String args) {
+    if (_isLocalAction(name)) {
+      if (widget.onLocalAction == null) return false;
+      widget.onLocalAction!(name, args);
+      return true;
+    }
+    if (widget.onCommand == null) return false;
+    widget.onCommand!(name, args);
+    return true;
+  }
+
+  /// Si el nombre es una de las tres acciones locales.
+  ///
+  /// Va por [kLocalActions] y no por una cadena suelta porque el menú y el
+  /// despacho tienen que estar de acuerdo: si el menú ofrece `/compact` y el
+  /// despacho no lo reconoce, el comando se mandaría como prompt al modelo.
+  /// La lista vive en la clase para que no haya dos fuentes de verdad.
+  static bool _isLocalAction(String name) =>
+      ChatComposer.kLocalActions.contains(name);
+
+  /// Reabre el menú cuando el cursor vuelve sobre un disparador vivo: sin esto,
+  /// mover el cursor a la izquierda de un `/review` a medio escribir lo dejaba
+  /// cerrado sin forma de completarlo.
+  void _onTextChanged() {
+    final caret = _controller.selection.baseOffset;
+    final next = caret < 0
+        ? null
+        : detectComposerTrigger(_controller.text, caret);
+    final same =
+        next?.kind == _trigger?.kind &&
+        next?.start == _trigger?.start &&
+        next?.query == _trigger?.query;
+    if (same) {
+      setState(() {});
+      return;
+    }
+    setState(() {
+      _trigger = next;
+      _highlight = 0;
+    });
+    // Se avisa **siempre**, y no sólo cuando cambia: la vista carga en async y
+    // necesita re-preguntar aunque el disparador sea el mismo. Sin esto, abrir
+    /// `/`, cerrarlo con la flecha y volver a abrirlo no recarga nada.
+    widget.onTrigger?.call(next);
   }
 
   @override
@@ -237,6 +420,7 @@ class _ChatComposerState extends State<ChatComposer> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (widget.attachments.isNotEmpty) _attachmentStrip(),
+              if (_menuOpen) _suggestionList(),
               _inputRow(scheme, hasText),
               const SizedBox(height: AppSpacing.sm),
               _modelBar(scheme),
@@ -337,28 +521,38 @@ class _ChatComposerState extends State<ChatComposer> {
               ),
             ),
             Expanded(
-              child: TextField(
-                key: ChatComposer.inputKey,
-                controller: _controller,
-                focusNode: _focus,
-                minLines: 1,
-                maxLines: ChatComposer.maxLines,
-                onChanged: (_) => setState(() {}),
-                onSubmitted: (_) => _submit(),
-                keyboardType: TextInputType.multiline,
-                textInputAction: TextInputAction.newline,
-                style: const TextStyle(fontSize: 13, height: 1.5),
-                decoration: InputDecoration(
-                  isDense: true,
-                  filled: false,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: AppSpacing.xs,
-                    vertical: 6,
+              child: CallbackShortcuts(
+                bindings: <ShortcutActivator, VoidCallback>{
+                  const SingleActivator(LogicalKeyboardKey.arrowDown): () {
+                    if (_menuOpen) _move(1);
+                  },
+                  const SingleActivator(LogicalKeyboardKey.arrowUp): () {
+                    if (_menuOpen) _move(-1);
+                  },
+                },
+                child: TextField(
+                  key: ChatComposer.inputKey,
+                  controller: _controller,
+                  focusNode: _focus,
+                  minLines: 1,
+                  maxLines: ChatComposer.maxLines,
+                  onChanged: (_) => _onTextChanged(),
+                  onSubmitted: (_) => _submit(),
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.newline,
+                  style: const TextStyle(fontSize: 13, height: 1.5),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    filled: false,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.xs,
+                      vertical: 6,
+                    ),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    hintText: 'Escribe un mensaje...',
                   ),
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  hintText: 'Escribe un mensaje...',
                 ),
               ),
             ),
@@ -381,6 +575,138 @@ class _ChatComposerState extends State<ChatComposer> {
         ),
       ),
     );
+  }
+
+  /// El menú de `/` y `@`, arriba del campo.
+  ///
+  /// Sin `LayerGate` propio a propósito: `assets/spec/layers.json` tiene 94 keys
+  /// y agregar una sería inventar contrato. Va dentro de `chat.composer`, que es
+  /// la superficie de la que forma parte — y que está encendida.
+  ///
+  /// Altura máxima de 4 filas (~148 px): con más, el menú tapaba el chat, que
+  /// es justo lo que se está escribiendo.
+  Widget _suggestionList() {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final items = widget.suggestions;
+    final at = _trigger?.kind == ComposerTriggerKind.at;
+
+    return Container(
+      key: ChatComposer.suggestionsKey,
+      constraints: const BoxConstraints(maxHeight: 148),
+      margin: const EdgeInsets.only(bottom: AppSpacing.xs),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scheme.outline),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: items.isEmpty
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
+                child: Text(
+                  widget.suggestionsLoading
+                      ? 'Buscando…'
+                      : at
+                      ? 'Sin coincidencias'
+                      : 'Sin coincidencias',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            )
+          : ListView.builder(
+              padding: EdgeInsets.zero,
+              shrinkWrap: true,
+              itemCount: items.length,
+              itemBuilder: (context, i) {
+                final s = items[i];
+                final sel = i == _highlight;
+                return InkWell(
+                  key: i == 0
+                      ? ChatComposer.suggestionItemKey
+                      : ValueKey('composer-suggestion-$i'),
+                  onTap: () => _accept(s),
+                  child: Container(
+                    color: sel ? _hover(context) : null,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.sm,
+                      vertical: 6,
+                    ),
+                    child: Row(
+                      children: [
+                        AppIcon(
+                          _iconFor(s.kind),
+                          size: 14,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                        const SizedBox(width: AppSpacing.sm),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                s.insertion,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              if (s.detail.isNotEmpty)
+                                Text(
+                                  s.detail,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: scheme.onSurfaceVariant,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+    );
+  }
+
+  /// El glifo de cada tipo. Todos existen en `assets/icons`: se agrega un SVG
+  /// nuevo sólo si de verdad no hay ninguno que sirva, y para cinco tipos hay.
+  static String _iconFor(ComposerSuggestionKind kind) => switch (kind) {
+    ComposerSuggestionKind.command => 'sparkles',
+    ComposerSuggestionKind.action => 'history',
+    ComposerSuggestionKind.agent => 'user',
+    ComposerSuggestionKind.skill => 'sparkles',
+    ComposerSuggestionKind.file => 'file',
+    ComposerSuggestionKind.mcp => 'layers',
+  };
+
+  /// `--surface-hover`, leído de los tokens según el brillo.
+  ///
+  /// Vive en `_AppPalette`, que es privado de `theme.dart`, así que se lee de
+  /// `AppColors` como hace [_mutedStrong] en este mismo archivo. Meter un
+  /// `ThemeExtension` por un solo color sería más ceremonia que el color.
+  static Color _hover(BuildContext context) =>
+      Theme.of(context).brightness == Brightness.dark
+      ? AppColors.darkSurfaceHover
+      : AppColors.lightSurfaceHover;
+
+  /// Mueve el resaltado del menú, dando la vuelta en los extremos.
+  ///
+  /// Un ítem de más de uno elige: 8 filas y una pantalla, la lista no se
+  /// desplaza sola porque `ListView.builder` con `shrinkWrap` no sabe el alto
+  /// del highlight.
+  void _move(int delta) {
+    final n = widget.suggestions.length;
+    if (n == 0) return;
+    setState(() => _highlight = (_highlight + delta) % n);
   }
 
   /// `chat.composer.send`: 32 px, círculo. filled `primary` cuando hay algo que
