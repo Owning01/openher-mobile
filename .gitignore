@@ -47,3 +47,7 @@ app.*.map.json
 # Material del E2E del visor de archivos: lo regenera
 # scripts/make_test_media.py, no va al repo.
 test_media/
+
+# Artefactos de golden: lutter test --update-goldens deja el diff
+# cuando el golden no coincide. No va al repo.
+test/failures/
