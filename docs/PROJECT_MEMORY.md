@@ -217,3 +217,38 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
 - **Sin verificar en el handset**: la lista de sesiones filtrada, las favoritas y la banda de
   Tailscale (el Xiaomi se desconectó de USB al final de la sesión). El visor de HTML **sí** quedó
   verificado con capturas.
+
+## 2026-09-29 — Sonda de datos: cuanto consume la app y donde se puede recortar
+
+- **La sonda**: `test/data_probe_test.dart`. Levanta un `HttpServer` local que **reenvía** cada
+  request al server real y anota bytes de subida y bajada, y después maneja las **clases reales**
+  (`ApiClient`, `SessionRepository`, `ChatViewModel`) contra ese espejo. Cada byte queda atribuido
+  a la llamada que lo pidió. Corre con `flutter test` (un `dart run` no puede: el código de la app
+  tira de `dart:ui` vía `connectivity_plus`). Con `--dart-define=PROBE_THROTTLE_KBPS=128` simula
+  una radio, y ahí también mide **tiempo**, no sólo bytes.
+- **HALLAZGO 1 — el poll de cellular se lleva la página entera**. `GET message?order=desc&limit=15`
+  pesa entre **17 KB y 220 KB** según la conversación (medido en varias corridas sobre sesiones
+  reales). Con el timer real del viewmodel (`DataPolicy.lowData()`, 12 s) eso son **8 a 66 MB por
+  hora**, y **47 a 400 MB** si el chat queda abierto 6 h. La carga inicial son 2 requests.
+- **HALLAZGO 2 — hay una optimización de 2.268x y ya estáAlmost hecha**. El server devuelve
+  `cursor.previous` en cada página y `GET message?cursor=<previous>` devuelve **0 mensajes y 50
+  bytes** cuando no hay nada nuevo. La app usa `limit`+`order=desc` y descarta el cursor. Medido en
+  la misma sesión: **113,4 KB el refetch contra 50 B con el cursor**.
+- **HALLAZGO 3 — el stream es global y no se puede filtrar en el server**. `/api/event` trae los
+  eventos de **todas** las sesiones y el filtrado es del cliente, así que los bytes de las sesiones
+  ajenas ya se descargaron. Medido: 172,3 KB en 20 s repartidos en **5 sesiones**, de los cuales sólo
+  4,7 KB eran de la sesión abierta: ~97% del tráfico se descarga para tirarlo. Con el server
+  quieto el stream es sólo heartbeat, así que **no se puede fijar un total**: depende de la
+  actividad. No hay endpoint por sesión (medido: el `?sessionID=` global da 400), así que el
+  recorte es del lado del cliente.
+- **Lo que SÍ anda bien**: con streaming (wifi) la app **no pollaea** (medido: 0 polls en 26 s,
+  por diseño: `if (!streamingEnabled) _startPolling()`), la subida es **0 B** (todo GET sin body), y
+  la latencia en loopback es 11-18 ms.
+- **Trampa de la sonda (mía, dos veces)**: el espejo anota los hits **asíncrono**, así que un
+  `reset()` sin asentar mete requests de la medición anterior. Pasó dos veces: el poll salió "x2" y
+  el cursor "172 KB" donde iban 50 B. Ahora hay un `settle()` antes y después de cada medición, y un
+  assert que exige **exactamente 1 request** por poll: un `0 B` sin request registrado es un
+  defecto de la sonda, no una medición.
+- **Confusión que casi reporto como bug**: la primera corrida dio 0 polls y parecía que el polling
+  no arrancaba. No era así: `_startPolling` sale de `setVisible(true)` (lo llama `chat_view` en su
+  `initState`), no de `load()`. La sonda no lo llamaba.

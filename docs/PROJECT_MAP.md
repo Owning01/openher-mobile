@@ -96,6 +96,11 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
   Un agente **no** trae modelo.
 - **Herramientas agrupadas:** una caja por **turno**, montada en el primer assistant del turno
   (los resultados de shell nunca la poseen). Dueño y absorciones: `lib/domain/models/turn_activity.dart`.
+- **Costo de los mensajes (medido 2026-09-29 con `test/data_probe_test.dart`):** una página de
+  `message` pesa **entre 17 KB y 220 KB** según la conversación, y en cellular se re-pide entera
+  cada 12 s. El server ya devuelve `cursor.previous`, y `?cursor=` con 0 mensajes pesa **50 B**:
+  esa es la palanca (2.268x). **El stream es global** y trae los eventos de todas las sesiones, que
+  el cliente filtra **después** de descargarlos; no hay endpoint por sesión.
 - **Subagentes:** `GET /api/session` trae `parentID` **sólo cuando no está vacío**. Principales =
   la clave ausente; subagentes = la clave con un `ses_…`. Medido sobre 1000 sesiones: 483 sin la
   clave, 517 con la clave, y el spot-check contra `GET /api/session/{id}` coincidió. El filtro sale
