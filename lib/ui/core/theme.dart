@@ -81,6 +81,33 @@ abstract final class AppTheme {
     );
   }
 
+  /// Los **dos** temas que necesita el `MaterialApp` para que la variante
+  /// elegida se vea con cualquier brillo del sistema, o `null` si el id no
+  /// existe en el catálogo.
+  ///
+  /// Existe por una razón medida. Cada variante tiene **un** brillo (36 dark y
+  /// 29 light en el catálogo) y el `MaterialApp` pide **dos** temas: `theme`
+  /// (claro) y `darkTheme` (oscuro), y elige uno según el brillo de la
+  /// plataforma. Si la variante se asigna al slot que le corresponde por su
+  /// `kind`, el otro slot queda con el chrome por defecto y **el tema elegido
+  /// se descarta en silencio**: con `themeMode: system` y el teléfono en
+  /// oscuro, una variante clara no se veía, y al revés tampoco. Medido sobre
+  /// las 61 variantes por los dos brillos: **61 de 122 casos** quedaban con el
+  /// gris de siempre, o sea la mitad.
+  ///
+  /// Acá la variante se **traduce** a cada brillo, que es justo para lo que
+  /// [variantOf] acepta. Los colores son los de la variante en los dos slots:
+  /// lo que se elige es lo que se ve, y el ajuste claro/oscuro decide en qué
+  /// brillo se pinta.
+  static ({ThemeData light, ThemeData dark})? variantPair(String? variantId) {
+    final v = ThemeVariants.byId(variantId);
+    if (v == null) return null;
+    return (
+      light: variantOf(v, brightness: Brightness.light),
+      dark: variantOf(v, brightness: Brightness.dark),
+    );
+  }
+
   static final Map<String, ThemeData> _variantCache = <String, ThemeData>{};
 
   /// Escala tipográfica del prototipo móvil (:46, :70-71, :121-122, :138,

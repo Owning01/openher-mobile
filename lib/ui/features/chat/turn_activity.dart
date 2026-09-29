@@ -34,6 +34,7 @@ import '../../../domain/models/turn_activity.dart';
 import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
 import '../../core/tokens.dart';
+import 'squares_spinner.dart';
 import 'tool_card.dart';
 
 class TurnActivityBox extends StatefulWidget {
@@ -89,15 +90,25 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
         borderRadius: AppRadius.lgAll,
         border: Border.all(color: scheme.outline),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.xs),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _head(theme, text),
-            if (_open) ...[const SizedBox(height: AppSpacing.xs), _body()],
-          ],
+      child: ConstrainedBox(
+        // La caja tiene mas alto, con `minHeight` y no solo con el padding.
+        // Pedido: "mas alto". Con el padding solo, el alto dependia del texto:
+        // con un rotulo corto la caja quedaba de 28 px y se leia un renglon.
+        // 44 px es el minimo comfortable para una fila con glifo.
+        constraints: const BoxConstraints(minHeight: 44),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.xs,
+            vertical: AppSpacing.sm,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _head(theme, text),
+              if (_open) ...[const SizedBox(height: AppSpacing.xs), _body()],
+            ],
+          ),
         ),
       ),
     );
@@ -109,6 +120,9 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
     // El barrido del cliente React no va si el sistema pidió menos movimiento:
     // ahí el rótulo es texto y nada más.
     final shimmer = working && !MediaQuery.disableAnimationsOf(context);
+    // El spinner va al mismo criterio que el barrido: sin animaciones no se
+    // anima nada, ni el texto ni el spinner.
+    final spinner = working && !MediaQuery.disableAnimationsOf(context);
     final titleStyle = text.labelSmall?.copyWith(
       fontWeight: FontWeight.w700,
       letterSpacing: 0.66,
@@ -150,6 +164,19 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
                       ),
                     ),
                   ),
+                  // Spinner chico del encabezado: 4 cuadrados de 4 px. Es el
+                  // aviso de que el turno sigue vivo con la caja plegada, que
+                  // es como se la ve casi siempre. Se apaga con el turno.
+                  if (spinner)
+                    Padding(
+                      padding: const EdgeInsets.only(right: AppSpacing.xs),
+                      child: SquaresSpinner(
+                        size: 4,
+                        gap: 2,
+                        squares: 4,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
                   const SizedBox(width: AppSpacing.sm),
                   Expanded(
                     child: LayerGate(
@@ -273,15 +300,10 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
               // El razonamiento va arriba de las tools: es lo que el modelo
               // hizo antes de llamarlas.
               for (final part in thinking)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: kToolRowSpacing),
-                  child: Text(
-                    part.text.trim(),
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: kToolRowSpacing),
+                    child: _ThinkingRow(text: part.text.trim()),
                   ),
-                ),
               for (final tool in widget.activity.toolParts)
                 Padding(
                   padding: const EdgeInsets.only(bottom: kToolRowSpacing),
@@ -400,3 +422,44 @@ const double kToolListMaxHeight = 148;
 /// Padding de la fila de herramientas, para que la última no quede pegada al
 /// borde de la caja.
 const double kToolRowSpacing = 6;
+
+/// El razonamiento del modelo, con la misma piel que una tool card.
+///
+/// Antes era un `Text` suelto dentro de la caja: se leia como un parrafo
+/// suelto y no como una fila mas de la lista. Ahora comparte decorado, radio y
+/// borde con `.toolcard` y queda alineado con las filas de abajo. Eso es lo
+/// que "acoplado" significa: mismo componente visual, misma reticula.
+///
+/// El texto va en `onSurfaceVariant` con `bodySmall`, como el resto de los
+/// metadatos de la caja: el razonamiento es contexto, no respuesta.
+class _ThinkingRow extends StatelessWidget {
+  const _ThinkingRow({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: AppRadius.mdAll,
+        border: Border.fromBorderSide(
+          BorderSide(color: theme.colorScheme.outline),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.sm,
+          vertical: AppSpacing.xs,
+        ),
+        child: Text(
+          text,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ),
+    );
+  }
+}

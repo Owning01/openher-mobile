@@ -483,6 +483,8 @@ class _ChatViewState extends State<ChatView> {
               // su reintento. Antes se borraba y el texto se perdía (409 al
               // mandar con el agente trabajando).
               onRetrySend: _vm.retrySend,
+              // Sólo este assistant puede pintar puntos de escritura.
+              isOpenAssistant: message.id == _vm.openAssistantId,
             ),
           );
         },
