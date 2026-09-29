@@ -348,3 +348,77 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   `aaiz5tbuq8dqyxqs` sigue sin aparecer en `adb devices`. El spinner y el chip de reintento están
   verificados por golden y por test, no en pantalla. La primera vez que se abra el APK hay que
   mirar esos dos elementos.
+
+## 2026-09-29 — Los comandos `/` y `@` no existían, y el contexto mintía por 115x
+
+- **El menú de `/` y `@` no estaba implementado.** No era un bug de lógica: `composer.dart`
+  no tenía ninguna noción de disparador, y `api_client.dart` no tenía `listCommands`,
+  `listSkills` ni `listMcpResources`. `grep` sobre `lib/` encontrava `command` sólo en el
+  modelo del mensaje de shell.
+- **El server expone 3 comandos, no los 16 que anuncia el cliente web.** `GET /api/command`
+  devuelve `init`, `review` y `debate`. El cliente web de OpenHer los mezcla con 13
+  hardcodeados en `composerData.ts` (`compact`, `undo`, `redo`, `themes`, `history`, …) y por
+  eso "no funcionan": medido, todos dan **404** en `POST /api/session/{id}/command`. La app
+  muestra la lista del server y, aparte, ofrece `compact`/`undo`/`redo` porque esos **sí
+  existen**, como endpoints (`POST /compact`, `POST /revert/stage` + `/revert/commit`).
+- **Contrato de `/command`, medido del OpenAPI del server** (`GET /openapi.json`): el body
+  exige `{name, text}`, ambos requeridos, `additionalProperties: false`. El campo se llama
+  **`name`**, no `command` (mandar `command` da 400 `Missing key ["name"]`), y el `name` va
+  **sin barra** porque el lookup del server es exacto (`/review` da 404). El strip va en
+  `ApiClient.runCommand` y no en el caller, porque la UI pasa lo que el usuario escribió.
+- **El contexto mentía por 115x.** `serverTokens` devolvía `session.tokens` —un **contador
+  acumulado** de toda la vida de la sesión— con la etiqueta "contexto". Medido sobre
+  `ses_f685c4cfdffe7Bp2IL`: la app mostraba `19.892.436` donde el contexto real era **195.089**.
+  El contexto es el prompt del **último** assistant: `input + cache.read + reasoning`.
+  `cache.write` queda fuera (lo relee el próximo turno) y `output` también (es lo generado).
+  El getter nuevo es `TokenUsage.context`; `contextTokens` lo usa, y `serverTokens` desapareció
+  para que no quedara el nombre viejo con la definición nueva.
+- **Había un tercer bug de contexto, más chiquito y peor**: el valor vivo del SSE
+  (`_applyUsage`) sumaba `input + output + cache.read` y el respaldo sumaba el acumulado de
+  la sesión. O sea el **mismo rótulo significaba dos cosas** según el SSE estuviera conectado o
+  no. Ahora los dos caminos usan `TokenUsage.context`.
+- **El porcentaje se agregó y es el número que sirve**: sin ventana, "195k" no dice si es mucho
+  o poco. La ventana sale de `ModelInfo.contextLimit` del catálogo, cacheada por
+  `provider/id` (dos providers pueden tener modelos con el mismo id y ventanas distintas).
+- **El disparador se detecta en un archivo aparte** (`composer_suggestions.dart`) sin
+  `BuildContext`, porque la parte con reglas se rompe en silencio y probarla exige montar el
+  árbol de widgets entero, lo que vuelve tautológico el test. Reglas medidas contra el cliente
+  web: `/` y `@`
+  sólo al principio o tras espacio (si no, `http://` y `C:/Users` abren el menú), y con un
+  espacio el comando ya está elegido y el menú **no** se reabre — sin eso el Enter queda
+  atrapado en un ciclo completar→reabrir→completar y hay que apretarlo dos o tres veces.
+- **Las fuentes del `@` pesan mucho**: `/api/skill` son **490 KB** y `/api/agent` 87 KB. Se
+  cargan una vez por chat; los archivos van con debounce de 150 ms y descarte por token, para
+  que una búsqueda lenta que llega tarde no pise el resultado de la nueva.
+- **`/api/mcp/resource` devuelve un objeto, no una lista**: `data` es
+  `{resources[], templates[]}`. Una comprensión de lista sobre eso daría un menú vacío
+  **en silencio**, que es el peor modo de falla.
+- **Un `directory` inexistente da 500, no lista vacía.** Se distingue de la lista vacía
+  legítima (200 + `data: []`). El aviso de error va **una vez** por disparador
+  (`_suggestionsFailed`), porque el menú se pide al tipear y sin eso el mismo error saldría
+  en pantalla en cada tecla.
+- **`revert/commit` responde 204, no 200.** El test acepta cualquier 2xx para no atar la app a
+  un detalle del server que puede cambiar; `postJson` ya tolera el 204.
+- **Guard verificados rompiéndolos** (7 de 7 muerden): el `name` con barra, el 404 del comando
+  tragado, el `mcp/resource` leído como lista, el menú reabriendose con espacio, `/compact` yendo
+  al endpoint de comandos, la frontera del disparador, el rango comiéndose la frase de atrás,
+  y `_accept` sin limpiar el disparador. Este último necesitó un test con `@` y no con `/`:
+  con barra, la regla de "comando ya elegido" cerraba el menú **igual** y el bug pasaba
+  inadvertido. Un guard verde no es un guard: hay que Romperlo y verlo.
+- **Trampa de este día — el catálogo de capas en un test nuevo**: probar con
+  `LayerCatalog.forTest({'chat.composer': true})` hace que **todo** el compositor desaparezca,
+  porque `isOn` devuelve `false` para una key ausente: `.input`, `.send`, `.mic` y
+  `.modelbar` quedan apagados, el `TextField` no existe y los tests **pasan sin encontrar
+  nada**. Hay que listar las 12 keys del composer, como hace `chat_render_test.dart`.
+- **Trampa de encoding, la segunda del día**: `flutter test` escribe bytes que cp1252 no
+  decodifica, así que un script Python con `text=True` y `capture_output` tira
+  `UnicodeDecodeError` **y se muere sin restaurar los archivos que estaba rompiendo a mano**.
+  Hay que `decode('utf-8', 'replace')` y un `try/finally`.
+- **Otro patrón de needle que falla en silencio**: los archivos tienen CRLF, así que un
+  patrón con `\n` pelado nunca matchea y el script reporta "NO SE PUDO ROMPER" cuando el
+  código sí estaba donde debía. Es peor que un error: hace creer que el guard no muerde.
+- **Estado**: `flutter analyze` limpio, **837 tests verdes (6 skipped)**, 5 archivos nuevos de
+  test y uno de lib. E2E contra el server real en `%TEMP%\e2e_slash.py`: las 4 fuentes, los 3
+  caminos de escritura, y el contraste del contexto. **Nada verificado en un teléfono**: el
+  Xiaomi `aaiz5tbuq8dqyxqs` sigue sin aparecer en `adb devices`, así que el menú, el spinner
+  chico y el layout con el teclado abierto están verificados por test, no en pantalla.

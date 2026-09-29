@@ -398,12 +398,93 @@ de un solo chunk cuando el turno ya terminó — o sea, es bloqueante; para no b
 | GET | `/api/model` | `location` | `{location,data}` (503 si no está) |
 | GET | `/api/provider` \| `/api/provider/{id}` | `location` | `{location,data}` |
 | GET | `/api/agent` \| `/api/command` \| `/api/skill` | `location` | `{location,data}` |
+| GET | `/api/mcp/resource` | `location` | `{location,data}` y **`data` es un objeto** `{resources[],templates[]}`, NO una lista |
 | GET | `/api/question/request`, `/api/session/{id}/question` | `location` | pendientes |
 | POST | `/api/session/{id}/question/{requestID}/reply` \| `/reject` | | 204 |
 | GET | `/api/permission/request`, `/api/session/{id}/permission` | `location` | pendientes |
 | POST | `/api/session/{id}/permission/{requestID}/reply` | `{reply, message?}` | 204 |
 
-### v1 (sólo para referencia / fallback futuro; NO se implementa en la v1 del producto)
+### 8.1 Comandos de barra y el menú del compositor (medido 2026-09-29)
+
+El server expone **tres** comandos, y esa es la lista completa:
+
+```
+GET /api/command?location[directory]=...
+  -> {location, data:[{name, description}]}
+     name=init    description="guided AGENTS.md setup"
+     name=review  description="review changes [commit|branch|pr], defaults to uncommitted"
+     name=debate  description="Mesa de trabajo colaborativa (default isolated)."
+```
+
+Con y sin `directory` da lo mismo: el parámetro no filtra nada.
+
+| Método | Path | Body | Devuelve |
+|---|---|---|---|
+| POST | `/api/session/{id}/command` | **`{name, text}`**, ambos requeridos, `additionalProperties:false` | 204 sin cuerpo |
+
+Dos trampas, ambas medidas:
+
+- El campo se llama **`name`**, no `command`. Mandar `{command, text}` da
+  **400 `Missing key ["name"]`**.
+- El `name` viaja **sin la barra**: el lookup del server es exacto, así que
+  `/review` da **404**. El strip va en `ApiClient.runCommand`, no en el caller.
+- Omitir `text` también da **400**: es requerido, no opcional. El cliente manda
+  `''` cuando no hay argumentos.
+
+**Lo que NO es un comando.** `compact`, `undo`, `redo`, `summarize`, `help` y
+`status` dan **404** en `POST /api/session/{id}/command`: no existen como
+comandos. El cliente web de OpenHer los anuncia igual (los tiene hardcodeados
+en `composerData.ts`, 13 de ellos) y por eso fallan al usarlos. Los que sí
+existen, como endpoints:
+
+| Método | Path | Body | Devuelve |
+|---|---|---|---|
+| POST | `/api/session/{id}/compact` | `{}` (**sin body da 400**) | 200 con el mensaje `type:"compaction"` |
+| POST | `/api/session/{id}/revert/stage` | **`{messageID}`** requerido; `{}` da 400 | 200 |
+| POST | `/api/session/{id}/revert/commit` | `{}` | **204** sin cuerpo |
+
+El "deshacer" del server **no es de un paso**: es `stage` + `commit`. No existe
+`POST /session/{id}/undo` ni `/redo` (404, medido), y tampoco
+`/message/{id}/revert` (404).
+
+`GET /api/session/{id}/context` existe y devuelve el **contenido** del contexto
+(el árbol de mensajes con su resumen de compactación), no un número: 331 KB en
+una sesión larga. **No** usarlo para el contador de contexto.
+
+### 8.2 Las fuentes del `@` (medido 2026-09-29)
+
+| Método | Path | Devuelve | Tamaño medido |
+|---|---|---|---|
+| GET | `/api/agent` | 26 agentes, 20 visibles (los `hidden` son internos) | 87 KB |
+| GET | `/api/skill` | 32 skills con `id`, `name`, `description` | **490 KB** |
+| GET | `/api/fs/find` | hits con `path` y `type` | — |
+| GET | `/api/mcp/resource` | `data` = **objeto** `{resources[],templates[]}` | 84 B sin servers |
+
+- `/api/find/file` da **404**. La ruta es `/api/fs/find`.
+- Un `directory` que **no existe** da **500**, no una lista vacía. Se distingue
+  de una lista vacía legítima (200 + `data: []`), que se pinta como "sin
+  coincidencias".
+
+### 8.3 El contexto: `session.tokens` NO es el contexto (medido 2026-09-29)
+
+`session.tokens` es un **contador acumulado** de toda la vida de la sesión:
+`input`, `output` y `cache.read` de *todos* los turnos, sumados. Sólo crece.
+
+El contexto de verdad es el prompt del **último** turno del assistant:
+
+```
+contexto = assistant.tokens.input
+         + assistant.tokens.cache.read
+         + assistant.tokens.reasoning
+```
+
+`cache.write` queda fuera (lo relee el próximo turno como `cache.read`: sumarlo
+cuenta el mismo prefijo dos veces) y `output` también (es lo generado, no lo
+cargado).
+
+Medido sobre `ses_f685c4cfdffe7Bp2IL`: `session.tokens` daba `input=19.892.436`
+y el contexto real era **195.089** — el número viejo era **115×** inflado.
+
 `/session`, `/session/{id}/message` (→ `{info,parts}[]`, paginado con `Link`/`X-Next-Cursor`),
 `/session/{id}/abort`, `/question`, `/question/{req}/reply`, `/permission`, `/file`, `/find`,
 `/vcs/*`, `/mcp*`, `/pty*`, `/global/health`, `/event`.

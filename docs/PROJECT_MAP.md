@@ -21,15 +21,15 @@ App **id**: `ai.openher.openher_mobile` · versión `1.2.0+7` (`versionCode=7`).
 | `lib/data/repositories/` | `session_repository`, `file_repository`, `catalog_repository` |
 | `lib/domain/models/` | `session`, `message`, `tool`, `event`, `errors`, `agent_catalog`, `model_catalog`, `turn_activity` |
 | `lib/ui/core/` | `tokens.dart`, `theme.dart`, `theme_variants.dart` (61 paletas), `layer_gate.dart`, `app_icon.dart`, `low_data_banner.dart`, `update_banner.dart` |
-| `lib/ui/features/chat/` | `chat_view`, `chat_viewmodel`, `composer`, `message_bubble`, `squares_spinner`, `turn_activity`, `tool_card`, `model_sheet`, `agent_sheet` |
+| `lib/ui/features/chat/` | `chat_view`, `chat_viewmodel`, `composer`, **`composer_suggestions`** (disparador `/` y `@`, sin `BuildContext`), `message_bubble`, `squares_spinner`, `turn_activity`, `tool_card`, `model_sheet`, `agent_sheet` |
 | `lib/ui/features/` | `sessions/`, `files/`, `settings/`, `connect/`, `navigation/` |
 | `docs/API_CONTRACT.md` | Contrato **medido** contra el server real |
 | `docs/SUPER_PLAN.md` | Decisiones, arquitectura, fases M0–M10 |
 | `prototype/mobile.html` | Maqueta navegable con toggles de capas |
 | `scripts/publish-update.ps1` | Compila, sube APK + manifiesto, **verifica con `curl`** y **exige PowerShell 7+** |
 
-**Tamaños medidos:** 50 archivos Dart en `lib/` (18.655 líneas), 44 archivos de test (15.443
-líneas), 40 iconos SVG, 10 goldens en `test/goldens/`, **759 tests** (6 skipped),
+**Tamaños medidos:** 51 archivos Dart en `lib/` (21.861 líneas), 50 archivos de test (18.809
+líneas), 41 iconos SVG, 10 goldens en `test/goldens/`, **837 (6 skipped) tests** (6 skipped),
 `flutter analyze lib` en cero errores y cero warnings.
 
 ## Capas
@@ -169,7 +169,25 @@ Build de Android: `ANDROID_HOME=G:\Android\SDK`, `JAVA_HOME=G:\Android\Android S
 
 ## Trampas conocidas
 
-- **Un golden sin `RepaintBoundary` se come la pantalla entera.** `matchesGoldenFile` sube hasta
+- **`session.tokens` NO es el contexto**: es un contador **acumulado** de toda la sesión. Medido:
+  marcaba 19.892.436 donde el contexto real era 195.089 (**115x**). El contexto es
+  `TokenUsage.context` = `input + cache.read + reasoning` del **último** assistant; `cache.write`
+  queda fuera (lo relee el próximo turno) y `output` también (es lo generado). El getter del VM es
+  `contextTokens`; **no** existe `serverTokens` (se borró para que el nombre viejo no quedara con
+  la definición nueva).
+- **`GET /api/command` devuelve 3 comandos** (`init`, `review`, `debate`) y es la lista completa.
+  El cliente web los mezcla con 13 hardcodeados (`compact`, `undo`, `redo`, `themes`, `history`, …)
+  que dan **404**: por eso "no funcionan". En la app `compact`/`undo`/`redo` se ofrecen aparte y van
+  a su endpoint real (`POST /compact`, `POST /revert/stage` + `/revert/commit`), no a
+  `POST /session/{id}/command`.
+- **`POST /session/{id}/command` exige `{name, text}`** (`name`, no `command`; los dos
+  requeridos) y el `name` va **sin barra** porque el lookup del server es exacto.
+- **`/api/mcp/resource` devuelve un objeto, no una lista**: `data` es
+  `{resources[], templates[]}`. Una comprensión de lista da un menú vacío **en silencio**.
+- **Un `directory` inexistente da 500**, no lista vacía. Y `/api/skill` pesa **490 KB**: se carga
+  una vez por chat, nunca por tecla.
+- **`revert/commit` responde 204**, no 200. `revert/stage` exige `{messageID}`; `{}` da 400.
+- Un golden sin `RepaintBoundary` se come la pantalla entera. `matchesGoldenFile` sube hasta
   el borde del nodo más cercano: sin un `RepaintBoundary` ceñido, los 800x600 del test default
   entran en el PNG (medido: 41x19 de grilla en un archivo de 800x600).
 - **Editar Dart con un script Python: `io.open(p,'w')` trunca el archivo** y un error posterior lo
@@ -180,6 +198,13 @@ Build de Android: `ANDROID_HOME=G:\Android\SDK`, `JAVA_HOME=G:\Android\Android S
   "son 8 cuadrados". `test/goldens/` tiene un golden por cada uno de los 8 pasos del ciclo.
 - Un guard que mira el canal **alfa** es vacío si los colores son opacos: el spinner mezcla dos
   colores sólidos, así que los 8 alfa dan 1.0. Hay que medir **luminancia**.
+- **Un guard verde no es un guard: hay que romperlo y verlo morir.** Y hay que romperlo en el
+  punto donde el otro camino no lo tapa. Ejemplo medido: `_accept` sin limpiar el disparador
+  pasaba el test con `/` porque la regla de "comando ya elegido" cerraba el menú igual; con `@` el
+  bug aparece. En un test de widget, `LayerCatalog.forTest({'chat.composer': true})` **apaga** todo
+  el compositor (`isOn` es `false` para keys ausentes), el `TextField` no existe y los tests
+  **pasan sin encontrar nada**: hay que listar las 12 keys del composer, como hace
+  `chat_render_test.dart`.
 - `/api/health` no existe ⇒ `/api/location`.
 - Un control dibujado sin destino es un bug, no un TODO. `FileAction.diff` sigue sin destino
   y **lo dice** con un toast; `FileAction.open` ya no.
