@@ -41,6 +41,7 @@ import '../../../domain/models/turn_activity.dart';
 import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
 import '../../core/tokens.dart';
+import 'code_highlight.dart';
 import 'turn_activity.dart';
 
 class MessageBubble extends StatelessWidget {
@@ -641,10 +642,10 @@ MarkdownStyleSheet _markdownSheet(BuildContext context) {
   final theme = Theme.of(context);
   final scheme = theme.colorScheme;
   final dark = theme.brightness == Brightness.dark;
-  final muted = scheme.onSurfaceVariant;
-  final mutedStrong = dark
-      ? AppColors.darkMutedStrong
-      : AppColors.lightMutedStrong;
+  // `muted` y `mutedStrong` se fueron con el recoloreado: la cita ahora usa
+  // `tertiary` y el codigo inline el verde de `--success`, asi que en esta
+  // hoja ya no queda ningun elemento del markdown en gris. El gris sigue
+  // siendo el color del texto normal, que es lo que lo hace legible.
   // `.ai` (:254): 13 px sobre `--text`, que es el `bodyMedium` del tema.
   final base = theme.textTheme.bodyMedium!;
 
@@ -665,6 +666,14 @@ MarkdownStyleSheet _markdownSheet(BuildContext context) {
       decoration: TextDecoration.underline,
     ),
     strong: base.copyWith(fontWeight: FontWeight.w700),
+    // La cursiva en ambar, como el cliente desktop (chat.css:1336-1339).
+    // Antes no estaba en la hoja: el default de `fromTheme` la pintaba
+    // del color del texto, o sea invisible. Un *termino* se leia igual que
+    // texto normal.
+    em: base.copyWith(
+      fontStyle: FontStyle.italic,
+      color: AppColors.warnOf(theme.brightness),
+    ),
     // 8 px entre bloques: el mismo default del cliente desktop. Con 0 los
     // párrafos quedan pegados.
     blockSpacing: AppSpacing.sm,
@@ -681,19 +690,26 @@ MarkdownStyleSheet _markdownSheet(BuildContext context) {
     // Cita: filete de 2 px a la izquierda y `--muted` para el texto, como el
     // cliente desktop. El default (relleno `surfaceContainerHighest` + radio 3
     // + filete de 3 px) es el look "Material".
-    blockquote: base.copyWith(color: muted),
+    // Cita en `tertiary` como el desktop, no en `--muted`.
+    blockquote: base.copyWith(color: scheme.tertiary),
     blockquoteDecoration: BoxDecoration(
-      border: Border(left: BorderSide(color: muted, width: 2)),
+      border: Border(
+        left: BorderSide(color: scheme.tertiary, width: 2),
+      ),
     ),
     blockquotePadding: const EdgeInsets.only(left: AppSpacing.md),
     // El chip inline lo pinta el builder (`code.chip` lleva borde, padding y
     // radio, que un `TextStyle` no puede expresar). El estilo queda como base
     // y para el texto que el builder no cubre.
+    // El codigo inline en el verde de `--success`, como el desktop. Antes
+    // iba en `--muted-strong`: un gris mas, o sea indistinguible del texto
+    // que rodea.
     code: TextStyle(
       fontFamily: 'monospace',
       fontSize: 11.5,
       height: 1.55,
-      color: mutedStrong,
+      fontWeight: FontWeight.w500,
+      color: AppColors.diffAddOf(theme.brightness),
       backgroundColor: dark ? AppColors.darkCodeBg : AppColors.lightCodeBg,
     ),
     // El bloque lo arma `_CodeBlockBuilder`; el paquete envuelve lo que
@@ -775,22 +791,45 @@ class _CodeBlockBuilder extends MarkdownElementBuilder {
     TextStyle? preferredStyle,
     TextStyle? parentStyle,
   ) {
-    final code = element.textContent;
-    return _CodeBlock(
-      code: code.endsWith('\n') ? code.substring(0, code.length - 1) : code,
-    );
+    var code = element.textContent;
+    if (code.endsWith('\n')) code = code.substring(0, code.length - 1);
+    // El lenguaje viaja en la clase del `<code>` hijo, como `language-dart`.
+    // Sin esto no hay resaltado: el paquete autodetecta, y autodetectar
+    // Dart en un fragmento de cinco lineas es una loteria.
+    String? language;
+    for (final child in element.children ?? const <md.Node>[]) {
+      if (child is md.Element && child.tag == 'code') {
+        language = RegExp(r'language-([\w+-]+)')
+            .firstMatch(child.attributes['class'] ?? '')
+            ?.group(1);
+        break;
+      }
+    }
+    return _CodeBlock(code: code, language: language);
   }
 }
 
 class _CodeBlock extends StatelessWidget {
-  const _CodeBlock({required this.code});
+  const _CodeBlock({required this.code, this.language});
 
   final String code;
+
+  /// El info-string del fence (`dart`, `bash`, ...). `null` = autodetectar.
+  final String? language;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final dark = theme.brightness == Brightness.dark;
+    // El estilo base lo comparten el `RichText` y el resaltador: si no
+    // fueran el mismo, el codigo sin colorear tendria una fuente y el
+    // coloreado otra.
+    final base = TextStyle(
+      fontFamily: 'monospace',
+      fontSize: 11.5,
+      height: 1.55,
+      color: dark ? AppColors.darkCodeText : AppColors.lightCodeText,
+    );
     return Container(
       margin: const EdgeInsets.only(top: AppSpacing.xs),
       decoration: BoxDecoration(
@@ -810,17 +849,19 @@ class _CodeBlock extends StatelessWidget {
               padding: const EdgeInsets.all(AppSpacing.sm),
               // `softWrap:false` + scroll horizontal: una línea larga scrollea
               // en vez de desbordar la burbuja.
-              child: Text(
-                code,
-                softWrap: false,
-                style: TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 11.5,
-                  height: 1.55,
-                  color: dark
-                      ? AppColors.darkCodeText
-                      : AppColors.lightCodeText,
+              // `RichText` y no `Text`: es lo unico que puede llevar varios
+              // `TextSpan` con distinto color. Con `Text` el bloque entero salia
+              // del color del texto, que es el bug reportado.
+              child: RichText(
+                text: CodeHighlighter.spanFor(
+                  code,
+                  language,
+                  base,
+                  dark: dark,
                 ),
+                textScaler: MediaQuery.textScalerOf(context),
+                softWrap: false,
+                textAlign: TextAlign.left,
               ),
             ),
           ),

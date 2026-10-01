@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.9.0+14
+version: 1.10.0+15
 
 environment:
   sdk: ^3.12.2
@@ -52,6 +52,13 @@ dependencies:
   # pierde justo lo que mÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡s se ve: bloques de cÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â³digo, tÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â­tulos y tablas.
   # (`flutter_markdown` quedÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â³ discontinuado: ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©ste es el sucesor mantenido.)
   flutter_markdown_plus: ^1.0.0
+
+  # Resaltado de sintaxis en los bloques de codigo del markdown. Sin esto el
+  # codigo sale entero del mismo color y el chat pierde justo lo que mas se
+  # lee: que linea es la que hay que tocar. Mismo paquete que el cliente
+  # desktop, y la paleta sale de los tokens `--code-*` de `tokens.dart`, que
+  # ya estaban ahi sin que nada los leyera.
+  highlight: ^0.7.0
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
