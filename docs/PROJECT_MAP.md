@@ -169,6 +169,12 @@ Build de Android: `ANDROID_HOME=G:\Android\SDK`, `JAVA_HOME=G:\Android\Android S
 
 ## Trampas conocidas
 
+- **La pantalla de sesiones pagina con `cursor` hasta el tope de 20 páginas**
+  (`SessionRepository.listAll`): 2.000 sesiones en esta máquina, 654 principales. Antes pedía
+  una sola página de 100 y mostraba 59 principales — 595 invisibles sin aviso. Cuesta
+  ~981 KB, pero **una vez** al crear la pantalla: el shell al volver de la pestaña sólo llama
+  `pollActive()` (62 B), y `load()` no se repite. Los únicos callers de `listAll` son la
+  pantalla de sesiones; `list` (una página) sigue existiendo para lo puntual.
 - **`session.tokens` NO es el contexto**: es un contador **acumulado** de toda la sesión. Medido:
   marcaba 19.892.436 donde el contexto real era 195.089 (**115x**). El contexto es
   `TokenUsage.context` = `input + cache.read + reasoning` del **último** assistant; `cache.write`

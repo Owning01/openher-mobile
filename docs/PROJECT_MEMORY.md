@@ -422,3 +422,46 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   caminos de escritura, y el contraste del contexto. **Nada verificado en un teléfono**: el
   Xiaomi `aaiz5tbuq8dqyxqs` sigue sin aparecer en `adb devices`, así que el menú, el spinner
   chico y el layout con el teclado abierto están verificados por test, no en pantalla.
+
+## 2026-09-30 — La pantalla de sesiones traía 59 de 654
+
+- **Síntoma**: "no me está trayendo todas las sesiones". **Causa**: `SessionRepository.list`
+  pedía **una** página de 100 y nunca usaba el `cursor`. No era el filtro de la
+  pantalla (ese está bien y está medido: `parentID` presente ⇒ subagente, y el
+  interruptor está apagado por defecto), era que la lista se cortaba.
+- **Medido 2026-09-30 contra el server real**: hay **2.000 sesiones** (654 principales, 1.346
+  subagentes). `limit=100` devuelve 100 de las cuales sólo **59 son principales**: **595
+  sesiones del usuario quedaban invisibles sin ninguna señal**. Y de esas 100, 41 eran
+  subagentes que el interruptor esconde, o sea que la página se llenaba de filas que la
+  pantalla descartaba.
+- **`/api/session` sí pagina** con `cursor` (medido: dos páginas con `limit=5` y cursor no
+  se solapan). El `ApiPage.next` ya existía y estaba en el repo, sin usar: el doc decía
+  "no se pagina todavía" y esa frase costó 595 sesiones.
+- **`listAll`**: pide página por página, deduplica por id, ordena por actualización, y corta
+  cuando `next` viene `null`, cuando el cursor viene **repetido** (el server no avanzó) o
+  al llegar a `kSessionAllPages` (20). El corte por cursor repetido es lo que evita el bucle
+  infinito si un build futuro devuelve `next` siempre.
+- **El cursor viaja opaco**: la app lo reenvía sin decodificarlo. Hay un test que manda un
+  `next` que **no es JSON válido** y verifica que igual llega bien al server: si algún
+  día lo empieza a interpretar, ese test lo delata.
+- **Lo que NO se repitió en cada visita**: el shell sólo llama `pollActive()` (62 B) al
+  volver a la pestaña, no `load()`. Los ~981 KB se pagan **una vez** al crear la pantalla y
+  otra sólo con pull-to-refresh. Medido: 20 páginas × 100 = 1.004.762 B.
+- **Un test existente cAYó y se adjudicó en el sitio**: `sessions_test.dart` pedía
+  `expect(lists, 1)` después de `load`, y con paginación son 2. La causa es el **fixture**,
+  no la app: `listJson` mete siempre un `cursor.next`, o sea que jura que hay otra página
+  aunque la respuesta traiga los mismos ítems. Se midió como delta (`trasCargar`), que es lo
+  que el test quería afirmar (que **filtrar es local**), con el motivo escrito en el archivo.
+  Cambiar el assert a `2` habría sido tapar el sintoma; cambiarlo a delta conserva la
+  garantía original y la hace más precisa.
+- **6 guards verificados rompiéndolos, los 6 mueren**: volver a una sola página (el bug
+  original), no mandar el cursor, interpretar el cursor, sacar el tope de páginas, no
+  deduplicar, y **que la pantalla vuelva a llamar `list()` en vez de `listAll`**. Ese último
+  es el que importa: `listAll` puede estar perfecto y el bug seguir vivo si la vista llama al
+  método viejo, y ningún test del repositorio lo vería.
+- **Trampa de este día**: adivinar la indentación al escribir un needle falla en silencio y el
+  script reporta "no encuentro la llamada" cuando el código está ahí. Pasó tres veces
+  seguidas (8 espacios donde había 6). Hay que leer el bloque con los caracteres visibles
+  antes de escribir el needle, no contar espacios a ojo.
+- **Estado**: `flutter analyze` limpio, **849 tests verdes (6 skipped)**. Nada verificado en un
+  teléfono: el Xiaomi `aaiz5tbuq8dqyxqs` sigue sin aparecer en `adb devices`.
