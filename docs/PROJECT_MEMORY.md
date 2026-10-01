@@ -465,3 +465,37 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   antes de escribir el needle, no contar espacios a ojo.
 - **Estado**: `flutter analyze` limpio, **849 tests verdes (6 skipped)**. Nada verificado en un
   teléfono: el Xiaomi `aaiz5tbuq8dqyxqs` sigue sin aparecer en `adb devices`.
+
+## 2026-10-01 - El markdown del chat salia sin color, con los tokens ahi sin usarse
+
+- Sintoma: "no me esta dibujando con colores en el chat". **Causa 1**: los tokens
+  `--code-*` de `tokens.dart` estaban portados desde `tokens.css` desde el primer dia
+  y **nada los leia**. El bloque de codigo se pintaba con un `Text`, que no admite mas
+  de un color, asi que salia entero del color del texto. El paquete `highlight` ni
+  estaba en el `pubspec`.
+- **Causa 2**: en la hoja de markdown faltaba `em` completo (la cursiva salia del
+  color del texto, invisible), el codigo inline iba en `--muted-strong` (un gris mas) y
+  la cita en `--muted`. El cliente desktop los tiene en `--warning`, `--success` y
+  `tertiary`.
+- Arreglo: `lib/ui/features/chat/code_highlight.dart` con el mismo `highlight` que el
+  desktop, y la paleta leida de los tokens en vez de hex sueltos. `RichText` en lugar
+  de `Text`, y el lenguaje se saca de la clase `language-xxx` del `<code>` hijo, que
+  sin eso autodetecta.
+- El test verifica que se VE, no que la funcion existe: "un bloque de Dart sale con MAS
+  DE UN color" y "el texto no se pierde". 5 guards verificados rompiendolos, los 5
+  mueren. Un test que solo comprobara `colorFor('keyword') != null` pasaria con un
+  resaltador que no pinta nada.
+- Un test existente cayo y se adjudico en el sitio: `message_bubble_test.dart` buscaba
+  un `Text` y ahora es `RichText`. El criterio no cambio, solo el finder.
+- El cache es por (codigo, lenguaje, brillo, estilo base): el `TextSpan` lleva el color
+  embebido, asi que servir el de claro en oscuro dejaria el codigo con los colores del
+  tema anterior. LRU de 200; los bloques de mas de 20 KB no se parsean (un parse de
+  60 KB es medio segundo de jank en un telefono).
+- **No hice golden, y es una decision**: en `flutter test` la fuente por defecto es
+  Ahem (cada glifo es un rectangulo negro), asi que un golden con texto saldria como un
+  bloque y no serviria para mirar. El propio `squares_spinner_test.dart` lo dice.
+- **Trampa del dia, la misma por cuarta vez**: adivinar la indentacion al escribir un
+  needle falla en silencio. Paso con 8 espacios donde habia 6, con 4 donde habia 2, y con
+  la ternaria a 20 donde estaba a 22. Se resuelve editando por **rango de lineas** con
+  un ancla buscada por contenido.
+- Estado: `flutter analyze` limpio, **865 tests verdes (6 skipped)**.

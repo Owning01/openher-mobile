@@ -21,7 +21,7 @@ App **id**: `ai.openher.openher_mobile` · versión `1.2.0+7` (`versionCode=7`).
 | `lib/data/repositories/` | `session_repository`, `file_repository`, `catalog_repository` |
 | `lib/domain/models/` | `session`, `message`, `tool`, `event`, `errors`, `agent_catalog`, `model_catalog`, `turn_activity` |
 | `lib/ui/core/` | `tokens.dart`, `theme.dart`, `theme_variants.dart` (61 paletas), `layer_gate.dart`, `app_icon.dart`, `low_data_banner.dart`, `update_banner.dart` |
-| `lib/ui/features/chat/` | `chat_view`, `chat_viewmodel`, `composer`, **`composer_suggestions`** (disparador `/` y `@`, sin `BuildContext`), `message_bubble`, `squares_spinner`, `turn_activity`, `tool_card`, `model_sheet`, `agent_sheet` |
+| `lib/ui/features/chat/` | `chat_view`, `chat_viewmodel`, `composer`, **`composer_suggestions`** (disparador `/` y `@`, sin `BuildContext`), `message_bubble`, `code_highlight` (resaltado de sintaxis con `highlight` y los tokens `--code-*`), `squares_spinner`, `turn_activity`, `tool_card`, `model_sheet`, `agent_sheet` |
 | `lib/ui/features/` | `sessions/`, `files/`, `settings/`, `connect/`, `navigation/` |
 | `docs/API_CONTRACT.md` | Contrato **medido** contra el server real |
 | `docs/SUPER_PLAN.md` | Decisiones, arquitectura, fases M0–M10 |
@@ -175,6 +175,11 @@ Build de Android: `ANDROID_HOME=G:\Android\SDK`, `JAVA_HOME=G:\Android\Android S
   ~981 KB, pero **una vez** al crear la pantalla: el shell al volver de la pestaña sólo llama
   `pollActive()` (62 B), y `load()` no se repite. Los únicos callers de `listAll` son la
   pantalla de sesiones; `list` (una página) sigue existiendo para lo puntual.
+- **El markdown del chat se pinta con los tokens `--code-*`** (`code_highlight.dart`): el
+  bloque de codigo es un `RichText` con los spans de `highlight`, la cursiva en
+  `--warning`, el codigo inline en `--success` y la cita en `tertiary`. Los tokens
+  `--code-*` existen en `tokens.dart` **desde el primer dia**: lo que faltaba era el
+  paquete `highlight` en el `pubspec` y un `RichText` en vez de un `Text`.
 - **`session.tokens` NO es el contexto**: es un contador **acumulado** de toda la sesión. Medido:
   marcaba 19.892.436 donde el contexto real era 195.089 (**115x**). El contexto es
   `TokenUsage.context` = `input + cache.read + reasoning` del **último** assistant; `cache.write`
