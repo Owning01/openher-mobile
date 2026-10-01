@@ -653,10 +653,19 @@ MarkdownStyleSheet _markdownSheet(BuildContext context) {
   // (18.4/16.8/15.2/14.08 sobre 14 px) llevados al cuerpo de 13 px. Con los
   // títulos del tema (que colapsan display/headline/title a 14 px) un `#` se
   // veía del mismo tamaño que el párrafo.
+  // Los titulos en el color del tema: es lo que dice el CSS del cliente
+  // web, color: var(--md-heading, var(--text)) (chat.css:1674), que
+  // resuelve a accent/primary del tema (resolveTheme.ts).
+  //
+  // Antes no tenian color: salian del color del texto y el unico modo
+  // de distinguirlos era el tamano. En una pantalla chica, con el
+  // cuerpo a 13 px, un H3 a 14 px no se distingue de un parrafo. El
+  // color es lo que dice "esto es un titulo".
   TextStyle heading(double ratio) => base.copyWith(
     fontSize: (base.fontSize! * ratio).roundToDouble(),
     height: 1.35,
     fontWeight: FontWeight.w700,
+    color: scheme.primary,
   );
 
   return MarkdownStyleSheet.fromTheme(theme).copyWith(
@@ -665,7 +674,10 @@ MarkdownStyleSheet _markdownSheet(BuildContext context) {
       color: scheme.primary,
       decoration: TextDecoration.underline,
     ),
-    strong: base.copyWith(fontWeight: FontWeight.w700),
+    // La negrita tambien toma color: el CSS la mapea a primary
+    // (--md-strong). Antes era solo peso, y con mucho texto el parrafo en
+    // negrita se perdia de no tener mas contraste que el grosor de letra.
+    strong: base.copyWith(fontWeight: FontWeight.w700, color: scheme.primary),
     // La cursiva en ambar, como el cliente desktop (chat.css:1336-1339).
     // Antes no estaba en la hoja: el default de `fromTheme` la pintaba
     // del color del texto, o sea invisible. Un *termino* se leia igual que
@@ -680,7 +692,9 @@ MarkdownStyleSheet _markdownSheet(BuildContext context) {
     // `.ai li{gap:7px}` con un punto de 4 px: cada nivel sangra 4 + 7.
     listIndent: AppSpacing.xs,
     listBulletPadding: const EdgeInsets.only(right: 7),
-    listBullet: base,
+    // La vinieta en primary (--md-list-item): una vinieta de color
+    // separa la lista del parrafo sin gastar sangria.
+    listBullet: base.copyWith(color: scheme.primary),
     h1: heading(1.31),
     h2: heading(1.2),
     h3: heading(1.09),
@@ -693,9 +707,7 @@ MarkdownStyleSheet _markdownSheet(BuildContext context) {
     // Cita en `tertiary` como el desktop, no en `--muted`.
     blockquote: base.copyWith(color: scheme.tertiary),
     blockquoteDecoration: BoxDecoration(
-      border: Border(
-        left: BorderSide(color: scheme.tertiary, width: 2),
-      ),
+      border: Border(left: BorderSide(color: scheme.tertiary, width: 2)),
     ),
     blockquotePadding: const EdgeInsets.only(left: AppSpacing.md),
     // El chip inline lo pinta el builder (`code.chip` lleva borde, padding y
@@ -799,9 +811,9 @@ class _CodeBlockBuilder extends MarkdownElementBuilder {
     String? language;
     for (final child in element.children ?? const <md.Node>[]) {
       if (child is md.Element && child.tag == 'code') {
-        language = RegExp(r'language-([\w+-]+)')
-            .firstMatch(child.attributes['class'] ?? '')
-            ?.group(1);
+        language = RegExp(
+          r'language-([\w+-]+)',
+        ).firstMatch(child.attributes['class'] ?? '')?.group(1);
         break;
       }
     }
@@ -853,12 +865,7 @@ class _CodeBlock extends StatelessWidget {
               // `TextSpan` con distinto color. Con `Text` el bloque entero salia
               // del color del texto, que es el bug reportado.
               child: RichText(
-                text: CodeHighlighter.spanFor(
-                  code,
-                  language,
-                  base,
-                  dark: dark,
-                ),
+                text: CodeHighlighter.spanFor(code, language, base, dark: dark),
                 textScaler: MediaQuery.textScalerOf(context),
                 softWrap: false,
                 textAlign: TextAlign.left,
@@ -1322,8 +1329,6 @@ class _TypingDotsState extends State<TypingDots>
     );
   }
 }
-
-
 
 /// Aviso de "este mensaje todavía no lo tomó el server", con reintento.
 ///
