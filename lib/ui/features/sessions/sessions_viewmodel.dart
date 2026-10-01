@@ -47,7 +47,14 @@ final class SessionGroup {
 /// `/api/session` ([ApiClient] no tiene esos endpoints), así que la pantalla no
 /// finge hacerlos: los reporta y vuelve. Cuando `ApiClient` crezca, la app los
 /// cablea por [SessionsView.onAction] sin tocar la lista.
-enum SessionAction { toggleFavorite, rename, fork, exportMarkdown, archive, close }
+enum SessionAction {
+  toggleFavorite,
+  rename,
+  fork,
+  exportMarkdown,
+  archive,
+  close,
+}
 
 class SessionsViewModel extends ChangeNotifier {
   SessionsViewModel({
@@ -78,6 +85,7 @@ class SessionsViewModel extends ChangeNotifier {
     _showSubagents = value;
     _notify();
   }
+
   /// La capa de datos. Pública para que un test pueda assertar contra el mismo
   /// repository, no para que la UI lo use: la pantalla sólo lee el estado.
   final SessionRepository repository;
@@ -164,7 +172,6 @@ class SessionsViewModel extends ChangeNotifier {
     ];
   }
 
-
   /// [visible] agrupado por día calendario de `time.updated`.
   List<SessionGroup> get groups => groupSessions(visible, _clock());
 
@@ -212,7 +219,11 @@ class SessionsViewModel extends ChangeNotifier {
     _error = null;
     _notify();
     try {
-      final sessions = await repository.list();
+      // `listAll`, no `list`: esta pantalla es el mapa de todo lo que se
+      // ha trabajado, y con una sola página de 100 quedaban fuera 595 de
+      // 654 principales (medido 2026-09-30). Es la única llamada que
+      // crece con el historial del usuario.
+      final sessions = await repository.listAll();
       _sessions = sessions;
       _attention = {
         for (final s in sessions)

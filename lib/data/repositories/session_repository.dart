@@ -7,17 +7,29 @@
 /// Decisiones medidas contra el dialecto v2 (`docs/API_CONTRACT.md`):
 /// - La lista **no** trae el estado de trabajo. "En ejecución" sale de
 ///   [fetchActive] (`GET /api/session/active`), nunca de un campo de la sesión.
-/// - [ApiPage.next] existe pero **no se pagina todavía**: la pantalla pide una
-///   sola página grande y filtra por fecha/título en el cliente. Cuando haga
-///   falta "cargar más", el cursor se expone acá sin cambiar la pantalla.
+/// - `/api/session` **sí pagina** con `cursor`, y hace falta. Medido 2026-09-30
+///   en esta máquina: 2.000 sesiones en total (654 principales, 1.346 subagentes),
+///   y una sola página de 100 traía 59 principales: **595 quedaban fuera** de la
+///   pantalla sin ninguna señal de que faltaba algo. Ver [listAll].
 library;
 
 import '../../core/network/api_client.dart';
 import '../../domain/models/errors.dart';
 import '../../domain/models/session.dart';
 
-/// Tope de la página única que pide la pantalla de sesiones.
+/// Tope de cada página de sesiones.
+///
+/// No es el tope de la lista: [SessionRepository.listAll] pide varias páginas.
+/// Es el tamaño de cada request, que con 100 son ~25 KB (medido) y 20 requests
+/// cubren las 2.000 sesiones de esta máquina.
 const int kSessionPageLimit = 100;
+
+/// Cuántas páginas pide como máximo [SessionRepository.listAll].
+///
+/// Tope duro, no preferencia: si un build futuro devolviera siempre un
+/// `cursor.next`, sin esto la app pediría páginas para siempre. Con 20 páginas
+/// × 100 son 2.000 sesiones, que es lo que hay acá.
+const int kSessionAllPages = 20;
 
 class SessionRepository {
   const SessionRepository(this._api);
@@ -45,6 +57,62 @@ class SessionRepository {
           SessionInfo.fromJson(m),
     ];
     sessions.sort((a, b) => b.updatedAtMs.compareTo(a.updatedAtMs));
+    return sessions;
+  }
+
+  /// Todas las sesiones, paginando con el cursor hasta que el server deja de
+  /// mandar una página siguiente.
+  ///
+  /// ## Por qué existe
+  ///
+  /// [list] pide **una** página. Con `limit=100` en una máquina que tiene 2.000
+  /// sesiones, eso son 59 principales de 654: **595 sesiones que el usuario tiene
+  /// y no ve**, sin ningún aviso. El síntoma era "no me trae todas las sesiones"
+  /// y la causa no era un filtro de la pantalla (ese filtro es correcto y está
+  /// medido): era que la página se cortaba en 100 y de ésos, 41 eran subagentes
+  /// que el interruptor esconde.
+  ///
+  /// ## Por qué una sola pasada y no un bucle infinito
+  ///
+  /// Se pide página por página con el `cursor.next` que devuelve el server
+  /// (medido: dos páginas consecutivas con `limit=5` no se solapan, así que el
+  /// cursor avanza de verdad), y se corta en [kSessionAllPages] páginas o cuando
+  /// `next` viene `null`. El tope es lo que evita el bucle infinito si un build
+  /// futuro devuelve siempre un cursor: es preferible mostrar 1.000 sesiones a
+  /// quedar pidiendo páginas para siempre gastando datos.
+  ///
+  /// El `search` **no** se reenvía en las páginas siguientes: es el filtro del
+  /// usuario, y el server lo aplica, pero repetirlo con un cursor puede devolver
+  /// la misma página. Por eso el filtro por título se sigue haciendo en el
+  /// cliente ([SessionsViewModel.search]), que es una lista en memoria.
+  Future<List<SessionInfo>> listAll({
+    int limit = kSessionPageLimit,
+    String? directory,
+    int maxPages = kSessionAllPages,
+  }) async {
+    final porId = <String, SessionInfo>{};
+    String? cursor;
+    for (var page = 0; page < maxPages; page++) {
+      final respuesta = await _api.listSessions(
+        limit: limit,
+        order: 'desc',
+        cursor: cursor,
+        directory: directory,
+      );
+      for (final item in respuesta.data) {
+        if (asMap(item) case final Map<String, Object?> m) {
+          final s = SessionInfo.fromJson(m);
+          porId[s.id] = s;
+        }
+      }
+      final siguiente = respuesta.next;
+      // Sin cursor, o un cursor repetido (el server no avanzó), se corta: en
+      // ambos casos pedir otra página devolvería lo mismo.
+      if (siguiente == null || siguiente.isEmpty || siguiente == cursor) break;
+      cursor = siguiente;
+    }
+    final sessions = porId.values.toList()
+      ..sort((a, b) => b.updatedAtMs.compareTo(a.updatedAtMs));
     return sessions;
   }
 
