@@ -57,7 +57,18 @@ class MessageBubble extends StatelessWidget {
     this.questionRequestId,
     this.onRetrySend,
     this.isOpenAssistant,
+    this.onMenu,
   });
+
+  /// Abre el menu del mensaje: **Copiar** (todo) y, si es del usuario,
+  /// **Deshacer** (que ademas devuelve el texto al composer).
+  ///
+  /// Por que un boton y no un long-press sobre la burbuja: el long-press sobre
+  /// el texto ya lo usa el sistema para **seleccionar** un fragmento, y los dos
+  /// no pueden ganar la misma arena de gestos. Como copiar *una parte* era lo
+  /// que mas se usaba, ese se queda con el long-press y el menu completo va en
+  /// un boton explicito.
+  final VoidCallback? onMenu;
 
   /// Reintenta un mensaje del usuario que el server no tomó (409 al mandar
   /// con el agente trabajando, o 429 de rate limit).
@@ -65,6 +76,10 @@ class MessageBubble extends StatelessWidget {
   /// Antes ese mensaje se borraba de la lista y el texto se perdía sin que el
   /// usuario llegara a ver por qué.
   final ValueChanged<String>? onRetrySend;
+
+  /// El botón de acciones. Se busca por key, no por icono: hay varios
+  /// mensajes en pantalla y el test necesita poder apuntar a uno en concreto.
+  static const Key menuKey = Key('message-menu');
 
   /// Este mensaje es el assistant que está recibiendo deltas ahora.
   ///
@@ -225,7 +240,7 @@ class MessageBubble extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
-      children: spaced,
+      children: [...spaced, if (onMenu != null) _menuButton(context)],
     );
   }
 
@@ -279,7 +294,12 @@ class MessageBubble extends StatelessWidget {
         children: [
           if (user.files.isNotEmpty) _attachments(context, user.files),
           if (user.files.isNotEmpty) const SizedBox(height: 6),
-          Text(
+          // `SelectableText` y no `Text`: el mensaje del usuario es **lo** que
+          // se quiere copiar y seleccionar. Con `Text` no habia forma de
+          // agarrar un fragmento: el unico `SelectableText` del archivo estaba
+          // en la tarjeta de error, o sea que el mensaje de uno era el unico
+          // texto del chat que no se podia seleccionar.
+          SelectableText(
             user.text,
             // El cuerpo del tema (13/1.5) con el color del chip: el `Text` solo
             // con `fontSize` heredaba el alto de línea de otra base.
@@ -290,6 +310,10 @@ class MessageBubble extends StatelessWidget {
           if (user.notDelivered) ...[
             const SizedBox(height: 6),
             _NotDeliveredChip(onRetry: () => onRetrySend?.call(user.id)),
+          ],
+          if (onMenu != null) ...[
+            const SizedBox(height: 4),
+            _menuButton(context),
           ],
         ],
       ),
@@ -378,6 +402,30 @@ class MessageBubble extends StatelessWidget {
   }
 
   static bool _isImage(String? mime) => mime?.startsWith('image/') ?? false;
+
+  /// El boton que abre el menu del mensaje. Es lo unico que se ve cambiar, y
+  /// solo aparece si hay [onMenu]: en la vista de solo lectura (comparte,
+  /// revision) queda limpio.
+  ///
+  /// Va **dentro** de la burbuja y no flotando al lado: al lado empujaria el
+  /// texto del asistente (que es de ancho completo) y la burbuja del usuario
+  /// dejaria de pegarse al borde. 22 px de alto y `onSurfaceVariant` al 70%:
+  /// esta, no la accion.
+  Widget _menuButton(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Align(
+      alignment: AlignmentDirectional.centerEnd,
+      child: AppIconButton(
+        key: MessageBubble.menuKey,
+        icon: 'more-horizontal',
+        tooltip: 'Acciones del mensaje',
+        onPressed: onMenu,
+        size: 16,
+        tapSize: 22,
+        color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
+      ),
+    );
+  }
 
   // ─────────────────────── error, pill, question ───────────────────────
 
@@ -859,15 +907,21 @@ class _CodeBlock extends StatelessWidget {
             scrollDirection: Axis.horizontal,
             child: Padding(
               padding: const EdgeInsets.all(AppSpacing.sm),
-              // `softWrap:false` + scroll horizontal: una línea larga scrollea
-              // en vez de desbordar la burbuja.
-              // `RichText` y no `Text`: es lo unico que puede llevar varios
-              // `TextSpan` con distinto color. Con `Text` el bloque entero salia
-              // del color del texto, que es el bug reportado.
-              child: RichText(
-                text: CodeHighlighter.spanFor(code, language, base, dark: dark),
+              // `SelectableText.rich` y no `RichText`: el resaltado necesita
+              // varios `TextSpan` con distinto color, y las dos cosas van en
+              // la misma caja. Pero `RichText` **no** se puede seleccionar, asi
+              // que el codigo era lo unico del mensaje que no se podia copiar a
+              // mano: habia que entrar al portapapeles por el menu del mensaje
+              // y perder el resaltado, o seleccionar el texto de alrededor.
+              //
+              // El precio: `SelectableText` **siempre** envuelve (no tiene
+              // `softWrap`), asi que una linea larga de codigo pasa a ocupar
+              // dos lineas en vez de scrollear en horizontal. Se paga ese
+              // precio a proposito: copiar un fragmento era imposible.
+              child: SelectableText.rich(
+                CodeHighlighter.spanFor(code, language, base, dark: dark),
                 textScaler: MediaQuery.textScalerOf(context),
-                softWrap: false,
+                maxLines: null,
                 textAlign: TextAlign.left,
               ),
             ),

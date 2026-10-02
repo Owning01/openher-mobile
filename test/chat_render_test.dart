@@ -15,6 +15,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show SystemChannels;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -376,6 +377,27 @@ class _FakePicker extends ImagePickerPlatform with MockPlatformInterfaceMixin {
       'usuario no puede marcar mas de una imagen.',
     );
   }
+}
+
+/// Todos los colores de un `InlineSpan`, **recursivamente**.
+///
+/// Los `TextSpan` del resaltador vienen anidados: el de primer nivel suele ser
+/// un envoltorio sin clase de token, que hereda el color base, y sus hijos son
+/// los que llevan el color real. Contarlos de un nivel con `visitChildren`
+/// devuelve siempre 1, y el test pasa (o falla) por la razon equivocada.
+Set<Color> _coloresDeSpans(InlineSpan span) {
+  final out = <Color>{};
+  void walk(InlineSpan sp) {
+    if (sp is! TextSpan) return;
+    final color = sp.style?.color;
+    if (color != null) out.add(color);
+    for (final child in sp.children ?? const <InlineSpan>[]) {
+      walk(child);
+    }
+  }
+
+  walk(span);
+  return out;
 }
 
 void main() {
@@ -1149,6 +1171,305 @@ void main() {
 
     expect(opened, hasLength(1));
     expect(opened.single.name, 'edit');
+  });
+
+  group('menu del mensaje: copiar y deshacer', () {
+    /// Los request que se hicieron, para poder afirmar el **cuerpo** del POST.
+    /// `revert/stage` sin `messageID` devuelve 400 (medido), asi que el id del
+    /// ancla es parte de lo que hay que verificar, no un detalle.
+    late List<http.Request> requests;
+
+    Future<ChatViewModel> menuVm(List<Map<String, Object?>> messages) async {
+      requests = <http.Request>[];
+      final vm = ChatViewModel(
+        ApiClient(
+          config: kConfig,
+          client: MockClient((req) async {
+            requests.add(req);
+            return http.Response(
+              jsonEncode({'data': messages}),
+              200,
+              headers: const {'content-type': 'application/json'},
+            );
+          }),
+        ),
+        sessionId: kSessionId,
+        sessionInfo: kSession,
+        streamFactory: (config, directory) => SilentSource(),
+      );
+      await vm.load();
+      return vm;
+    }
+
+    /// El botón de acciones **de un mensaje puntual**.
+    ///
+    /// Por id y no por posición: la lista del chat va invertida (el mensaje más
+    /// nuevo al principio del árbol), así que `.first` es el último mensaje y
+    /// un test que los confunda pasa con el assistant en vez de con el del
+    /// usuario —que es justo el caso que importa acá.
+    Finder menuDe(String messageId) => find.descendant(
+      of: find.byKey(ValueKey(messageId)),
+      matching: find.byKey(MessageBubble.menuKey),
+    );
+
+    testWidgets('copiar un mensaje lo manda al portapapeles y avisa', (
+      tester,
+    ) async {
+      String? copiado;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copiado = (call.arguments as Map)['text'] as String;
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      final vm = await menuVm([
+        userJson('msg_u1', 'la primera'),
+        assistantJson(
+          id: 'msg_a1',
+          content: [
+            {'type': 'text', 'text': 'esta es la respuesta'},
+          ],
+        ),
+      ]);
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      // El botón vive en cada mensaje con texto.
+      expect(menuDe('msg_u1'), findsOneWidget);
+      expect(menuDe('msg_a1'), findsOneWidget);
+
+      await tester.tap(menuDe('msg_u1'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Copiar mensaje'), findsOneWidget);
+      await tester.tap(find.text('Copiar mensaje'));
+      await tester.pumpAndSettle();
+
+      // El texto entero, no un fragmento: un fragmento ya se copia con la
+      // seleccion nativa, que es el otro camino del pedido.
+      expect(
+        copiado,
+        'la primera',
+      ); // Y avisa: un copiado silencioso que fallo se lee como que no hizo nada.
+      expect(find.text('Mensaje copiado'), findsOneWidget);
+    });
+
+    testWidgets('el mensaje del assistant tambien se copia entero', (
+      tester,
+    ) async {
+      String? copiado;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copiado = (call.arguments as Map)['text'] as String;
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      final vm = await menuVm([
+        userJson('msg_u1', 'pregunta'),
+        assistantJson(
+          id: 'msg_a1',
+          content: [
+            {'type': 'text', 'text': 'primera linea\nsegunda linea'},
+          ],
+        ),
+      ]);
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      // El botón del assistant.
+      await tester.tap(menuDe('msg_a1'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Copiar mensaje'));
+      await tester.pumpAndSettle();
+
+      expect(copiado, 'primera linea\nsegunda linea');
+    });
+
+    testWidgets('el menu del assistant NO ofrece deshacer', (tester) async {
+      final vm = await menuVm([
+        userJson('msg_u1', 'pregunta'),
+        assistantJson(
+          id: 'msg_a1',
+          content: [
+            {'type': 'text', 'text': 'respuesta'},
+          ],
+        ),
+      ]);
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      await tester.tap(menuDe('msg_a1'));
+      await tester.pumpAndSettle();
+
+      // Deshacer media respuesta no tiene a que volver a: el ancla del
+      // `revert/stage` tiene que ser un prompt (medido: 400 sin messageID).
+      expect(find.text('Copiar mensaje'), findsOneWidget);
+      expect(find.text('Deshacer y editar'), findsNothing);
+    });
+
+    testWidgets('deshacer saca el mensaje Y devuelve el texto al composer', (
+      tester,
+    ) async {
+      final vm = await menuVm([
+        userJson('msg_u1', 'borralo pero no lo pierdas'),
+      ]);
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      await tester.tap(find.byKey(MessageBubble.menuKey));
+      await tester.pumpAndSettle();
+      expect(find.text('Deshacer y editar'), findsOneWidget);
+      await tester.tap(find.text('Deshacer y editar'));
+      await tester.pumpAndSettle();
+
+      // Las dos etapas, en orden, y con el id del mensaje como ancla.
+      final rutas = requests
+          .map((r) => '${r.method} ${r.url.path}')
+          .where((s) => s.contains('revert'))
+          .toList();
+      expect(rutas, <String>[
+        'POST /api/session/ses_render/revert/stage',
+        'POST /api/session/ses_render/revert/commit',
+      ]);
+      final stage = requests.firstWhere((r) => r.url.path.endsWith('stage'));
+      expect(
+        (jsonDecode(stage.body) as Map)['messageID'],
+        'msg_u1',
+        reason: 'sin el messageID el server devuelve 400 (medido)',
+      );
+
+      // **Lo que devuelve el texto**: sin esto el mensaje se perdia para siempre.
+      final input = tester.widget<TextField>(find.byKey(ChatComposer.inputKey));
+      expect(input.controller?.text, 'borralo pero no lo pierdas');
+    });
+
+    testWidgets('deshacer NO borra el texto aunque el revert falle', (
+      tester,
+    ) async {
+      // Si el server rechaza el revert, `_revertTo` corta con el error y nunca
+      // llega al `restore`. El texto tiene que seguir en el chat, no volver al
+      // input: si no, el usuario tendria el texto en los dos lados o en
+      // ninguno, y no podria decidir.
+      final vm = ChatViewModel(
+        ApiClient(
+          config: kConfig,
+          client: MockClient((req) async {
+            if (req.url.path.contains('revert')) {
+              return http.Response('nope', 500);
+            }
+            return http.Response(
+              jsonEncode({
+                'data': [userJson('msg_u1', 'me quedo')],
+              }),
+              200,
+              headers: const {'content-type': 'application/json'},
+            );
+          }),
+        ),
+        sessionId: kSessionId,
+        sessionInfo: kSession,
+        streamFactory: (config, directory) => SilentSource(),
+      );
+      await vm.load();
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      await tester.tap(find.byKey(MessageBubble.menuKey));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Deshacer y editar'));
+      await tester.pumpAndSettle();
+
+      final input = tester.widget<TextField>(find.byKey(ChatComposer.inputKey));
+      expect(input.controller?.text ?? '', isEmpty);
+      // Y el mensaje sigue a la vista, con el aviso del error.
+      expect(find.textContaining('No se pudo deshacer'), findsOneWidget);
+    });
+
+    testWidgets('el texto del usuario es seleccionable, el codigo tambien', (
+      tester,
+    ) async {
+      final vm = await menuVm([
+        userJson('msg_u1', 'esto se selecciona'),
+        assistantJson(
+          id: 'msg_a1',
+          content: [
+            {
+              'type': 'text',
+              // Dos sentencias **completas**, sin bloque sin cerrar: el parser
+              // se come el salto antes del fence de cierre, asi que un
+              // `void main() {` se le queda sin llave y el resaltador de Dart
+              // no parsea nada (sale plano). Con sentencias sueltas el
+              // fragmento es valido igual y el resaltado se verifica de verdad.
+              'text': 'Mira:\n\n```dart\nfinal x = 1;\nfinal y = 2;\n```',
+            },
+          ],
+        ),
+      ]);
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      // El mensaje del usuario: antes era un `Text` pelado, el unico texto del
+      // chat que no se podia seleccionar.
+      expect(
+        find.descendant(
+          of: find.byType(MessageBubble),
+          matching: find.byWidgetPredicate(
+            (w) => w is SelectableText && w.data == 'esto se selecciona',
+          ),
+        ),
+        findsOneWidget,
+      );
+
+      // El bloque de codigo: era un `RichText`, que **no** se puede seleccionar,
+      // asi que el codigo era lo unico del mensaje que no se podia copiar a mano.
+      //
+      // El predicado busca el texto del codigo y no "el unico SelectableText
+      // con textSpan": el markdown tambien usa `SelectableText.rich` para cada
+      // parrafo (por eso `selectable: true`), asi que hay varios. Lo que importa
+      // es que **este** codigo este dentro de uno seleccionable.
+      final codigo = find.descendant(
+        of: find.byType(MessageBubble),
+        matching: find.byWidgetPredicate(
+          (w) =>
+              w is SelectableText &&
+              w.textSpan != null &&
+              w.textSpan!.toPlainText().contains('final x = 1;'),
+        ),
+      );
+      expect(codigo, findsOneWidget);
+      // Y sigue llevando el resaltado: `SelectableText.rich` acepta los mismos
+      // `TextSpan` que `RichText`, asi que no se perdio ningun color.
+      //
+      // Los colores se cuentan **recursivamente**: `_spanForNode` anida (el
+      // nodo de primer nivel suele ser un envoltorio sin clase, con el color
+      // base, y sus hijos son los que traen el color real). Con
+      // `visitChildren` de un nivel se ve uno solo y el test miente.
+      expect(
+        _coloresDeSpans(tester.widget<SelectableText>(codigo).textSpan!).length,
+        greaterThan(1),
+        reason: 'el bloque de codigo tiene que seguir resaltado, no plano',
+      );
+    });
   });
 
   group('adjuntar varias fotos de una', () {

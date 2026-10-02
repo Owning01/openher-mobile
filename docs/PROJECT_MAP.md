@@ -66,6 +66,8 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 | D10 | Autoupdate contra el manifiesto de la release, sin diálogos ni bloqueos |
 | D11 | El visor de archivos decide **por extensión**, no por el botón que se apretó: `domain/models/file_type.dart` + `ui/features/files/file_preview.dart` |
 | D12 | El Clip abre el selector **multiple** (`pickMultiImage`): las fotos se acumulan en `_pending`, se ven en la tira del composer y se manda **una sola** lista. El shell es el unico que pasa `attachments` y `onRemoveAttachment`; `onSend` no las vuelve a mezclar |
+| D13 | Todo mensaje con texto es **seleccionable** (el del usuario con `SelectableText`, el markdown con `selectable: true`, el bloque de código con `SelectableText.rich`) y trae un botón `more-horizontal` con **Copiar mensaje** y, en los del usuario, **Deshacer y editar**. Deshacer = `revert/stage` + `revert/commit` y **devuelve el texto al input** vía `ChatComposer.controller`, que el shell crea y libera |
+| D14 | El long-press sobre un mensaje es del sistema (seleccionar fragmento), **no** del menu: los dos compiten por la misma arena de gestos y gana el hijo. Por eso el menu va en botón |
 
 ## Contrato: lo que hay que no olvidar
 
