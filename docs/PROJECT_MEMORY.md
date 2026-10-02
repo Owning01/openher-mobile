@@ -599,3 +599,41 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   `tableColumnWidth: IntrinsicColumnWidth()` (scroll lateral, sin wrap: el fix es
   `FlexColumnWidth()` en `message_bubble.dart` L736-744), y el **aviso de modo de
   bajo consumo** sigue molestando.
+
+## 2026-10-02 - Boton para volver a descargar si la descarga falla (1.13.2+21)
+
+- La banda de autoupdate se escondia sola en `failed`, sin dejar nada: un APK de
+  30 MB en datos moviles se corta seguido y el usuario se quedaba sin update
+  hasta cerrar y reabrir la app, que era lo unico que reiniciaba el chequeo.
+  Ahora hay **Volver a descargar**, con el motivo del fallo en la misma banda.
+- **Los dos `failed` no son lo mismo**, y antes se trataban como uno:
+  - fallo del **chequeo** (`info == null`): no hay manifest, no hay URL, no hay
+    nada que bajar. La banda **sigue escondida**: un boton ahi no podria hacer
+    nada.
+  - fallo de la **descarga** (`info != null`): sabemos que bajar. Se muestra.
+  La regla nueva es `UpdateState.canRetry` (failed && info != null && error != null).
+  `showsBannerFor(UpdatePhase)` queda igual y sigue siendo la regla por fase: asi
+  el test viejo sigue siendo cierto y no hubo que adjudicarlo.
+- **Bug latente que el boton de reintentar hacia alcanzable**: una descarga cortada
+  dejaba el archivo **con el nombre correcto**. Si pasaba de los 2 MB de
+  `_minApkBytes`, el proximo arranque (o el reintento) lo daba por bueno con
+  `_alreadyDownloaded` y se saltaba la descarga: el instalador recibia un APK
+  truncado y fallaba sin explicar nada. Ahora `download()` borra el archivo en
+  cuanto la descarga no llega a terminarse (`completo` + `finally`).
+- **`MockClient` no sirve para simular un corte**: devuelve la respuesta entera de
+  una, nunca falla en el medio del `await for`, que es justo donde se corta en
+  produccion. El test usa un `http.BaseClient` propio (`_ManifestoYApk`) que
+  responde el manifiesto con el JSON y el APK con un `Stream` que emite 3 MB y
+  tira `SocketException`. El canal nativo `ai.openher/install` (metodo
+  `updatesDir`) se mockea a una carpeta real de `systemTemp`, asi que el borrado
+  se verifica en el disco de verdad.
+- El test de reintentar cuenta `intentosApk == 2`: **volver a descargar es volver a
+  pegarle al server**, no aceptar lo que quedo. Sin esa cuenta el test pasaba
+  aunque el reintento aceptara el parcial.
+- `UpdateBanner.retryKey` es nueva, y `_Action` ahora acepta `key`. El boton usa
+  el icono `refresh` (no hay `refresh-cw` en `assets/icons`).
+- 8 tests nuevos en `test/update_test.dart` (3 de la regla `canRetry`, 2 del widget,
+  3 del disco). Los tres caminos rotos a proposito: sin borrar el parcial caen 2;
+  con `showsBanner` sin `canRetry` caen 2; sin el boton en la UI cae 1.
+- Estado: `flutter analyze lib` sin errores ni warnings, **884 tests verdes (6
+  skipped)**, publicado 1.13.2+21 (30.023.625 B, 12 intents / 12 actions).
