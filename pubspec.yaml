@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.11.1+17
+version: 1.12.0+18
 
 environment:
   sdk: ^3.12.2
@@ -80,6 +80,18 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+
+  # Para fchear la plataforma de `image_picker` en los tests del Clip
+  # (`ImagePickerPlatform.instance`) y verificar de verdad que se pide la
+  # seleccion multiple. Transitivo de `image_picker`; declarado porque el test
+  # lo importa y sin esto el analyzer acusa `depend_on_referenced_packages`.
+  image_picker_platform_interface: ^2.11.1
+
+  # `MockPlatformInterfaceMixin`: la plataforma de un paquete con
+  # `plugin_platform_interface` **rechaza** que se la implemente con
+  # `implements` (falla un assert). Para fchearla hay que `extends` + este
+  # mixin. Transitivo de `image_picker`, declarado por lo mismo que el de arriba.
+  plugin_platform_interface: ^2.1.8
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

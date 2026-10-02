@@ -18,6 +18,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
 import 'package:openher_mobile/core/network/api_client.dart';
 import 'package:openher_mobile/core/network/server_config.dart';
 import 'package:openher_mobile/core/network/sse_client.dart';
@@ -32,6 +33,7 @@ import 'package:openher_mobile/ui/features/chat/composer.dart';
 import 'package:openher_mobile/ui/features/chat/message_bubble.dart';
 import 'package:openher_mobile/ui/features/chat/tool_card.dart';
 import 'package:openher_mobile/ui/features/chat/turn_activity.dart';
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 const ServerConfig kConfig = ServerConfig(host: '127.0.0.1', port: 4098);
 const String kSessionId = 'ses_render';
@@ -313,6 +315,67 @@ Future<void> pumpChat(WidgetTester tester, ChatViewModel vm) async {
     ),
   );
   await tester.pump();
+}
+
+/// Plataforma de `image_picker` **fchea**, para probar el Clip sin telefono.
+///
+/// No es un mock generico. `getImage` —el camino de una sola foto— **lanza a
+/// proposito**: volver de `pickMultiImage` a `pickImage` es exactamente el bug
+/// que abrio este archivo (el selector de Android no dejaba marcar mas de una
+/// imagen), asi que el camino de uno solo tiene que romper el test con un
+/// mensaje que lo diga, no devolver en silencio una foto y dejar pasar el
+/// defecto.
+///
+/// `extends` + `MockPlatformInterfaceMixin`, y no `implements`: el paquete
+/// verifica la plataforma al asignarla y un `implements` puro hace fallar un
+/// assert. Con `extends` los metodos que no se toquen heredan el
+/// `UnimplementedError` de la base, asi que no hay que escribir los 20.
+class _FakePicker extends ImagePickerPlatform with MockPlatformInterfaceMixin {
+  _FakePicker(this.files);
+
+  /// Lo que "devuelve la galeria": rutas falsas, el Clip no las abre.
+  final List<XFile> files;
+
+  /// Cuantas veces se pidio la seleccion multiple.
+  int multiCalls = 0;
+
+  /// El ultimo metodo que se llamo, para el mensaje de error del assert.
+  String lastCall = '(ninguno)';
+
+  @override
+  Future<List<XFile>> getMultiImageWithOptions({
+    MultiImagePickerOptions options = const MultiImagePickerOptions(),
+  }) async {
+    multiCalls++;
+    lastCall = 'getMultiImageWithOptions';
+    return files;
+  }
+
+  @override
+  Future<List<XFile>?> getMultiImage({
+    double? maxWidth,
+    double? maxHeight,
+    int? imageQuality,
+  }) async {
+    multiCalls++;
+    lastCall = 'getMultiImage';
+    return files;
+  }
+
+  @override
+  Future<XFile?> getImage({
+    required ImageSource source,
+    double? maxWidth,
+    double? maxHeight,
+    int? imageQuality,
+    CameraDevice preferredCameraDevice = CameraDevice.rear,
+  }) async {
+    lastCall = 'getImage';
+    throw StateError(
+      'getImage(): se abrio el selector de UNA sola foto. Con esa llamada el '
+      'usuario no puede marcar mas de una imagen.',
+    );
+  }
 }
 
 void main() {
@@ -1086,5 +1149,181 @@ void main() {
 
     expect(opened, hasLength(1));
     expect(opened.single.name, 'edit');
+  });
+
+  group('adjuntar varias fotos de una', () {
+    late _FakePicker picker;
+    late ImagePickerPlatform original;
+
+    setUp(() {
+      original = ImagePickerPlatform.instance;
+      picker = _FakePicker(<XFile>[
+        XFile('/falso/a.jpg', name: 'a.jpg'),
+        XFile('/falso/b.png', name: 'b.png'),
+        XFile('/falso/c.webp', name: 'c.webp'),
+      ]);
+      ImagePickerPlatform.instance = picker;
+    });
+
+    tearDown(() => ImagePickerPlatform.instance = original);
+
+    testWidgets('el Clip abre el selector multiple y deja las 3 adjuntas', (
+      tester,
+    ) async {
+      final vm = await loadedVm([userJson('msg_u1', 'hola'), richTurn()]);
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      // Antes de tocar el Clip no hay tira de adjuntos.
+      expect(
+        find.byKey(ChatComposer.attachmentsKey),
+        findsNothing,
+        reason: 'la tira de adjuntos no deberia existir todavia',
+      );
+
+      await tester.tap(find.byKey(ChatComposer.attachKey));
+      await tester.pumpAndSettle();
+
+      // **La** asercion que muerde: si vuelve `pickImage`, `getImage` lanza y
+      // `lastCall` dice cual de los dos caminos se tomo.
+      expect(
+        picker.lastCall,
+        anyOf('getMultiImageWithOptions', 'getMultiImage'),
+        reason:
+            'el Clip tiene que pedir la seleccion MULTIPLE. Termino en '
+            '${picker.lastCall}, que es el camino de una sola foto.',
+      );
+      expect(picker.multiCalls, 1);
+      // 3 fotos elegidas -> 3 adjuntos: ni 1 ni 0.
+      expect(find.byKey(ChatComposer.attachmentsKey), findsOneWidget);
+      expect(find.byKey(ChatComposer.attachmentThumbKey(0)), findsOneWidget);
+      expect(find.byKey(ChatComposer.attachmentThumbKey(2)), findsOneWidget);
+      expect(find.byKey(ChatComposer.attachmentThumbKey(3)), findsNothing);
+    });
+
+    testWidgets('elegir fotos dos veces ACUMULA y no reemplaza', (
+      tester,
+    ) async {
+      final vm = await loadedVm([userJson('msg_u1', 'hola'), richTurn()]);
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      await tester.tap(find.byKey(ChatComposer.attachKey));
+      await tester.pumpAndSettle();
+      expect(find.byKey(ChatComposer.attachmentThumbKey(2)), findsOneWidget);
+
+      // La segunda tanda son las mismas 3. Si `_pending` se reemplazara en vez
+      // de acumular, el indice 2 seguiria existiendo y el 5 no.
+      await tester.tap(find.byKey(ChatComposer.attachKey));
+      await tester.pumpAndSettle();
+
+      expect(picker.multiCalls, 2);
+      expect(find.byKey(ChatComposer.attachmentThumbKey(5)), findsOneWidget);
+      expect(find.byKey(ChatComposer.attachmentThumbKey(6)), findsNothing);
+    });
+
+    testWidgets('un archivo que no es imagen se rechaza y lo demas pasa', (
+      tester,
+    ) async {
+      picker = _FakePicker(<XFile>[
+        XFile('/falso/a.jpg', name: 'a.jpg'),
+        XFile('/falso/notas.txt', name: 'notas.txt'),
+      ]);
+      ImagePickerPlatform.instance = picker;
+
+      final vm = await loadedVm([userJson('msg_u1', 'hola'), richTurn()]);
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      await tester.tap(find.byKey(ChatComposer.attachKey));
+      await tester.pumpAndSettle();
+
+      // La buena se admite y la mala no: el filtro es por extension.
+      expect(find.byKey(ChatComposer.attachmentThumbKey(0)), findsOneWidget);
+      expect(find.byKey(ChatComposer.attachmentThumbKey(1)), findsNothing);
+      // Y el rechazo se avisa **una** vez, no uno por archivo.
+      expect(
+        find.text('1 de 2 no se adjuntaron: no son imágenes.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('la x de un thumb borra solo ese y no los otros', (
+      tester,
+    ) async {
+      final vm = await loadedVm([userJson('msg_u1', 'hola'), richTurn()]);
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      await tester.tap(find.byKey(ChatComposer.attachKey));
+      await tester.pumpAndSettle();
+      expect(find.byKey(ChatComposer.attachmentThumbKey(2)), findsOneWidget);
+
+      // La `x` es un `InkWell` de 16 px sobre el thumb: se toca por coordenada
+      // relativa al thumb, no por key, porque no tiene key propia.
+      final x = tester.getTopLeft(
+        find.byKey(ChatComposer.attachmentThumbKey(1)),
+      );
+      await tester.tapAt(x + const Offset(40, 0));
+      await tester.pumpAndSettle();
+
+      // El de en medio se fue; el de abajo **sube** de lugar, no se corre a la
+      // izquierda: son dos elementos, no tres con un hueco.
+      expect(find.byKey(ChatComposer.attachmentThumbKey(0)), findsOneWidget);
+      expect(find.byKey(ChatComposer.attachmentThumbKey(1)), findsOneWidget);
+      expect(find.byKey(ChatComposer.attachmentThumbKey(2)), findsNothing);
+    });
+
+    testWidgets('mandar 3 fotos NO las manda dos veces', (tester) async {
+      // **El doble envio que se escondia.** Mientras el composer no recibia
+      // `attachments`, `onSend` mergeaba `_pending` con lo que el composer le
+      // devolvia (que era `[]`), asi que nunca se noto. Al conectar
+      // `attachments`, cada foto fue **dos** veces al server: mismo uri, mismo
+      // nombre, doble payload, y el modelo recibia cada foto repetida.
+      final bodies = <Map<String, Object?>>[];
+      final vm = ChatViewModel(
+        ApiClient(
+          config: kConfig,
+          client: MockClient((req) async {
+            if (req.method == 'POST' && req.url.path.endsWith('/prompt')) {
+              bodies.add(jsonDecode(req.body) as Map<String, Object?>);
+            }
+            return http.Response(
+              jsonEncode({'data': <Object?>[]}),
+              200,
+              headers: const {'content-type': 'application/json'},
+            );
+          }),
+        ),
+        sessionId: kSessionId,
+        sessionInfo: kSession,
+        streamFactory: (config, directory) => SilentSource(),
+      );
+      await vm.load();
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      await tester.tap(find.byKey(ChatComposer.attachKey));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(ChatComposer.inputKey), 'mira esto');
+      await tester.pump();
+      await tester.tap(find.byKey(ChatComposer.sendKey));
+      await tester.pumpAndSettle();
+
+      expect(bodies, hasLength(1), reason: 'un solo POST a /prompt');
+      final files = (bodies.single['files']! as List)
+          .cast<Map<String, Object?>>();
+      expect(files, hasLength(3), reason: '3 fotos, no 6');
+      // El `name` que se manda es `XFile.name`, que en `cross_file` se deriva
+      // del path (`path.split(pathSeparator).last`, el `name:` del constructor
+      // esta **ignorado**). En el host de test el separador es `\`, asi que la
+      // ruta falsa queda entera; en Android sale `a.jpg`. Lo que importa aqui
+      // es el orden y que ninguna se repita.
+      expect(
+        files.map((f) => f['name']),
+        <String>['/falso/a.jpg', '/falso/b.png', '/falso/c.webp'],
+        reason: 'el orden es el del picker, sin repetir',
+      );
+    });
   });
 }
