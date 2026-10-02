@@ -60,11 +60,12 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 | D4 | POST del prompt y después escuchar; el POST no devuelve el turno |
 | D5 | Bottom nav de 4 destinos + hojas inferiores |
 | D6 | Tokens y **variantes de tema** reusados del escritorio (espejo de `tokens.css`) |
-| D7 | Deps directos: `http`, `flutter_secure_storage`, `speech_to_text`, `flutter_svg`, `shared_preferences`, `flutter_markdown_plus`, `connectivity_plus`, `image_picker`, `video_player`, `pdfrx`, `html`, `url_launcher` |
+| D7 | Deps directos: `http`, `flutter_secure_storage`, `speech_to_text`, `flutter_svg`, `shared_preferences`, `flutter_markdown_plus`, `highlight`, `connectivity_plus`, `image_picker`, `video_player`, `pdfrx`, `html`, `url_launcher`. De test: `image_picker_platform_interface` y `plugin_platform_interface`, para fchear la plataforma del Clip |
 | D8 | Los 3 canales de error visibles (el escritorio se come `session.error`) |
 | D9 | Modo de bajo consumo **automático** sólo con red celular; el usuario puede desactivarlo a mano |
 | D10 | Autoupdate contra el manifiesto de la release, sin diálogos ni bloqueos |
 | D11 | El visor de archivos decide **por extensión**, no por el botón que se apretó: `domain/models/file_type.dart` + `ui/features/files/file_preview.dart` |
+| D12 | El Clip abre el selector **multiple** (`pickMultiImage`): las fotos se acumulan en `_pending`, se ven en la tira del composer y se manda **una sola** lista. El shell es el unico que pasa `attachments` y `onRemoveAttachment`; `onSend` no las vuelve a mezclar |
 
 ## Contrato: lo que hay que no olvidar
 

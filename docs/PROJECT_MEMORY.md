@@ -499,3 +499,42 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   la ternaria a 20 donde estaba a 22. Se resuelve editando por **rango de lineas** con
   un ancla buscada por contenido.
 - Estado: `flutter analyze` limpio, **865 tests verdes (6 skipped)**.
+## 2026-10-02 - Adjuntar varias fotos de una vez (1.12.0+18)
+
+- El Clip usaba `ImagePicker().pickImage`, que devuelve **un** `XFile`. El selector
+  de Android colgado de ahi no deja marcar mas de una: habia que apretar el Clip N
+  veces para N fotos. Ahora `pickMultiImage`, que abre el modo multiple, y la tanda
+  **se agrega** a `_pending` en vez de reemplazar.
+- Los no-imagen se rechazan por extension y se avisa **una** vez, no uno por archivo.
+- **Dos cosas mas estaban rotas y no se veian**, y aparecieron al conectar el
+  composer: (a) `ChatComposer` nunca recibia `attachments:`, asi que las fotos se
+  mandaban bien pero no se veian, y la `x` de cada thumb no hacia nada porque
+  `onRemoveAttachment` era `null` y el `?.call` se comia el toque en silencio;
+  (b) el `onSend` mergeaba `[..._pending, ...files]`, que con `attachments` ya
+  conectado mandaba **cada foto dos veces** (mismo uri, mismo nombre, doble
+  payload). Ahora `onSend` usa la lista que el composer ya devuelve: una sola
+  fuente de verdad y la duplicacion deja de ser representable.
+- Guardas: 5 tests en `test/chat_render_test.dart`, grupo `adjuntar varias fotos de
+  una`, fcheando `ImagePickerPlatform.instance` y montando el `ChatView` real. Los
+  cuatro caminos rotos a proposito: `pickMultiImage`->`pickImage` caen los 5; sin
+  `attachments:` caen los 5; el merge de vuelta cae 1 ("3 fotos, no 6"); sin
+  `onRemoveAttachment` cae 1 (la `x`).
+- **Trampa de `plugin_platform_interface`**: asignar `ImagePickerPlatform.instance`
+  con una clase que use `implements` **falla un assert** ("Platform interfaces must
+  not be implemented with `implements`"). Hace falta `extends` + `MockPlatformInterfaceMixin`.
+- **Trampa de `cross_file`**: `XFile(path, name: 'a.jpg')` **ignora** el `name`; sale
+  de `path.split(pathSeparator).last`. En el host de test el separador es `\`, asi que
+  una ruta con `/` no se parte y el `name` sale entero: artefacto de Windows, no un
+  bug de Android, y el test lo dice para que nadie lo "arregle".
+- `ChatComposer.attachmentThumbKey(i)` es nueva: el thumb va en un `KeyedSubtree`
+  porque dos tandas pueden traer el mismo archivo y hace falta poder afirmar "hay 6"
+  y "el septimo no existe".
+- `pubspec.yaml`: `image_picker_platform_interface` y `plugin_platform_interface`
+  pasan a `dev_dependencies` (ya eran transitivos) porque el test los importa.
+- Pendiente sin tocar: la **tabla** del markdown sigue con
+  `tableColumnWidth: IntrinsicColumnWidth()`, que en 360 px manda la tabla a scroll
+  lateral sin envolver. El fix medido es `FlexColumnWidth()` + fondo en el
+  encabezado + `tableVerticalAlignment: top`, en `message_bubble.dart` L736-744.
+  Tambien sigue sin tocarse el aviso de modo de bajo consumo, que molesta.
+- Estado: `flutter analyze lib` sin errores ni warnings, **870 tests verdes (6
+  skipped)**, publicado 1.12.0+18 (30.023.625 B, 12 intents / 12 actions).
