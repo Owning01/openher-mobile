@@ -152,6 +152,12 @@ class ChatComposer extends StatefulWidget {
   static const Key suggestionItemKey = Key('composer-suggestion-item');
   static const Key suggestionEmptyKey = Key('composer-suggestion-empty');
 
+  /// El thumb del adjunto [i]. Por indice, no por `ValueKey(archivo)`: dos
+  /// tandas pueden traer el mismo nombre y el test necesita poder afirmar "hay
+  /// 6" y "el septimo no existe", que es justo lo que se rompió cuando el
+  /// Clip solo dejaba elegir una foto.
+  static Key attachmentThumbKey(int i) => Key('composer-attachment-$i');
+
   /// Los tres nombres de acción local, sin barra. Ver [kLocalActions] para por
   /// qué existen aunque el server no los anuncie.
   static const String kSlashCompact = 'compact';
@@ -444,7 +450,10 @@ class _ChatComposerState extends State<ChatComposer> {
             scrollDirection: Axis.horizontal,
             itemCount: widget.attachments.length,
             separatorBuilder: (_, _) => const SizedBox(width: AppSpacing.sm),
-            itemBuilder: (context, i) => _thumb(widget.attachments[i]),
+            itemBuilder: (context, i) => KeyedSubtree(
+              key: ChatComposer.attachmentThumbKey(i),
+              child: _thumb(widget.attachments[i]),
+            ),
           ),
         ),
       ),
@@ -514,7 +523,7 @@ class _ChatComposerState extends State<ChatComposer> {
               child: AppIconButton(
                 key: ChatComposer.attachKey,
                 icon: 'paperclip',
-                tooltip: 'Adjuntar (Ctrl+V pega imágenes)',
+                tooltip: 'Adjuntar fotos (Ctrl+V pega imágenes)',
                 onPressed: widget.onAttach,
                 size: 20,
                 tapSize: 32,

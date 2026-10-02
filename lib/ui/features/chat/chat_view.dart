@@ -670,15 +670,32 @@ class _ChatViewState extends State<ChatView> {
         // Los adjuntos van con el prompt y se vacian recien cuando el envio
         // se admite: si falla, el usuario los conserva y reintenta sin
         // volver a elegirlos.
+        //
+        // **No** se vuelve a mezclar `_pending` adentro: el composer ya los
+        // recibe en `attachments` y los devuelve en `files`. Agregarlos otra
+        // vez mandaba cada foto **dos veces** (mismo uri, mismo nombre) — no se
+        // notaba porque `attachments` nunca se paso y la tira no se veia.
         onSend: (text, files) {
-          final all = [..._pending, ...files];
-          _vm.send(text, files: [for (final f in all) f.toPromptFile()]);
+          _vm.send(text, files: [for (final f in files) f.toPromptFile()]);
           if (_vm.error == null) setState(() => _pending = []);
         },
         onStop: _vm.abort,
         onPickModel: _openModelSheet,
         onPickAgent: _openAgentSheet,
         onAttach: _pickAttachment,
+        // El composer **no recibia** los adjuntos: se elegian fotos y se
+        // mandaban bien (por el merge de `onSend`) pero no se veian nunca, y
+        // la `x` de cada thumb no hacia nada porque `onRemoveAttachment` era
+        // `null` y el `?.call` se comia el toque en silencio.
+        attachments: _pending,
+        onRemoveAttachment: (a) => setState(
+          // Por identidad, no por valor: dos tandas pueden traer el mismo
+          // nombre de archivo y la `x` tiene que borrar solo el que se toco.
+          () => _pending = [
+            for (final f in _pending)
+              if (!identical(f, a)) f,
+          ],
+        ),
         suggestions: _suggestions,
         suggestionsLoading: _suggestionsLoading,
         onTrigger: _onTrigger,
@@ -713,11 +730,12 @@ class _ChatViewState extends State<ChatView> {
 
   void _onTrigger(ComposerTrigger? t) {
     if (t == null) {
-      if (_trigger != null) setState(() {
-        _trigger = null;
-        _suggestions = const [];
-        _suggestionsLoading = false;
-      });
+      if (_trigger != null)
+        setState(() {
+          _trigger = null;
+          _suggestions = const [];
+          _suggestionsLoading = false;
+        });
       return;
     }
     // Cambió el disparador: se olvida el fallo anterior, porque el nuevo puede
@@ -950,10 +968,7 @@ class _ChatViewState extends State<ChatView> {
     switch (id) {
       case 'compact':
         try {
-          await _vm.api.compactSession(
-            _vm.sessionId,
-            directory: _vm.directory,
-          );
+          await _vm.api.compactSession(_vm.sessionId, directory: _vm.directory);
           await _vm.refresh();
         } catch (e) {
           _vm.reportError('No se pudo compactar: $e');
@@ -962,10 +977,7 @@ class _ChatViewState extends State<ChatView> {
         await _revert();
       case 'redo':
         try {
-          await _vm.api.commitRevert(
-            _vm.sessionId,
-            directory: _vm.directory,
-          );
+          await _vm.api.commitRevert(_vm.sessionId, directory: _vm.directory);
           await _vm.refresh();
         } catch (e) {
           _vm.reportError('No se pudo rehacer: $e');
@@ -1146,10 +1158,7 @@ class _ChatViewState extends State<ChatView> {
             // "Tokens de entrada" era el acumulado de la sesión, y por eso no
             // se podía llamar "contexto": son dos cosas distintas y la app las
             // mostraba con el mismo número. Acá cada una con su nombre.
-            _Stat(
-              label: 'Contexto actual',
-              value: '${_vm.contextTokens} tok',
-            ),
+            _Stat(label: 'Contexto actual', value: '${_vm.contextTokens} tok'),
             _Stat(
               label: 'Contexto',
               value: contextLabel(
@@ -1193,28 +1202,50 @@ class _ChatViewState extends State<ChatView> {
   /// El rótulo del pill de agente, con el mismo criterio.
   String get _agentLabel => AgentCatalog.labelFor(_agents, _vm.currentAgent);
 
-  /// Elige una imagen y la deja como adjunto pendiente.
+  /// Elige **varias** imagenes y las deja como adjuntos pendientes.
   ///
   /// El boton existia desde el primer dia pero `onAttach` **no lo pasaba
   /// nadie**, igual que el microfono: el clip se apretaba y no pasaba nada.
   /// El prompt las acepta (`files: [{uri, name, mime}]` en la raiz del
   /// body, medido).
+  ///
+  /// Usa `pickMultiImage` y no `pickImage`: la primera devuelve un unico
+  /// `XFile`, y el selector de Android colgado de ahi **no deja marcar mas de
+  /// una foto** — habia que apretar el Clip N veces para N fotos. La segunda
+  /// abre el selector en modo multiple y devuelve la lista entera de una.
   Future<void> _pickAttachment() async {
     try {
-      final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
-      if (picked == null) return;
-      final mime = _mimeOf(picked.path);
-      if (mime == null) {
-        _vm.reportError('Ese archivo no es una imagen.');
+      final picked = await ImagePicker().pickMultiImage();
+      if (picked.isEmpty) return;
+      final nuevos = <ComposerAttachment>[];
+      var rechazadas = 0;
+      for (final f in picked) {
+        final mime = _mimeOf(f.path);
+        if (mime == null) {
+          rechazadas++;
+          continue;
+        }
+        nuevos.add(ComposerAttachment(name: f.name, mime: mime, uri: f.path));
+      }
+      if (nuevos.isEmpty) {
+        _vm.reportError(
+          rechazadas == 1
+              ? 'Ese archivo no es una imagen.'
+              : 'Ninguno de esos $rechazadas archivos es una imagen.',
+        );
         return;
       }
       if (!mounted) return;
-      setState(() {
-        _pending = [
-          ..._pending,
-          ComposerAttachment(name: picked.name, mime: mime, uri: picked.path),
-        ];
-      });
+      // Se **agregan** a lo que ya estaba, no lo reemplazan: marcar tres fotos
+      // son tres adjuntos, que es lo que uno espera cuando las elige juntas.
+      setState(() => _pending = [..._pending, ...nuevos]);
+      // **Un** aviso, no uno por archivo: con 6 fotos y 3 no admitidas no
+      // queres tres snackbars apilados tapando el composer.
+      if (rechazadas > 0) {
+        _vm.reportError(
+          '$rechazadas de ${picked.length} no se adjuntaron: no son imágenes.',
+        );
+      }
     } catch (e) {
       _vm.reportError('No se pudo adjuntar la imagen: $e');
     }
