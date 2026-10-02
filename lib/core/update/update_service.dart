@@ -94,12 +94,30 @@ class UpdateState {
   /// Vive acá y no en el widget para que sea **una sola** regla: si el
   /// widget decidiera por su cuenta, un `checking` bastaría para que aparezca
   /// una franja vacía en cada arranque de la app.
+  ///
+  /// Ojo: esto es la regla **por fase**. Un `failed` no se ve *aca*, pero un
+  /// fallo de descarga sí se ve por [canRetry], porque hay algo que hacer.
   static bool showsBannerFor(UpdatePhase phase) =>
       phase == UpdatePhase.available ||
       phase == UpdatePhase.downloading ||
       phase == UpdatePhase.ready;
 
-  bool get showsBanner => showsBannerFor(phase);
+  /// ¿Se puede volver a bajar el APK?
+  ///
+  /// Es la diferencia entre los **dos** fallos que existen y que antes se
+  /// trataban igual:
+  ///
+  /// - **Falló el chequeo** (`info == null`): no hay manifest, no hay URL, no
+  ///   hay nada que descargar. Un botón acá no serviría de nada, así que la
+  ///   banda sigue oculta.
+  /// - **Falló la descarga** (`info != null`): sabemos exactamente qué bajar y
+  ///   el archivo quedó a medias en el disco. Un APK de 30 MB en datos móviles
+  ///   se corta seguido, y sin botón el usuario se queda sin update hasta que
+  ///   cierre y vuelva a abrir la app — o sea, hasta que reinicie el chequeo.
+  bool get canRetry =>
+      phase == UpdatePhase.failed && info != null && error != null;
+
+  bool get showsBanner => showsBannerFor(phase) || canRetry;
 
   /// Descarga 0/0 no debe pintar progreso indeterminado: el total sólo se
   /// conoce cuando el server manda `Content-Length`.
@@ -264,6 +282,15 @@ class UpdateService extends ChangeNotifier {
       final file = File('$dir/openher-${info.version}.apk');
       // Reanudar una descarga a medio hacer no vale la pena (el servidor no
       // negocia rangos de forma fiable): se pisa el archivo.
+      //
+      // Y si la descarga **no llega a terminarse**, el archivo se borra. Sin
+      // esto un corte a mitad deja un archivo con el nombre correcto que, si
+      // pasó de los 2 MB de [_minApkBytes], el próximo arranque lo da por bueno
+      // con [_alreadyDownloaded]: el instalador recibiría un APK truncado y
+      // fallaría sin explicar nada. Con el botón de reintentar el camino queda
+      // todavía más fácil de alcanzar, así que el borrado va acá y no depende
+      // de que alguien se acuerde de limpiar.
+      var completo = false;
       final sink = file.openWrite();
       try {
         final req = http.Request('GET', Uri.parse(info.apkUrl));
@@ -299,8 +326,10 @@ class UpdateService extends ChangeNotifier {
             ),
           );
         }
+        completo = true;
       } finally {
         await sink.close();
+        if (!completo) await _borrarSiExiste(file);
       }
       _emit(
         _state.copyWith(phase: UpdatePhase.ready, received: file.lengthSync()),
@@ -309,6 +338,20 @@ class UpdateService extends ChangeNotifier {
     } catch (e) {
       _emit(_state.copyWith(phase: UpdatePhase.failed, error: '$e'));
       return false;
+    }
+  }
+
+  /// Borra el archivo a medias de una descarga cortada.
+  ///
+  /// Nunca tira: si el borrado falla, el piso de tamaño de [_minApkBytes]
+  /// sigue siendo la segunda barrera, y un archivo que no se puede borrar es
+  /// un problema del sistema de archivos, no del update.
+  Future<void> _borrarSiExiste(File file) async {
+    try {
+      if (file.existsSync()) await file.delete();
+    } on FileSystemException {
+      // Sin logger a mano en el service: el estado ya quedó en `failed` con el
+      // error real, que es lo que el usuario ve.
     }
   }
 

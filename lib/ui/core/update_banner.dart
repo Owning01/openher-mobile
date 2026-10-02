@@ -5,10 +5,13 @@ import 'app_icon.dart';
 
 /// Banda de autoupdate. **No bloquea**: no es un diálogo, no detiene la app y
 /// no se roba el foco. Aparece arriba, se puede descartar con la `x`, y si la
-/// descarga falla desaparece sola en vez de insistir.
+/// **descarga** falla se queda con un botón de **Volver a descargar** en vez de
+/// desaparecer.
 ///
-/// Se oculta sola en `idle`, `checking` y `failed`: en esos estados no hay
-/// nada que el usuario pueda hacer ni nada que haya que contarle.
+/// Se oculta sola en `idle`, `checking` y en el fallo del **chequeo**: en esos
+/// estados no hay nada que el usuario pueda hacer ni nada que haya que
+/// contarle. La descarga cortada es el único caso donde sí hay algo que hacer
+/// ([UpdateState.canRetry]).
 class UpdateBanner extends StatelessWidget {
   const UpdateBanner({
     super.key,
@@ -17,6 +20,10 @@ class UpdateBanner extends StatelessWidget {
     required this.onInstall,
     required this.onDismiss,
   });
+
+  /// El botón de reintento. Por key y no por texto: el rótulo puede cambiar con
+  /// el tamaño de pantalla sin que el test pierda el botón.
+  static const Key retryKey = Key('update-retry');
 
   final UpdateState state;
   final VoidCallback onDownload;
@@ -82,6 +89,24 @@ class UpdateBanner extends StatelessWidget {
                       : onDownload,
                 ),
               ],
+              // El reintento. Solo aparece si la descarga se pudo empezar y se
+              // corto (`canRetry`): un fallo del chequeo no tiene URL, asi que
+              // no hay nada que volver a bajar y un boton ahi seria mentir.
+              //
+              // Sin esto el usuario se quedaba sin update hasta cerrar y volver
+              // a abrir la app, que es lo único que reiniciaba el chequeo.
+              if (state.canRetry) ...[
+                const SizedBox(height: 2),
+                _Action(
+                  label: 'Volver a descargar',
+                  icon: 'refresh',
+                  onPressed: onDownload,
+                  // `key` propio: el botón tiene que ser alcanzable por
+                  // nombre, y hay otro `_Action` en esta misma columna con la
+                  // misma forma.
+                  key: UpdateBanner.retryKey,
+                ),
+              ],
             ],
           ),
         ),
@@ -98,6 +123,11 @@ class UpdateBanner extends StatelessWidget {
     UpdatePhase.downloading => _downloading,
     UpdatePhase.ready =>
       'OpenHer ${state.info?.version ?? ''} lista para instalar',
+    // El motivo va en la banda, no en un toast que se va solo: el usuario va a
+    // mirar la banda justo cuando decide si reintentar, y ahí está el dato.
+    UpdatePhase.failed when state.canRetry =>
+      'No se pudo descargar OpenHer ${state.info?.version ?? ''} · '
+          '${state.error ?? 'sin detalle'}',
     _ =>
       'Hay OpenHer ${state.info?.version ?? ''} disponible'
           '${state.info?.notes.isNotEmpty == true ? ' · ${state.info!.notes}' : ''}',
@@ -114,6 +144,7 @@ class UpdateBanner extends StatelessWidget {
 /// que rompería el ritmo de una línea de 28 px).
 class _Action extends StatelessWidget {
   const _Action({
+    super.key,
     required this.label,
     required this.icon,
     required this.onPressed,

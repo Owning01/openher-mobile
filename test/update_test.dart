@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -204,6 +206,46 @@ void main() {
       expect(shows(UpdatePhase.ready), isTrue);
     });
 
+    // `showsBannerFor` es la regla **por fase** y sigue igual: un fallo de
+    // `failed` a secas no se muestra. Lo que lo cambia es `canRetry`, que sí
+    // necesita mirar si hay `info`: son dos fallos distintos y antes se
+    // trataban como uno.
+    group('un fallo se puede reintentar sólo si hay algo que bajar', () {
+      test('falló la descarga: hay info, se puede volver a bajar', () {
+        const s = UpdateState(
+          phase: UpdatePhase.failed,
+          error: 'SocketException: corte',
+          info: UpdateInfo(
+            version: '1.1.0',
+            versionCode: 2,
+            apkUrl: 'https://example.test/app-release.apk',
+          ),
+        );
+        expect(s.canRetry, isTrue);
+        expect(s.showsBanner, isTrue);
+      });
+
+      test('falló el chequeo: no hay info, no hay nada que reintentar', () {
+        // Sin manifest no hay URL, y sin URL un botón "Volver a descargar"
+        // sería un botón que no puede hacer nada.
+        const s = UpdateState(phase: UpdatePhase.failed, error: 'HTTP 500');
+        expect(s.canRetry, isFalse);
+        expect(s.showsBanner, isFalse);
+      });
+
+      test('sin error no se ofrece reintentar', () {
+        const s = UpdateState(
+          phase: UpdatePhase.failed,
+          info: UpdateInfo(
+            version: '1.1.0',
+            versionCode: 2,
+            apkUrl: 'https://example.test/app-release.apk',
+          ),
+        );
+        expect(s.canRetry, isFalse, reason: 'no hay motivo que contar');
+      });
+    });
+
     test('en `idle` la banda no ocupa ni un píxel', () {
       const banner = UpdateBanner(
         state: UpdateState(),
@@ -213,7 +255,195 @@ void main() {
       );
       expect(banner.visible, isFalse);
     });
+
+    // Un APK de 30 MB en datos móviles se corta seguido. Sin botón de reintento
+    // el usuario se queda sin update hasta cerrar y reabrir la app, que es lo
+    // único que reiniciaba el chequeo.
+    testWidgets('con la descarga cortada aparece el botón de volver a bajar', (
+      tester,
+    ) async {
+      var descargas = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: UpdateBanner(
+              state: const UpdateState(
+                phase: UpdatePhase.failed,
+                error: 'SocketException: se perdió la conexión',
+                info: UpdateInfo(
+                  version: '1.1.0',
+                  versionCode: 2,
+                  apkUrl: 'https://example.test/app-release.apk',
+                ),
+              ),
+              onDownload: () => descargas++,
+              onInstall: () {},
+              onDismiss: () {},
+            ),
+          ),
+        ),
+      );
+
+      expect(find.byKey(UpdateBanner.retryKey), findsOneWidget);
+      expect(find.text('Volver a descargar'), findsOneWidget);
+      // El motivo va **en la banda**: el usuario mira la banda justo cuando
+      // decide si reintentar, y ahí es donde tiene que estar el dato.
+      expect(find.textContaining('se perdió la conexión'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(TextButton, 'Volver a descargar'));
+      await tester.pump();
+      expect(descargas, 1, reason: 'el botón tiene que reintentar la descarga');
+      // Y no puede instalar: no hay archivo.
+      expect(find.text('Instalar'), findsNothing);
+    });
+
+    testWidgets('con el chequeo fallido NO aparece el botón', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: UpdateBanner(
+              state: const UpdateState(
+                phase: UpdatePhase.failed,
+                error: 'HTTP 500',
+              ),
+              onDownload: () {},
+              onInstall: () {},
+              onDismiss: () {},
+            ),
+          ),
+        ),
+      );
+      expect(find.byKey(UpdateBanner.retryKey), findsNothing);
+      expect(find.text('Volver a descargar'), findsNothing);
+    });
   });
+
+  // ─────────────────────── el archivo a medias en el disco ───────────────────
+
+  group('una descarga cortada no deja un archivo que parezca completo', () {
+    late Directory dir;
+
+    setUp(() {
+      dir = Directory.systemTemp.createTempSync('openher-update');
+      addTearDown(() {
+        if (dir.existsSync()) dir.deleteSync(recursive: true);
+      });
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('ai.openher/install'),
+            (call) async => call.method == 'updatesDir' ? dir.path : null,
+          );
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              const MethodChannel('ai.openher/install'),
+              null,
+            ),
+      );
+    });
+
+    File apk() => File('${dir.path}${Platform.pathSeparator}openher-1.1.0.apk');
+
+    test('la descarga se corta a mitad y el archivo se borra', () async {
+      // **Por qué importa.** Sin el borrado queda un archivo con el nombre
+      // correcto. Pasa el piso de los 2 MB de `_alreadyDownloaded`, y el
+      // próximo arranque —o el reintento— lo da por bueno y saltea la descarga:
+      // el instalador recibe un APK truncado y falla sin explicar nada.
+      final s = _servicio(_ManifestoYApk(cortaApkEnElIntento: 1));
+      expect(await s.check(), isTrue);
+      expect(await s.download(), isFalse);
+      expect(s.state.phase, UpdatePhase.failed);
+      expect(
+        apk().existsSync(),
+        isFalse,
+        reason: 'un archivo de 3 MB con el nombre del APK es un APK truncado',
+      );
+    });
+
+    test('una descarga que termina sí deja el archivo', () async {
+      // El otro lado del mismo invariante: si el borrado fuera incondicional,
+      // la app nunca podría instalar y esto no lo denunciaría nadie.
+      final s = _servicio(_ManifestoYApk(cortaApkEnElIntento: 0));
+      expect(await s.check(), isTrue);
+      expect(await s.download(), isTrue);
+      expect(s.state.phase, UpdatePhase.ready);
+      expect(apk().existsSync(), isTrue);
+    });
+
+    test('reintentar tras un corte vuelve a bajar y queda lista', () async {
+      final cliente = _ManifestoYApk(cortaApkEnElIntento: 1);
+      final s = _servicio(cliente);
+      expect(await s.check(), isTrue);
+      expect(await s.download(), isFalse, reason: 'el primer intento se corta');
+      expect(s.state.canRetry, isTrue, reason: 'y se puede volver a intentar');
+
+      expect(await s.download(), isTrue, reason: 'el segundo va completo');
+      expect(s.state.phase, UpdatePhase.ready);
+      // **Volver a descargar es volver a pegarle al server**, no aceptar lo que
+      // quedó en el disco. Sin esta cuenta el test pasa aunque el reintento se
+      // salte la descarga por el archivo a medias y deje el APK truncado listo
+      // para instalar: `intentosApk` se quedaría en 1.
+      expect(
+        cliente.intentosApk,
+        2,
+        reason:
+            'el reintento tiene que descargar de nuevo, no aceptar el parcial',
+      );
+      expect(apk().existsSync(), isTrue);
+    });
+  });
+}
+
+/// El servicio de los tests de disco: el canal nativo de `updatesDir` lo
+/// mockea el `setUp` del grupo.
+UpdateService _servicio(http.Client cliente) =>
+    UpdateService(client: cliente, fallbackVersionCode: 1)
+      ..manifestUrl = Uri.parse('https://example.test/latest.json');
+
+/// Cliente que responde el **manifiesto** con el JSON de siempre y el **APK**
+/// con un stream que se puede cortar.
+///
+/// Hace falta uno propio porque `MockClient` devuelve la respuesta entera de
+/// una: nunca falla en el medio del `await for`, que es exactamente donde se
+/// corta una descarga en producción.
+class _ManifestoYApk extends http.BaseClient {
+  _ManifestoYApk({required this.cortaApkEnElIntento});
+
+  /// En qué intento del APK se corta. `0` = nunca (la descarga va entera).
+  final int cortaApkEnElIntento;
+
+  static const int _bytesApk = 3 * 1024 * 1024;
+
+  int intentosApk = 0;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final url = request.url.toString();
+    if (url.endsWith('.json')) {
+      final cuerpo = utf8.encode(manifest({}));
+      return http.StreamedResponse(
+        Stream<List<int>>.value(cuerpo),
+        200,
+        contentLength: cuerpo.length,
+        request: request,
+      );
+    }
+    intentosApk++;
+    final hayQueCortar = intentosApk == cortaApkEnElIntento;
+    Stream<List<int>> flujo() async* {
+      yield List<int>.filled(_bytesApk, 0x41);
+      if (hayQueCortar) throw const SocketException('corte a mitad');
+    }
+
+    return http.StreamedResponse(
+      flujo(),
+      200,
+      // Promete el doble de lo que manda cuando corta: el `Content-Length` no
+      // es la defensa, el borrado del archivo sí.
+      contentLength: hayQueCortar ? _bytesApk * 2 : _bytesApk,
+      request: request,
+    );
+  }
 }
 
 void _noop() {}
