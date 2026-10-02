@@ -25,6 +25,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import 'composer_suggestions.dart';
 import 'package:image_picker/image_picker.dart';
@@ -237,6 +238,9 @@ class _ChatViewState extends State<ChatView> {
     _scroll
       ..removeListener(_onScroll)
       ..dispose();
+    // El controller del input lo creo yo, asi que lo libero yo: el composer
+    // solo lo `dispose()`a cuando es el suyo.
+    _composerController.dispose();
     super.dispose();
   }
 
@@ -527,6 +531,13 @@ class _ChatViewState extends State<ChatView> {
               onRetrySend: _vm.retrySend,
               // Sólo este assistant puede pintar puntos de escritura.
               isOpenAssistant: message.id == _vm.openAssistantId,
+              // El menu del mensaje (Copiar, Deshacer). Sin esto no habia
+              // forma de copiar un mensaje entero, y solo se podia copiar una
+              // parte si se seleccionaba a mano: el `Text` del mensaje del
+              // usuario ni siquiera era seleccionable.
+              onMenu: _canMenu(message)
+                  ? () => _openMessageMenu(message)
+                  : null,
             ),
           );
         },
@@ -701,6 +712,9 @@ class _ChatViewState extends State<ChatView> {
         onTrigger: _onTrigger,
         onCommand: _runServerCommand,
         onLocalAction: _runLocalAction,
+        // El canal por el que un "deshacer" devuelve al input lo que el
+        // usuario habia escrito.
+        controller: _composerController,
       ),
     );
   }
@@ -988,26 +1002,108 @@ class _ChatViewState extends State<ChatView> {
   /// El Deshacer: `revert/stage` + `revert/commit`. No es un undo de un paso
   /// (medido: no existe tal endpoint), son dos etapas, y el commit va después
   /// del stage a propósito.
-  Future<void> _revert() async {
+  Future<void> _revert() => _revertTo(_lastUserMessageId());
+
+  /// Deshace **hasta** [messageId] y, si [restore] viene, devuelve ese texto al
+  /// composer.
+  ///
+  /// El `restore` es la mitad del encargo de este método. Sin él, deshacer un
+  /// mensaje tiraba el texto con el mensaje: el server lo saca del historial y
+  /// el usuario se quedaba sin poder leer lo que habia escrito ni reenviarlo.
+  /// Con él, el mensaje desaparece del chat y sus palabras vuelven al input,
+  /// listas para corregirse y volver a mandarse — que es lo que se espera de
+  /// un "deshacer" en cualquier parte.
+  Future<void> _revertTo(String? messageId, {String? restore}) async {
     try {
-      final anchor = _lastUserMessageId();
-      if (anchor == null) {
+      if (messageId == null) {
         _vm.reportError('No hay ningun mensaje al que volver.');
         return;
       }
       await _vm.api.stageRevert(
         _vm.sessionId,
-        messageId: anchor,
+        messageId: messageId,
         directory: _vm.directory,
       );
       await _vm.api.commitRevert(_vm.sessionId, directory: _vm.directory);
       await _vm.refresh();
+      if (restore == null || restore.trim().isEmpty) return;
+      _prefillComposer(restore);
     } catch (e) {
       _vm.reportError('No se pudo deshacer: $e');
     }
   }
 
+  /// Pone texto en el input, con el cursor al final.
+  ///
+  /// **No** pide el foco a proposito: en un telefono eso abre el teclado encima
+  /// del chat justo cuando el usuario quiere mirar lo que quedo. El texto esta
+  /// a la vista, se toca el input si lo quiere editar, y el teclado no tapa nada.
+  void _prefillComposer(String text) {
+    if (!mounted) return;
+    _composerController.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+  }
+
   // ──────────────────────────── hojas ────────────────────────────
+
+  /// Qué mensajes merecen menu.
+  ///
+  /// Los del usuario: **Copiar** y **Deshacer**. Los del assistant: **Copiar**,
+  /// y nada mas — no se puede "deshacer" media respuesta sin tirar tambien todo
+  /// lo que el usuario dijo despues, y ademas el `revert/stage` exige que el
+  /// ancla sea un prompt (medido: sin `messageID` devuelve 400).
+  ///
+  /// Las pills (system, compactacion, agente) quedan afuera: copiar "Contexto
+  /// compactado" no sirve de nada.
+  bool _canMenu(SessionMessage m) => switch (m) {
+    UserMessage() => m.text.trim().isNotEmpty,
+    AssistantMessage() => m.textContent.trim().isNotEmpty,
+    _ => false,
+  };
+
+  /// El menu de un mensaje: copiar todo, y deshacer si es del usuario.
+  Future<void> _openMessageMenu(SessionMessage message) async {
+    final isUser = message is UserMessage;
+    final text = isUser
+        ? message.text
+        : (message as AssistantMessage).textContent;
+    if (text.trim().isEmpty) return;
+
+    final pick = await showModalBottomSheet<_MessageAction>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => _MessageSheet(
+        isUser: isUser,
+        onClose: () => Navigator.of(sheetContext).pop(),
+        onPick: (a) => Navigator.of(sheetContext).pop(a),
+      ),
+    );
+    if (pick == null || !mounted) return;
+
+    switch (pick) {
+      case _MessageAction.copy:
+        await _copyText(text);
+      case _MessageAction.undo:
+        await _revertTo(message.id, restore: text);
+    }
+  }
+
+  /// Copia al portapapeles y **avisa**: sin el aviso no hay forma de saber si
+  /// funciono, y un copiado silencioso que fallo se lee como que la app no
+  /// hace nada.
+  Future<void> _copyText(String text) async {
+    try {
+      await Clipboard.setData(ClipboardData(text: text));
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(
+        context,
+      )?.showSnackBar(const SnackBar(content: Text('Mensaje copiado')));
+    } catch (e) {
+      _vm.reportError('No se pudo copiar: $e');
+    }
+  }
 
   Future<void> _openActions() async {
     final action = await showModalBottomSheet<ChatSessionAction>(
@@ -1273,6 +1369,14 @@ class _ChatViewState extends State<ChatView> {
   /// con el proximo prompt.
   List<ComposerAttachment> _pending = [];
 
+  /// El input del composer, para poder devolverle texto.
+  ///
+  /// Vive en el shell y no adentro del composer porque el que sabe **qué**
+  /// texto volver es el shell: lo saca del mensaje que acaba de deshacer. Un
+  /// "deshacer" es el unico camino en el app que escribe en el input sin que
+  /// el usuario haya tocado el teclado.
+  final TextEditingController _composerController = TextEditingController();
+
   Future<void> _openModelSheet() async {
     final picked = await showModelSheet(
       context,
@@ -1484,6 +1588,115 @@ class _ActionRow extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Lo que se puede hacer con un mensaje desde su menu.
+enum _MessageAction { copy, undo }
+
+extension on _MessageAction {
+  String get label => switch (this) {
+    _MessageAction.copy => 'Copiar mensaje',
+    _MessageAction.undo => 'Deshacer y editar',
+  };
+
+  String get icon => switch (this) {
+    _MessageAction.copy => 'copy',
+    _MessageAction.undo => 'arrow-left',
+  };
+}
+
+/// El menu de un mensaje.
+///
+/// "Deshacer y editar" y no "Deshacer": el nombre dice lo que pasa. El mensaje
+/// vuelve al composer para que se pueda corregir, que es la mitad del
+/// encargo — un deshacer que borra el texto sin devolverlo deja al usuario sin
+/// ni el mensaje ni lo que habia escrito.
+///
+/// `isUser` decide si aparece el Deshacer: deshacer media respuesta del
+/// assistant no tiene a que volver a, y el `revert/stage` exige que el ancla
+/// sea un prompt.
+class _MessageSheet extends StatelessWidget {
+  const _MessageSheet({
+    required this.isUser,
+    required this.onClose,
+    required this.onPick,
+  });
+
+  final bool isUser;
+  final VoidCallback onClose;
+  final ValueChanged<_MessageAction> onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final actions = <_MessageAction>[
+      _MessageAction.copy,
+      if (isUser) _MessageAction.undo,
+    ];
+    return SafeArea(
+      top: false,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg,
+              0,
+              AppSpacing.sm,
+              AppSpacing.sm,
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Mensaje',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                ),
+                AppIconButton(
+                  icon: 'x',
+                  tooltip: 'Cerrar',
+                  onPressed: onClose,
+                  size: 20,
+                ),
+              ],
+            ),
+          ),
+          for (final action in actions)
+            Material(
+              key: ValueKey('message-action-${action.name}'),
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () => onPick(action),
+                child: SizedBox(
+                  height: 48,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.md,
+                    ),
+                    child: Row(
+                      children: [
+                        AppIcon(action.icon, size: 20, color: scheme.onSurface),
+                        const SizedBox(width: AppSpacing.md),
+                        Text(
+                          action.label,
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: scheme.onSurface,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          const SizedBox(height: AppSpacing.sm),
+        ],
       ),
     );
   }

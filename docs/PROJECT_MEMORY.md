@@ -538,3 +538,64 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   Tambien sigue sin tocarse el aviso de modo de bajo consumo, que molesta.
 - Estado: `flutter analyze lib` sin errores ni warnings, **870 tests verdes (6
   skipped)**, publicado 1.12.0+18 (30.023.625 B, 12 intents / 12 actions).
+
+## 2026-10-02 - Copiar y deshacer mensajes (1.13.0+19)
+
+- Cada mensaje con texto tiene un boton `more-horizontal` que abre una hoja con
+  **Copiar mensaje**, y en los del usuario tambien **Deshacer y editar**. El
+  menu del assistant NO ofrece deshacer: `revert/stage` exige que el ancla sea
+  un prompt (medido: sin `messageID` devuelve 400).
+- **Por que un boton y no un long-press sobre la burbuja**: el long-press sobre
+  el texto ya lo usa el sistema para seleccionar un fragmento, y los dos no
+  pueden ganar la misma arena de gestos (gana el hijo, que se registra primero).
+  Como copiar *una parte* era lo que mas se usaba, ese se queda con el
+  long-press y el menu completo va en boton explicito.
+- **Deshacer devuelve el texto al composer**: `_revertTo(id, restore: text)` saca
+  el mensaje del server (stage + commit) y empuja el texto al input por
+  `ChatComposer.controller`, un `TextEditingController` externo. Sin eso el
+  mensaje se perdia para siempre. **No** pide el foco a proposito: en un telefono
+  eso abre el teclado encima del chat justo cuando el usuario quiere mirar lo que
+  quedo.
+- **Tres cosas rotas que salieron al buscar el boton**: (a) el cuerpo del mensaje
+  del usuario era un `Text` pelado, no un `SelectableText` — el unico texto del
+  chat que no se podia seleccionar (el `SelectableText` que existia estaba en la
+  tarjeta de error); (b) el bloque de codigo era un `RichText`, que tampoco se
+  puede seleccionar, asi que el codigo era lo unico incopiable a mano; (c) no
+  habia ningun camino a copiar un mensaje entero.
+- El bloque de codigo paso a `SelectableText.rich`. **No se pierde nada del
+  comportamiento viejo**: `SelectableText` no tiene `softWrap`, pero el
+  `SingleChildScrollView` horizontal de adentro le da ancho ilimitado, asi que
+  la linea larga sigue en una y scrollea igual (medido: 18 px de alto).
+- **Trampa de conteo de colores**: `_spanForNode` **anida** los `TextSpan` (el
+  nodo de primer nivel suele ser un envoltorio sin clase de token, con el color
+  base). Contarlos con `visitChildren` de un nivel da siempre 1 y el test pasa o
+  falla por la razon equivocada. Hay que **recursar**.
+- **Trampa de fixture**: el parser se come el salto antes del fence de cierre, asi
+  que un `void main() {` queda sin llave y el resaltador de Dart no parsea nada
+  (sale plano). Con sentencias sueltas el fragmento es valido.
+- **El menu de la sesion ya tinha el patron** (`showModalBottomSheet` + filas de
+  48 px); `_MessageSheet` lo copia. `Clipboard.setData` + `showSnackBar` tambien
+  tenian antecedente (exportar). Un copiado silencioso que falla se lee como que
+  la app no hace nada, asi que el copiado **avisa**.
+- 5 tests nuevos en `chat_render_test.dart`, grupo `menu del mensaje: copiar y
+  deshacer`. Los cuatro caminos rotos a proposito, y cada uno cae en el test que
+  le toca: no devolver el texto -> 1; `Text` en vez de `SelectableText` -> 1;
+  `RichText` en vez de `SelectableText.rich` -> 1; usuario sin menu -> 3. Los
+  finders apuntan por **id de mensaje** (`ValueKey`), no por posicion: la lista
+  del chat va invertida y `.first` es el ultimo mensaje.
+- **`test/message_bubble_test.dart` tenia `\r\r\n` en 550 lineas** (CR duplicado
+  y triplicado, de una vuelta anterior por PowerShell). Dart lo tolera, pero
+  rompe cualquier edicion por coincidencia exacta. Normalizado a `\r\n`; por eso
+  el diff de ese archivo es de ~1000 lineas. El unico `\r` extra del repo era ese
+  archivo.
+- Adjudicacion en `message_bubble_test.dart`: el criterio cambio (ya no se afirma
+  `softWrap: false` ni que la linea sea mas ancha que el bloque, porque el bloque
+  ya scrollea por el `SingleChildScrollView` y no por `softWrap`). Se verifica lo
+  que contiene a las dos cosas: texto completo y bloque sin ensanchar la burbuja.
+  Mono 11.5, alto 1.55 y el tope de 190 px siguen igual.
+- Estado: `flutter analyze lib` sin errores ni warnings, **876 tests verdes (6
+  skipped)**, publicado 1.13.0+19 (30.023.625 B, 12 intents / 12 actions).
+- Pendiente sin tocar: la **tabla** del markdown sigue con
+  `tableColumnWidth: IntrinsicColumnWidth()` (scroll lateral, sin wrap: el fix es
+  `FlexColumnWidth()` en `message_bubble.dart` L736-744), y el **aviso de modo de
+  bajo consumo** sigue molestando.

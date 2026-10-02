@@ -64,6 +64,7 @@ class ChatComposer extends StatefulWidget {
     this.onPickAgent,
     this.suggestions = const <ComposerSuggestion>[],
     this.suggestionsLoading = false,
+    this.controller,
     this.onCommand,
     this.onLocalAction,
     this.onTrigger,
@@ -110,6 +111,16 @@ class ChatComposer extends StatefulWidget {
   /// El menú se está armando (buscando archivos en el server). Se pinta una
   /// línea de "buscando" para que el menú no aparezca y desaparezca.
   final bool suggestionsLoading;
+
+  /// El controller del input, si el shell quiere escribir en él.
+  ///
+  /// Es lo que hace posible un **deshacer** que devuelve al composer lo que el
+  /// usuario había escrito: el shell lo revierte en el server y empuja el texto
+  /// de vuelta por acá. Sin este parámetro el texto se perdía con el mensaje.
+  ///
+  /// `null` (lo normal) deja que el composer use el suyo. Si viene de afuera,
+  /// el shell es quien lo `dispose()`a.
+  final TextEditingController? controller;
 
   /// Se eligió un **comando del server**: `POST /api/session/{id}/command`
   /// con [name] **sin barra** y [args] como texto.
@@ -184,8 +195,20 @@ class ChatComposer extends StatefulWidget {
 }
 
 class _ChatComposerState extends State<ChatComposer> {
-  final TextEditingController _controller = TextEditingController();
+  final TextEditingController _own = TextEditingController();
   final FocusNode _focus = FocusNode();
+
+  /// El controller con el que se pinta el input.
+  ///
+  /// Si el shell pasó uno ([ChatComposer.controller]), ése manda: es el canal
+  /// por el que un **deshacer** devuelve al input lo que el usuario había
+  /// escrito. Antes no existía, y deshacar un mensaje lo borraba del server y
+  /// con él el texto, sin dejar de dónde recuperarlo.
+  ///
+  /// Cuando es externo **no** se.dispose() acá: el dueño es quien lo creó. Un
+  /// `dispose` doble sobre el mismo controller revienta el `ChangeNotifier` con
+  /// el listener del `TextField` todavía colgado.
+  TextEditingController get _controller => widget.controller ?? _own;
 
   /// El motor de dictado. Se crea acá y no como campo final para poder
   /// inyectarlo en un test sin el plugin nativo.
@@ -195,7 +218,7 @@ class _ChatComposerState extends State<ChatComposer> {
 
   @override
   void dispose() {
-    _controller.dispose();
+    if (widget.controller == null) _own.dispose();
     _focus.dispose();
     // Dejar el microfono abierto al salir de la pantalla del chat
     // deja el servicio de dictado escuchando en el vacio.
