@@ -538,6 +538,19 @@ class _ChatViewState extends State<ChatView> {
               onMenu: _canMenu(message)
                   ? () => _openMessageMenu(message)
                   : null,
+              // Los tres del mensaje en cola. Editar reutiliza el mismo canal
+              // que el "deshacer": el texto vuelve al input por
+              // `_prefillComposer`, y acá además desaparece la burbuja (lo
+              // decide `takePendingText`).
+              // El canal de imágenes: el agente manda rutas desnudas y el
+              // server sirve los bytes en `GET /api/fs/read/<path>`, que exige
+              // el header Basic. La config vive acá, en el shell, no en la
+              // burbuja.
+              imageUrl: _vm.api.config.fileUrl,
+              imageHeaders: _vm.api.config.binaryHeaders,
+              onPendingEdit: _onPendingEdit,
+              onPendingDiscard: _vm.discardPending,
+              onPendingSend: _vm.confirmSend,
             ),
           );
         },
@@ -1064,6 +1077,18 @@ class _ChatViewState extends State<ChatView> {
   };
 
   /// El menu de un mensaje: copiar todo, y deshacer si es del usuario.
+  /// Editar un mensaje en cola: el texto vuelve al input y la burbuja desaparece.
+  ///
+  /// No queda rastro del pendiente. Es lo que dice `takePendingText`: si el
+  /// usuario no lo manda de nuevo, no vuelve a aparecer en ninguna parte. Un
+  /// "borrar y volver a aparecer después" sería un segundo mensaje pendiente sin
+  /// que nadie lo pidiera.
+  void _onPendingEdit(String localId) {
+    final text = _vm.takePendingText(localId);
+    if (text == null) return;
+    _prefillComposer(text);
+  }
+
   Future<void> _openMessageMenu(SessionMessage message) async {
     final isUser = message is UserMessage;
     final text = isUser

@@ -300,10 +300,10 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
               // El razonamiento va arriba de las tools: es lo que el modelo
               // hizo antes de llamarlas.
               for (final part in thinking)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: kToolRowSpacing),
-                    child: _ThinkingRow(text: part.text.trim()),
-                  ),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: kToolRowSpacing),
+                  child: _ThinkingRow(text: part.text.trim()),
+                ),
               for (final tool in widget.activity.toolParts)
                 Padding(
                   padding: const EdgeInsets.only(bottom: kToolRowSpacing),
@@ -415,9 +415,20 @@ String turnCategoryLabel(List<AssistantTool> tools) {
 ///
 /// Es un tope, no un mínimo: con 40 llamadas a herramientas el chat no crece 40
 /// filas, crece **esta** caja y adentro scrollea. Un número con nombre en vez
-/// de un `180` suelto porque es el que define la altura del chat y cualquier
+/// de un `900` suelto porque es el que define la altura del chat y cualquier
 /// cambio tiene que ser deliberado.
-const double kToolListMaxHeight = 148;
+///
+/// **900 px**, pedido el 2026-10-03, y no menos: el tope anterior (148) cortaba
+/// la lista de herramientas a menos de cinco filas, así que un turno con 8 tools
+/// —lo normal en un agente— se leía a cinco y había que scrollear **dentro** de
+/// la caja, que es un scroll anidado dentro del scroll del chat. A 900 px entran
+/// los turnos largos de una, y recién ahí scrollea adentro.
+///
+/// Ojo: 900 px lógicos es más que la pantalla de un teléfono (unos 873 en un
+/// móvil 1080p). Por eso el scroll interno **se queda**: sin él, una caja más
+/// alta que la pantalla dejaría la última herramienta fuera de vista con el
+/// scroll del chat, y el usuario no sabría que hay más.
+const double kToolListMaxHeight = 900;
 
 /// Padding de la fila de herramientas, para que la última no quede pegada al
 /// borde de la caja.

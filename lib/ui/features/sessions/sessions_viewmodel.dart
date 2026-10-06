@@ -365,6 +365,14 @@ List<SessionGroup> groupSessions(List<SessionInfo> sessions, DateTime now) {
     final day = DateTime(at.year, at.month, at.day);
     buckets[bucketOfDays(today.difference(day).inDays)]!.add(s);
   }
+  // **De más reciente a menos reciente dentro de cada grupo.** El server no lo
+  // garantiza y sin esto las sesiones salían en el orden que vino la página, que
+  // es el orden de los cursores: la sesión que acabás de usar podía quedar
+  // debajo de otras del mismo día. El orden de los **grupos** ya era correcto,
+  // porque `SessionBucket.values` va de HOY hacia atrás.
+  for (final bucket in buckets.values) {
+    bucket.sort((a, b) => b.updatedAtMs.compareTo(a.updatedAtMs));
+  }
   return [
     for (final b in SessionBucket.values)
       if (buckets[b]!.isNotEmpty) SessionGroup(b, buckets[b]!),

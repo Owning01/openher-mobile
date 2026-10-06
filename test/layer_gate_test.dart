@@ -122,7 +122,11 @@ void main() {
     );
   });
 
-  test('el asset de la spec tiene las 94 capas y las 4 apagadas', () {
+  // Adjudicado 2026-10-06: eran 94 capas / 90 activas, ahora 95 / 91. Se sumó
+  // `chat.msg.image`, la tira de imágenes de un mensaje del agente. El criterio
+  // del test no cambia: el asset tiene el mismo conteo que la spec y las **4**
+  // capas apagadas siguen siendo las 4 aprobadas.
+  test('el asset de la spec tiene las 95 capas y las 4 apagadas', () {
     final f = File('assets/spec/layers.json');
     expect(f.existsSync(), isTrue, reason: 'falta assets/spec/layers.json');
     final raw = f.readAsStringSync();
@@ -134,7 +138,7 @@ void main() {
     ]) {
       expect(raw.contains('"$off": false'), isTrue, reason: off);
     }
-    expect(raw.contains('"active": 90'), isTrue);
-    expect(raw.contains('"total": 94'), isTrue);
+    expect(raw.contains('"active": 91'), isTrue);
+    expect(raw.contains('"total": 95'), isTrue);
   });
 }

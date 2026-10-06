@@ -28,6 +28,7 @@ import 'package:openher_mobile/domain/models/message.dart';
 import 'package:openher_mobile/domain/models/session.dart';
 import 'package:openher_mobile/ui/core/layer_gate.dart';
 import 'package:openher_mobile/ui/core/theme.dart';
+import 'package:openher_mobile/ui/core/tokens.dart';
 import 'package:openher_mobile/ui/features/chat/chat_view.dart';
 import 'package:openher_mobile/ui/features/chat/chat_viewmodel.dart';
 import 'package:openher_mobile/ui/features/chat/composer.dart';
@@ -400,6 +401,32 @@ Set<Color> _coloresDeSpans(InlineSpan span) {
   return out;
 }
 
+/// Un `SelectableText` con ese texto.
+///
+/// `find.text` no los matchea todos, y el cuerpo del mensaje del usuario es
+/// `SelectableText` desde que se puede seleccionar (adjudicado 2026-10-02).
+Finder seleccionable(String texto) => find.byWidgetPredicate(
+  (w) => w is SelectableText && w.data == texto,
+  description: 'SelectableText("$texto")',
+);
+
+/// El `BoxDecoration` de la caja que contiene [texto].
+///
+/// Se busca por contenido y no por key porque la burbuja no tiene key propia:
+/// lo que hay que verificar es el **color** de la caja, no qué widget la pintó.
+BoxDecoration? cajaDe(WidgetTester tester, String texto) {
+  for (final w in tester.widgetList<Container>(find.byType(Container))) {
+    final d = w.decoration;
+    if (d is! BoxDecoration || d.color == null) continue;
+    final finder = find.descendant(
+      of: find.byWidget(w),
+      matching: seleccionable(texto),
+    );
+    if (finder.evaluate().isNotEmpty) return d;
+  }
+  return null;
+}
+
 void main() {
   setUp(() => LayerCatalog.debugSetInstance(LayerCatalog.forTest(kLayers)));
   tearDown(() => LayerCatalog.debugSetInstance(null));
@@ -619,6 +646,14 @@ void main() {
     );
   });
 
+  // **Adjudicado 2026-10-05.** El fixture usa `status: 'pending'`, que el
+  // server **no manda nunca**: medido en 50 sesiones con 4 tools `question`, el
+  // estado real es `running` (preguntando), `completed` (respondida) o
+  // `error` con `type: aborted` (descartada por el usuario). El caso `pending`
+  // se queda porque el dominio lo contempla y hay builds que lo mandan, pero
+  // **este test solo ya no cubría lo que pasa**: la tarjeta se pintaba con un
+  // estado que no existe en producción. Los tres estados medidos están en el
+  // grupo 'la pregunta del agente' de más abajo.
   testWidgets('una tool question pendiente pinta la card de pregunta', (
     tester,
   ) async {
@@ -1469,6 +1504,385 @@ void main() {
         greaterThan(1),
         reason: 'el bloque de codigo tiene que seguir resaltado, no plano',
       );
+    });
+  });
+
+  group('un mensaje en cola', () {
+    /// Un turno **vivo** (assistant sin `time.completed` ni `finish`): es lo que
+    /// hace que `working` sea true, que es la condición para que el siguiente
+    /// mensaje del usuario quede en cola en vez de mandarse.
+    List<Map<String, Object?>> turnoVivo() => [
+      userJson('msg_u1', 'el primero'),
+      assistantJson(id: 'msg_a1', complete: false),
+    ];
+
+    /// VM que registra los POST, para afirmar **qué se mandó y qué no**.
+    late List<http.Request> requests;
+
+    Future<ChatViewModel> colaVm(List<Map<String, Object?>> mensajes) async {
+      requests = <http.Request>[];
+      final vm = ChatViewModel(
+        ApiClient(
+          config: kConfig,
+          client: MockClient((req) async {
+            requests.add(req);
+            return http.Response(
+              jsonEncode({'data': mensajes}),
+              200,
+              headers: const {'content-type': 'application/json'},
+            );
+          }),
+        ),
+        sessionId: kSessionId,
+        sessionInfo: kSession,
+        streamFactory: (config, directory) => SilentSource(),
+      );
+      await vm.load();
+      return vm;
+    }
+
+    List<http.Request> prompts() =>
+        requests.where((r) => r.url.path.endsWith('/prompt')).toList();
+
+    /// Escribe [texto] y toca el botón del composer.
+    Future<void> mandar(WidgetTester tester, String texto) async {
+      await tester.enterText(find.byKey(ChatComposer.inputKey), texto);
+      await tester.pump();
+      await tester.tap(find.byKey(ChatComposer.sendKey));
+      await tester.pump();
+    }
+
+    testWidgets(
+      'con turno vivo, escribir y tocar manda deja el mensaje en cola',
+      (tester) async {
+        final vm = await colaVm(turnoVivo());
+        addTearDown(vm.dispose);
+        await pumpChat(tester, vm);
+        expect(vm.working, isTrue, reason: 'el turno tiene que estar vivo');
+
+        await mandar(tester, 'el segundo');
+
+        // El mensaje **aparece** en el chat: eso es lo primero que no pasaba,
+        // porque sin poder mandar con el turno vivo nunca se llegaba a crearlo.
+        expect(seleccionable('el segundo'), findsOneWidget);
+        expect(vm.pendings, hasLength(1));
+        // Y **no** se mandó: mandar con la sesión ocupada no da 409, da 200 con
+        // `delivery: steer`, o sea que el server redirige el turno que corre y el
+        // mensaje nunca se procesa como tal. Un POST acá es el bug entero.
+        expect(prompts(), isEmpty, reason: 'encolar no es mandar');
+      },
+    );
+
+    testWidgets('el pendiente es gris y no azul', (tester) async {
+      final vm = await colaVm(turnoVivo());
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+      await mandar(tester, 'el segundo');
+
+      final scheme = AppTheme.light().colorScheme;
+      final mandada = cajaDe(tester, 'el primero');
+      final pendiente = cajaDe(tester, 'el segundo');
+
+      expect(mandada?.color, scheme.primary, reason: 'la mandada va azul');
+      expect(
+        pendiente?.color,
+        scheme.surfaceContainerHighest,
+        reason: 'la en cola va gris: azul dice "el server ya lo tiene"',
+      );
+      expect(pendiente?.border, isNotNull, reason: 'y lleva borde');
+    });
+
+    testWidgets('el pendiente tiene los tres botones de icono', (tester) async {
+      final vm = await colaVm(turnoVivo());
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+      await mandar(tester, 'el segundo');
+
+      final id = vm.pendings.single.id;
+      expect(
+        find.byKey(MessageBubble.pendingButtonKey(id, 'edit')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(MessageBubble.pendingButtonKey(id, 'trash')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(MessageBubble.pendingButtonKey(id, 'send')),
+        findsOneWidget,
+      );
+      // **Sólo icono**: no hay rótulo al lado de los botones.
+      expect(find.text('Editar'), findsNothing);
+      expect(find.text('Eliminar'), findsNothing);
+      // Y **esa** burbuja no lleva el `⋮` del menu: sus tres acciones ya están
+      // arriba. El mensaje ya enviado sí lo tiene, y por eso la aserción va
+      // anclada al pendiente y no a "no hay ningun menuKey en la pantalla".
+      expect(
+        find.descendant(
+          of: find.byKey(ValueKey(id)),
+          matching: find.byKey(MessageBubble.menuKey),
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('un mensaje YA enviado no tiene los botones de cola', (
+      tester,
+    ) async {
+      final vm = await colaVm(turnoVivo());
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+      await mandar(tester, 'el segundo');
+
+      // El id del pendiente es `local_*`; el mandada es `msg_u1`. Los botones
+      // existen sólo para el primero.
+      final id = vm.pendings.single.id;
+      expect(
+        find.byKey(MessageBubble.pendingButtonKey('msg_u1', 'edit')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(MessageBubble.pendingButtonKey(id, 'edit')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('editar devuelve el texto al input y saca la burbuja', (
+      tester,
+    ) async {
+      final vm = await colaVm(turnoVivo());
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+      await mandar(tester, 'el segundo');
+
+      final id = vm.pendings.single.id;
+      await tester.tap(find.byKey(MessageBubble.pendingButtonKey(id, 'edit')));
+      await tester.pump();
+
+      final input = tester.widget<TextField>(find.byKey(ChatComposer.inputKey));
+      expect(input.controller?.text, 'el segundo');
+      expect(
+        seleccionable('el segundo'),
+        findsNothing,
+        reason: 'la burbuja sale',
+      );
+      expect(vm.pendings, isEmpty);
+      // Editar no manda nada: es devolver el texto, no mandarlo.
+      expect(prompts(), isEmpty);
+    });
+
+    testWidgets('eliminar saca la burbuja y no manda nada', (tester) async {
+      final vm = await colaVm(turnoVivo());
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+      await mandar(tester, 'el segundo');
+
+      final id = vm.pendings.single.id;
+      await tester.tap(find.byKey(MessageBubble.pendingButtonKey(id, 'trash')));
+      await tester.pump();
+
+      expect(seleccionable('el segundo'), findsNothing);
+      expect(vm.pendings, isEmpty);
+      expect(prompts(), isEmpty);
+      // Y no aparece en el siguiente refresh: nunca estuvo en el server.
+      await vm.refresh();
+      expect(seleccionable('el segundo'), findsNothing);
+    });
+
+    testWidgets('enviar manda el POST y la burbuja deja de estar en cola', (
+      tester,
+    ) async {
+      final vm = await colaVm(turnoVivo());
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+      await mandar(tester, 'el segundo');
+
+      final id = vm.pendings.single.id;
+      await tester.tap(find.byKey(MessageBubble.pendingButtonKey(id, 'send')));
+      await tester.pump();
+
+      final enviados = prompts();
+      expect(enviados, hasLength(1), reason: 'confirmar sí manda');
+      // Lo que se manda es **el texto del pendiente**, no un placeholder: si se
+      // mandara otra cosa, el POST pasaría y el usuario perdería su mensaje.
+      expect(
+        enviados.single.body,
+        contains('el segundo'),
+        reason: 'el cuerpo del POST tiene que traer el texto del pendiente',
+      );
+      expect(vm.pendings, isEmpty, reason: 'ya no está en cola');
+      // La burbuja sigue en el chat pero azul: ya la tiene el server.
+      final scheme = AppTheme.light().colorScheme;
+      expect(cajaDe(tester, 'el segundo')?.color, scheme.primary);
+    });
+
+    testWidgets('con el input vacío el botón sigue siendo Detener', (
+      tester,
+    ) async {
+      final vm = await colaVm(turnoVivo());
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      // Nada escrito: el botón es el de parar. Rojo (`danger`) y no el azul de
+      // `primary`, que es lo que lo distingue a simple vista.
+      final boton = tester.widget<Material>(find.byKey(ChatComposer.sendKey));
+      expect(boton.color, AppColors.diffDelOf(Brightness.light));
+      expect(boton.color, isNot(AppTheme.light().colorScheme.primary));
+
+      await tester.tap(find.byKey(ChatComposer.sendKey));
+      await tester.pump();
+
+      // Un toque con el input vacío **detiene**, no manda ni encola: ese es el
+      // atajo de un toque y tiene que seguir ahí.
+      expect(vm.pendings, isEmpty);
+      expect(prompts(), isEmpty);
+    });
+
+    testWidgets('con texto escrito el botón es Enviar, no Detener', (
+      tester,
+    ) async {
+      final vm = await colaVm(turnoVivo());
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      await tester.enterText(find.byKey(ChatComposer.inputKey), 'algo');
+      await tester.pump();
+
+      // `primary`, no `danger`: el botón manda, no detiene.
+      final boton = tester.widget<Material>(find.byKey(ChatComposer.sendKey));
+      expect(boton.color, AppTheme.light().colorScheme.primary);
+      expect(boton.color, isNot(AppColors.diffDelOf(Brightness.light)));
+
+      await tester.tap(find.byKey(ChatComposer.sendKey));
+      await tester.pump();
+
+      // Lo que prueba el cambio: con turno vivo y texto, el toque **encola**.
+      expect(vm.pendings, hasLength(1));
+      expect(prompts(), isEmpty);
+    });
+  });
+
+  group('la pregunta del agente, con los estados MEDIDOS del server', () {
+    /// El `question` que se encontró en `ses_f007f0f02ffe1vX0gCMbAVEren`:
+    /// 2 preguntas, `error: null`, `state.input` **ya parseado** (dict), no el
+    /// string crudo que el dominio contempla.
+    Map<String, Object?> questionTool({
+      String status = 'running',
+      String? errorType,
+    }) => <String, Object?>{
+      'type': 'tool',
+      'id': 'call_q_medido',
+      'name': 'question',
+      'executed': false,
+      'state': <String, Object?>{
+        'status': status,
+        // El `input` real llega **parseado** (dict), no como string crudo.
+        'input': const {
+          'questions': [
+            {
+              'header': 'Arquitectura',
+              'question': 'Donde vive la lista de sesiones?',
+              'options': [
+                {
+                  'label': 'App Flutter mobile nueva',
+                  'description': 'Android/iOS',
+                },
+                {'label': 'Modulo dentro de OpenHer'},
+              ],
+            },
+          ],
+        },
+        'content': <Object?>[],
+        if (errorType != null)
+          'error': <String, Object?>{
+            'type': errorType,
+            'message': 'The user dismissed this question',
+          },
+      },
+    };
+
+    Future<void> pumpCon(WidgetTester tester, Map<String, Object?> tool) async {
+      final vm = await loadedVm([
+        userJson('msg_u1', 'hola'),
+        assistantJson(id: 'msg_a_q', complete: false, content: [tool]),
+      ]);
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+    }
+
+    testWidgets('running: la pregunta espera y la card se pinta', (
+      tester,
+    ) async {
+      await pumpCon(tester, questionTool());
+
+      // **Este es el caso que se veía en el server y no se pintaba**: `running`,
+      // nunca `pending`. Con `pending` la función no lo aceptaba y la card no
+      // salía nunca.
+      expect(find.byType(QuestionCard), findsOneWidget);
+      expect(find.text('Donde vive la lista de sesiones?'), findsOneWidget);
+      expect(find.text('Arquitectura'), findsOneWidget);
+    });
+
+    testWidgets('completed: ya se respondio y la card NO se pinta', (
+      tester,
+    ) async {
+      await pumpCon(tester, questionTool(status: 'completed'));
+      expect(find.byType(QuestionCard), findsNothing);
+    });
+
+    testWidgets('error aborted: el usuario la descarto y NO vuelve a salir', (
+      tester,
+    ) async {
+      // Medido: {"type":"aborted","message":"The user dismissed this question"}.
+      // Repintarla sería ofrecer algo que él acaba de cerrar.
+      await pumpCon(
+        tester,
+        questionTool(status: 'error', errorType: 'aborted'),
+      );
+      expect(find.byType(QuestionCard), findsNothing);
+    });
+  });
+
+  group('la caja del turno', () {
+    testWidgets('con muchas tools crece hasta el tope de 900 px', (
+      tester,
+    ) async {
+      // El tope anterior (148) cortaba la lista a menos de cinco filas: un turno
+      // normal de agente con 8+ tools se leía a medias y había que scrollear
+      // DENTRO de la caja, que es un scroll anidado.
+      final tools = <Map<String, Object?>>[
+        for (var i = 0; i < 14; i++)
+          toolJson(
+            id: 'call_$i',
+            name: 'read',
+            output: 'contenido del archivo numero $i\n' * 6,
+            input: {'filePath': 'lib/archivo_$i.dart'},
+          ),
+      ];
+      final vm = await loadedVm([
+        userJson('msg_u1', 'hola'),
+        assistantJson(id: 'msg_a_t', content: tools),
+      ]);
+      addTearDown(vm.dispose);
+      await pumpChat(tester, vm);
+
+      await tester.tap(find.byKey(TurnActivityBox.headKey));
+      await tester.pump();
+
+      final cuerpo = find.byWidgetPredicate(
+        (w) => w is Container && w.constraints?.maxHeight == kToolListMaxHeight,
+        description: 'el cuerpo scrolleable de la caja',
+      );
+      expect(cuerpo, findsOneWidget);
+
+      final alto = tester.getSize(cuerpo).height;
+      // Creció de verdad: 148 cortaba a ~5 filas.
+      expect(alto, greaterThan(300), reason: '14 tools no entran en 148 px');
+      // Y no pasó del tope.
+      expect(alto, lessThanOrEqualTo(kToolListMaxHeight));
+      // La caja entera tampoco se pasa de la pantalla con un turno enorme: el
+      // scroll interno sigue estando, es lo que evita perder la última tool.
+      expect(kToolListMaxHeight, greaterThan(600));
     });
   });
 

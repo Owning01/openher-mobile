@@ -58,7 +58,40 @@ class MessageBubble extends StatelessWidget {
     this.onRetrySend,
     this.isOpenAssistant,
     this.onMenu,
+    this.onPendingEdit,
+    this.onPendingDiscard,
+    this.onPendingSend,
+    this.imageUrl,
+    this.imageHeaders = const <String, String>{},
   });
+
+  /// Cómo se pide una imagen al server (`GET /api/fs/read/<path>`).
+  ///
+  /// `null` deja la tira de imágenes apagada: la burbuja suelta (tests, vista
+  /// de solo lectura) no tiene por qué saber de red. Y con `null` tampoco se
+  /// pinta nada roto, que es lo que pasaría con una `Image.network` sin
+  /// `Uri` base.
+  final Uri Function(String path)? imageUrl;
+
+  /// El header Basic. Sin él el server contesta 401.
+  final Map<String, String> imageHeaders;
+
+  /// Los tres botones de un mensaje **en cola**. Reciben el id local.
+  ///
+  /// Vienen acá y no se pintan solos porque los tres llaman a una cosa distinta
+  /// del viewmodel ([ChatViewModel.takePendingText], `.discardPending`,
+  /// `.confirmSend`) y la burbuja no debe saber de HTTP.
+  final ValueChanged<String>? onPendingEdit;
+  final ValueChanged<String>? onPendingDiscard;
+  final ValueChanged<String>? onPendingSend;
+
+  /// Los botones del pendiente, por id de mensaje.
+  ///
+  /// Por id y no "el primero que encuentre": en una pantalla con el mensaje
+  /// enviado y el pendiente, hay dos filas de botones y el test tiene que
+  /// apuntar a una.
+  static Key pendingButtonKey(String id, String action) =>
+      Key('pending-$action-$id');
 
   /// Abre el menu del mensaje: **Copiar** (todo) y, si es del usuario,
   /// **Deshacer** (que ademas devuelve el texto al composer).
@@ -128,14 +161,30 @@ class MessageBubble extends StatelessWidget {
   /// corresponde a este tool (lo resuelve `ChatViewModel.requestIdFor`).
   final String? questionRequestId;
 
-  /// El tool `question` en `pending` de este mensaje, o `null`.
+  /// El tool `question` **que sigue esperando respuesta**, si lo hay.
   ///
   /// Vive acá porque es **lo que decide** si se pinta la card, y el chat lo
   /// consulta para pasarle el `requestID` a la burbuja.
+  ///
+  /// **Medido 2026-10-05 contra el server real** (50 sesiones, 4 tools
+  /// `question`): el estado **nunca** es `pending`. Es:
+  ///
+  /// - `running` — la pregunta espera de verdad (2 preguntas, `error: null`).
+  ///   Es el caso que hay que pintar.
+  /// - `completed` — ya se respondió. No se pinta.
+  /// - `error` con `{"type":"aborted","message":"The user dismissed this
+  ///   question"}` — el usuario ya la descartó. **Tampoco**: volver a
+  ///   ofrecerla sería presentar algo que él acaba de cerrar.
+  ///
+  /// Antes sólo se aceptaba `ToolPending`, así que la tarjeta **nunca**
+  /// apareció: el camino estaba muerto contra el server real, no era un caso
+  /// raro.
   static AssistantTool? pendingQuestionTool(SessionMessage message) {
     if (message case final AssistantMessage assistant) {
       for (final tool in assistant.toolItems) {
-        if (tool.name == 'question' && tool.state is ToolPending) return tool;
+        if (tool.name != 'question') continue;
+        final state = tool.state;
+        if (state is ToolPending || state is ToolRunning) return tool;
       }
     }
     return null;
@@ -237,10 +286,25 @@ class MessageBubble extends StatelessWidget {
       spaced.add(child);
     }
 
+    final urlOf = imageUrl;
+    final paths = urlOf == null || streaming
+        ? const <String>[]
+        : imagePathsIn(text);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
-      children: [...spaced, if (onMenu != null) _menuButton(context)],
+      children: [
+        ...spaced,
+        // La tira de imágenes va al final, después del texto: el agente nombra
+        // las rutas dentro de una frase y una miniatura en medio del renglón
+        // rompería el párrafo. Solo con el turno ya terminado de escribir — con
+        // el texto llegando por deltas las rutas están a medias y saldrían
+        // miniaturas de nombres truncados.
+        if (urlOf != null && !streaming && paths.isNotEmpty)
+          MessageImages(paths: paths, urlOf: urlOf, headers: imageHeaders),
+        if (onMenu != null) _menuButton(context),
+      ],
     );
   }
 
@@ -272,13 +336,25 @@ class MessageBubble extends StatelessWidget {
   Widget _user(BuildContext context, UserMessage user) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+
+    // Un mensaje **en cola** no se mandó: se ve distinto a propósito. Azul es
+    // "el server ya lo tiene", y un azul para algo que nadie mandó engaña: el
+    // usuario lo relee, creyéndolo entregado, y sigue escribiendo encima.
+    final pendiente = user.pendingSend;
+    final fondo = pendiente ? scheme.surfaceContainerHighest : scheme.primary;
+    final tinta = pendiente ? scheme.onSurfaceVariant : scheme.onPrimary;
+
     final bubble = Container(
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.md,
         vertical: AppSpacing.sm,
       ),
       decoration: BoxDecoration(
-        color: scheme.primary,
+        color: fondo,
+        // El borde marca la diferencia sin depender de que el usuario distinga
+        // el gris del azul. `outline`, no `outlineVariant`: un pendiente tiene
+        // que verse aunque el theme tenga el contraste justo.
+        border: pendiente ? Border.all(color: scheme.outline) : null,
         borderRadius: const BorderRadius.only(
           topLeft: Radius.circular(16),
           topRight: Radius.circular(16),
@@ -303,15 +379,25 @@ class MessageBubble extends StatelessWidget {
             user.text,
             // El cuerpo del tema (13/1.5) con el color del chip: el `Text` solo
             // con `fontSize` heredaba el alto de línea de otra base.
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: scheme.onPrimary,
-            ),
+            style: theme.textTheme.bodyMedium?.copyWith(color: tinta),
           ),
+          if (pendiente) ...[
+            const SizedBox(height: 6),
+            _PendingActions(
+              messageId: user.id,
+              onEdit: onPendingEdit,
+              onDiscard: onPendingDiscard,
+              onSend: onPendingSend,
+            ),
+          ],
           if (user.notDelivered) ...[
             const SizedBox(height: 6),
             _NotDeliveredChip(onRetry: () => onRetrySend?.call(user.id)),
           ],
-          if (onMenu != null) ...[
+          // Con el pendiente no se pinta el `⋮`: sus tres acciones **son** el
+          // menu del mensaje, y dos juegos de botones sobre la misma burbuja
+          // es ruido. Editar y borrar ya están arriba.
+          if (onMenu != null && !pendiente) ...[
             const SizedBox(height: 4),
             _menuButton(context),
           ],
@@ -552,6 +638,261 @@ class MessageBubble extends StatelessWidget {
         onSubmit: (answers) => onQuestionAnswer?.call(requestId, answers),
         onSkip: (answers) => onQuestionAnswer?.call(requestId, answers),
       ),
+    );
+  }
+}
+
+/// Extensiones que se intentan pintar como imagen.
+///
+/// Lista corta y cerrada a propósito: el agente manda rutas **desnudas** en el
+/// texto (medido 2026-10-06: 0 `![]()` y 6 rutas sueltas), así que la detección
+/// es por extensión y una extensión de más inventa miniaturas de archivos que
+/// no son imágenes.
+const Set<String> kImageExtensions = {
+  'png',
+  'jpg',
+  'jpeg',
+  'webp',
+  'gif',
+  'bmp',
+  'heic',
+};
+
+/// Las rutas de imagen que hay **en el texto** del agente, en orden y sin
+/// repetir.
+///
+/// Por qué sobre el texto y no con un builder de markdown `img`: medido contra
+/// el server, el agente **no manda markdown** — manda la ruta pelada
+/// (`bautismoOlivia2021.jpeg`, `G:\...\shot.png`). Un builder de `img` no vería
+/// ninguna, porque no hay elemento `img` que construir.
+///
+/// Reglas, para no inventar miniaturas donde no hay:
+/// - Hace falta **al menos un carácter** antes del punto, así que un `.webp`
+///   suelto (que apareció medido, en una lista) no cuenta.
+/// - Nada de URIs con esquema (`http://`): ésas no las sirve el server de la
+///   sesión y una miniatura rota es peor que ninguna.
+/// - Se corta en los delimitadores que aparecen de verdad alrededor de una ruta
+///   en markdown y en prosa: backticks, comillas, paréntesis, corchetes, y los
+///   dos separadores de lista.
+List<String> imagePathsIn(String text) {
+  if (text.isEmpty) return const <String>[];
+  final out = <String>[];
+  final seen = <String>{};
+  final re = RegExp(
+    r'''[^\s`"'()\[\]*,;<>|]+\.([A-Za-z0-9]{2,5})''',
+    multiLine: true,
+  );
+  for (final match in re.allMatches(text)) {
+    final ext = match.group(1)!.toLowerCase();
+    if (!kImageExtensions.contains(ext)) continue;
+    final raw = match.group(0)!;
+    // El nombre del archivo tiene que tener algo más que la extensión.
+    final corte = raw.lastIndexOf('.');
+    if (corte < 1) continue;
+    final nombre = raw.substring(0, corte);
+    // El último segmento, sin separadores de ruta: `.shot.png` no es un nombre.
+    final base = nombre.split(RegExp(r'[\\/]')).last;
+    if (base.replaceAll('.', '').isEmpty) continue;
+    if (raw.contains('://')) continue;
+    if (seen.add(raw)) out.add(raw);
+  }
+  return out;
+}
+
+/// La tira de imágenes de un mensaje: **siempre minimizada**, y se expande a la
+/// altura que la pantalla permita.
+///
+/// Va debajo del texto y no incrustada entre los párrafos: el agente nombra las
+/// rutas dentro de una frase o de una lista, y meter una miniatura en medio del
+/// renglón rompe el párrafo. La tira no decide dónde está la imagen, muestra
+/// todas las que el mensaje menciona.
+class MessageImages extends StatelessWidget {
+  const MessageImages({
+    super.key,
+    required this.paths,
+    required this.urlOf,
+    this.headers = const <String, String>{},
+  });
+
+  final List<String> paths;
+
+  /// `Uri` con la que el server sirve los bytes crudos
+  /// (`GET /api/fs/read/<path>`). La arma el shell, que es el único que tiene
+  /// la `ServerConfig`.
+  final Uri Function(String path) urlOf;
+
+  /// El header Basic: sin él el server contesta 401 y no hay imagen.
+  final Map<String, String> headers;
+
+  /// Alto de la miniatura. 72 px entra cómodo en una fila de dos o tres en un
+  /// teléfono de 360, y sigue leyéndose como miniatura en una tablet.
+  static const double thumbHeight = 72;
+
+  /// Clave de la miniatura [i] de un mensaje, para los tests.
+  static Key thumbKey(int i) => Key('message-image-$i');
+
+  /// La imagen ya expandida.
+  static const Key expandedKey = Key('message-image-expanded');
+
+  @override
+  Widget build(BuildContext context) {
+    if (paths.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.sm),
+      child: Wrap(
+        spacing: AppSpacing.sm,
+        runSpacing: AppSpacing.sm,
+        children: [
+          for (var i = 0; i < paths.length; i++)
+            _Thumb(
+              key: thumbKey(i),
+              path: paths[i],
+              urlOf: urlOf,
+              headers: headers,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Una miniatura: 72 px de alto, recortada, y al tocarla se expande.
+class _Thumb extends StatelessWidget {
+  const _Thumb({
+    super.key,
+    required this.path,
+    required this.urlOf,
+    required this.headers,
+  });
+
+  final String path;
+  final Uri Function(String path) urlOf;
+  final Map<String, String> headers;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final nombre = path.split(RegExp(r'[\\/]')).last;
+    final imagen = Image.network(
+      urlOf(path).toString(),
+      headers: headers,
+      height: MessageImages.thumbHeight,
+      fit: BoxFit.cover,
+      // Mientras baja, la caja ya tiene el tamaño final: sin esto la tira
+      // salta de alto cuando llega la imagen y empuja el chat hacia abajo.
+      frameBuilder: (context, child, frame, syncLoaded) {
+        if (syncLoaded || frame != null) return child;
+        return const SizedBox(
+          height: MessageImages.thumbHeight,
+          width: MessageImages.thumbHeight,
+        );
+      },
+      errorBuilder: (context, error, stack) => _noSePudo(context, nombre),
+    );
+    return LayerGate(
+      'chat.msg.image',
+      child: Semantics(
+        label: 'Imagen $nombre',
+        button: true,
+        child: InkWell(
+          borderRadius: AppRadius.mdAll,
+          onTap: () => _expandir(context, nombre),
+          child: ClipRRect(
+            borderRadius: AppRadius.mdAll,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border.all(color: scheme.outline),
+                borderRadius: AppRadius.mdAll,
+              ),
+              child: imagen,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Lo que se ve cuando el archivo no está o el server no lo sirve. Dice el
+  /// nombre: un cuadrado con un icono roto no le dice al usuario **qué** falló.
+  Widget _noSePudo(BuildContext context, String nombre) {
+    final scheme = Theme.of(context).colorScheme;
+    return SizedBox(
+      height: MessageImages.thumbHeight,
+      width: MessageImages.thumbHeight * 1.4,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.xs),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AppIcon('image', size: 16, color: scheme.onSurfaceVariant),
+              const SizedBox(height: 2),
+              Text(
+                nombre,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 9, color: scheme.onSurfaceVariant),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Abre la imagen a pantalla completa, con la altura **según la pantalla de
+  /// ese momento**.
+  ///
+  /// `75%` del alto disponible y `BoxFit.contain`: en un teléfono chico la
+  /// imagen se agranda hasta llenar casi toda la pantalla, y en uno grande o en
+  /// una tablet se ve más chica pero entera. Un alto fijo en píxeles se vería
+  /// gigante en un teléfono y diminuto en una tablet.
+  void _expandir(BuildContext context, String nombre) {
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.9),
+      builder: (dialogContext) {
+        final alto = MediaQuery.sizeOf(dialogContext).height;
+        // Leer el theme del contexto de afuera **antes** del diálogo: el
+        // diálogo tiene el suyo y el `Navigator` puede quedar fuera del
+        // `MaterialApp` que lo define.
+        final scheme = Theme.of(context).colorScheme;
+        return GestureDetector(
+          key: MessageImages.expandedKey,
+          onTap: () => Navigator.of(dialogContext).pop(),
+          child: SizedBox.expand(
+            child: Padding(
+              padding: const EdgeInsets.all(AppSpacing.md),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Flexible(
+                    child: Image.network(
+                      urlOf(path).toString(),
+                      headers: headers,
+                      height: alto * 0.75,
+                      fit: BoxFit.contain,
+                      errorBuilder: (context, error, stack) =>
+                          _noSePudo(context, nombre),
+                    ),
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(
+                    nombre,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: scheme.onInverseSurface,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -1389,6 +1730,87 @@ class _TypingDotsState extends State<TypingDots>
 /// Va **dentro** de la burbuja y no como banner: el aviso pertenece a ese
 /// mensaje, no a toda la conversación. Con un banner el usuario no sabe
 /// cuál de sus mensajes falló.
+class _PendingActions extends StatelessWidget {
+  const _PendingActions({
+    required this.messageId,
+    required this.onEdit,
+    required this.onDiscard,
+    required this.onSend,
+  });
+
+  final String messageId;
+  final ValueChanged<String>? onEdit;
+  final ValueChanged<String>? onDiscard;
+  final ValueChanged<String>? onSend;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _PendingButton(
+          key: MessageBubble.pendingButtonKey(messageId, 'edit'),
+          icon: 'edit',
+          tooltip: 'Editar',
+          color: scheme.onSurfaceVariant,
+          onPressed: onEdit == null ? null : () => onEdit!(messageId),
+        ),
+        _PendingButton(
+          key: MessageBubble.pendingButtonKey(messageId, 'trash'),
+          icon: 'trash',
+          tooltip: 'Eliminar',
+          color: scheme.onSurfaceVariant,
+          onPressed: onDiscard == null ? null : () => onDiscard!(messageId),
+        ),
+        // El enviar va primero y es el único con color: es la acción que el
+        // usuario quiere el 80% de las veces, y por lo general no es tocar el
+        // botón de enviar del composer (que ya está deshabilitado con el turno
+        // en curso) sino confirmar **este** mensaje.
+        _PendingButton(
+          key: MessageBubble.pendingButtonKey(messageId, 'send'),
+          icon: 'arrow-upward',
+          tooltip: 'Enviar',
+          color: scheme.primary,
+          onPressed: onSend == null ? null : () => onSend!(messageId),
+        ),
+      ],
+    );
+  }
+}
+
+/// Un botón de **sólo icono** de los tres del pendiente.
+///
+/// 28 px de alto, no 32: tres en una fila y el de 40 se sale de la burbuja en
+/// un teléfono chico. El `tooltip` es lo que dice qué es cada uno: no hay
+/// rótulo, y sin el el usuario tendría tres íconos iguales de frente.
+class _PendingButton extends StatelessWidget {
+  const _PendingButton({
+    super.key,
+    required this.icon,
+    required this.tooltip,
+    required this.color,
+    required this.onPressed,
+  });
+
+  final String icon;
+  final String tooltip;
+  final Color color;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppIconButton(
+      icon: icon,
+      tooltip: tooltip,
+      onPressed: onPressed,
+      size: 16,
+      tapSize: 28,
+      color: color,
+    );
+  }
+}
+
 class _NotDeliveredChip extends StatelessWidget {
   const _NotDeliveredChip({required this.onRetry});
 

@@ -54,6 +54,15 @@ class SessionsView extends StatefulWidget {
   /// Lista agrupada (el contenedor scrolleable).
   static const Key listKey = Key('sessions-list');
 
+  /// La luz que recorre el título de la sesión que está corriendo.
+  ///
+  /// Va en el **título** y no en la fila entera porque el título es lo que el
+  /// usuario está mirando cuando vuelve de otra pantalla: una fila brillando no
+  /// dice *qué* sesión está trabajando. Comparte los 1400 ms de
+  /// `SquaresSpinner` y de `_PulseDot` para que las tres señales de "está
+  /// trabajando" laten a la vez.
+  static const Key titleSweepKey = Key('sessions-title-sweep');
+
   /// Estado vacío.
   static const Key emptyKey = Key('sessions-empty');
 
@@ -64,7 +73,28 @@ class SessionsView extends StatefulWidget {
   State<SessionsView> createState() => _SessionsViewState();
 }
 
-class _SessionsViewState extends State<SessionsView> {
+class _SessionsViewState extends State<SessionsView>
+    with SingleTickerProviderStateMixin {
+  /// El reloj de la luz que recorre el título de la sesión que está corriendo.
+  ///
+  /// **Uno solo para toda la lista**, no uno por fila: dos controllers
+  /// arrancan cuando cada fila se monta y quedan desfasados, y dos sesiones
+  /// corriendo se leerían como dos cargas distintas en vez de una sola.
+  ///
+  /// Perezoso y anulable a propósito, por dos razones:
+  ///
+  /// 1. Sin ninguna sesión corriendo no hay por qué tener un ticker vivo en una
+  ///    pantalla que casi siempre está en segundo plano.
+  /// 2. Con un `late final` normal, el `dispose()` **crea** el controller si
+  ///    nunca llegó a usarse, y crearlo con el elemento ya desmontado revienta
+  ///    un assert de `TickerProvider` en cada salida de la pantalla.
+  AnimationController? _sweep;
+
+  Animation<double>? get _sweepReloj => _sweep ??= AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1400),
+  )..repeat();
+
   final TextEditingController _query = TextEditingController();
   final FocusNode _queryFocus = FocusNode();
 
@@ -106,6 +136,7 @@ class _SessionsViewState extends State<SessionsView> {
     // `_vm.dispose()` ya se encarga.
     _query.dispose();
     _queryFocus.dispose();
+    _sweep?.dispose();
     super.dispose();
   }
 
@@ -200,9 +231,8 @@ class _SessionsViewState extends State<SessionsView> {
                       ? 'Ocultar subagentes'
                       : 'Mostrar subagentes',
                   selected: widget.viewmodel.showSubagents,
-                  onPressed: () =>
-                      widget.viewmodel.showSubagents =
-                          !widget.viewmodel.showSubagents,
+                  onPressed: () => widget.viewmodel.showSubagents =
+                      !widget.viewmodel.showSubagents,
                 ),
               ),
               LayerGate(
@@ -315,6 +345,13 @@ class _SessionsViewState extends State<SessionsView> {
     key: ValueKey<String>(session.id),
     session: session,
     running: vm.isRunning(session),
+    // El **mismo** reloj para todas las filas, y por lo tanto la misma fase: si
+    // cada una animara su propio controller, dos sesiones corriendo brillarían
+    // desfasadas y se leería como dos loads distintos. 1400 ms es la misma
+    // `Duration` que usan `_PulseDot` y `SquaresSpinner`. Solo se pide el reloj
+    // si esta fila está corriendo: así una lista sin sesiones vivas no tiene
+    // ningún ticker.
+    sweep: vm.isRunning(session) ? _sweepReloj : null,
     attention: vm.needsAttention(session),
     relativeTime: vm.relativeTime(session),
     cost: vm.costOf(session),
@@ -327,11 +364,7 @@ class _SessionsViewState extends State<SessionsView> {
 
 /// Encabezado de grupo + sus filas.
 class _Group extends StatelessWidget {
-  const _Group({
-    required this.bucket,
-    required this.children,
-    this.label,
-  });
+  const _Group({required this.bucket, required this.children, this.label});
 
   final SessionBucket bucket;
   final List<Widget> children;
@@ -378,6 +411,7 @@ class _SessionRow extends StatelessWidget {
     super.key,
     required this.session,
     required this.running,
+    required this.sweep,
     required this.attention,
     required this.relativeTime,
     required this.cost,
@@ -386,6 +420,13 @@ class _SessionRow extends StatelessWidget {
     required this.onArchive,
     this.favorite = false,
   });
+
+  /// El reloj compartido de la luz del título. Va del shell y no se crea acá:
+  /// una fila con su propio controller se movería fuera de fase con las demás.
+  final Animation<double>? sweep;
+
+  String _tituloDe(SessionInfo s) =>
+      s.title.isEmpty ? 'Sesión sin título' : s.title;
 
   /// Marcada como favorita: pinta la estrella. El toggle vive en el menú de la
   /// fila, porque acá un toque es "abrir el chat" y marcar de pasada sería
@@ -481,14 +522,22 @@ class _SessionRow extends StatelessWidget {
                       children: [
                         LayerGate(
                           'sessions.row.title',
-                          child: Text(
-                            session.title.isEmpty
-                                ? 'Sesión sin título'
-                                : session.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.titleMedium,
-                          ),
+                          // Con el turno corriendo, el título lleva la luz que
+                          // lo recorre de izquierda a derecha. Sin esto la
+                          // única señal de que esa sesión sigue viva era el
+                          // puntito, y con el título largo el usuario no la ve.
+                          child: running && sweep != null
+                              ? _SweepTitle(
+                                  text: _tituloDe(session),
+                                  sweep: sweep!,
+                                  style: theme.textTheme.titleMedium,
+                                )
+                              : Text(
+                                  _tituloDe(session),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.titleMedium,
+                                ),
                         ),
                         if (meta != null)
                           LayerGate(
@@ -679,6 +728,80 @@ class _PulseDotState extends State<_PulseDot>
   );
 }
 
+/// El título de una sesión **corriendo**, con una luz que lo recorre de 0 a 100
+/// de izquierda a derecha.
+///
+/// Un `ShaderMask` con un degradado lineal cuya franja Brillante se desplaza: el
+/// texto se pinta del color base salvo en la franja, que va al color de marca.
+/// Es el mismo `.shimmer-text` del cliente web (`chat.css`), y comparte los
+/// 1400 ms de `SquaresSpinner` y de `_PulseDot` para que las tres señales de
+/// "está trabajando" laten a la vez.
+///
+/// Va en el **título** y no en una fila entera porque el título es lo que el
+/// usuario está mirando cuando vuelve de otra pantalla: la fila completa
+/// brillando no dice *qué* está trabajando.
+class _SweepTitle extends StatelessWidget {
+  const _SweepTitle({required this.text, required this.sweep, this.style});
+
+  final String text;
+
+  /// El reloj compartido. Va como `Animation` y no como `Listenable` porque el
+  /// degradado necesita **leer el valor** de cada tick, no solo enterarse de que
+  /// hubo uno.
+  final Animation<double> sweep;
+  final TextStyle? style;
+
+  /// El ancho de la franja brillante, como fracción del ancho del texto.
+  ///
+  /// 0.28 es el número del `.shimmer-text` del web: más angosta pasa
+  /// inadvertida entre dos letras y más ancha tapa el título entero de golpe,
+  /// que es lo mismo que no animar nada.
+  static const double _franja = 0.28;
+
+  /// Por key y no por tipo: hay varias filas y el test necesita apuntar a la
+  /// que está corriendo.
+  static const Key sweepKey = SessionsView.titleSweepKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final base = (style ?? Theme.of(context).textTheme.titleMedium)!;
+    final quieto = base.color ?? scheme.onSurface;
+    return AnimatedBuilder(
+      animation: sweep,
+      builder: (context, _) => ShaderMask(
+        key: sweepKey,
+        blendMode: BlendMode.srcIn,
+        shaderCallback: (bounds) {
+          // El centro de la franja viaja de `-franja` (fuera por la izquierda)
+          // a `1` (fuera por la derecha): en los dos extremos no se ve nada,
+          // así que el ciclo no tiene salto visible al volver a arrancar.
+          final centro = (-_franja) + (1 + 2 * _franja) * sweep.value;
+          final ancho = bounds.width * _franja;
+          final inicio = (bounds.width + 2 * ancho) * centro - ancho;
+          final escala = bounds.width + 2 * ancho;
+          return LinearGradient(
+            begin: Alignment.centerLeft,
+            end: Alignment.centerRight,
+            colors: <Color>[quieto, scheme.primary, quieto],
+            stops: <double>[
+              (inicio / escala).clamp(0.0, 1.0),
+              ((inicio + 2 * ancho) / escala).clamp(0.0, 1.0),
+              1,
+            ],
+          ).createShader(bounds);
+        },
+        child: Text(
+          text,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: base,
+        ),
+      ),
+    );
+  }
+}
+
 /// Buscador: campo con lupa adentro, debajo del app bar.
 class _SearchBar extends StatelessWidget {
   const _SearchBar({
@@ -860,9 +983,7 @@ class _SessionMenu extends StatelessWidget {
               color: isFavorite ? theme.colorScheme.primary : null,
             ),
             title: Text(
-              isFavorite
-                  ? 'Quitar de favoritas'
-                  : 'Marcar como favorita',
+              isFavorite ? 'Quitar de favoritas' : 'Marcar como favorita',
               style: theme.textTheme.bodyMedium,
             ),
             onTap: () => onPick(SessionAction.toggleFavorite),

@@ -165,8 +165,8 @@ void main() {
     final meta = spec['_meta'] as Map<String, dynamic>;
     expect(meta['total'], total);
     expect(meta['active'], active);
-    expect(total, 94);
-    expect(active, 90);
+    expect(total, 95);
+    expect(active, 91);
   });
 
   test('las 4 capas apagadas son exactamente las aprobadas', () {
