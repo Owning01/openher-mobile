@@ -72,6 +72,8 @@ class FilesView extends StatefulWidget {
   static const String layerAppBar = 'files.appbar';
   static const String layerTitle = 'files.appbar.title';
   static const String layerSearch = 'files.appbar.search';
+  /// El botón de cambiar de disco. Solo se ve **fuera** de la raíz.
+  static const String layerDrives = 'files.appbar.drives';
   static const String layerOverflow = 'files.appbar.overflow';
   static const String layerBreadcrumb = 'files.breadcrumb';
   static const String layerRowEntry = 'files.row.entry';
@@ -85,6 +87,7 @@ class FilesView extends StatefulWidget {
   static const Key breadcrumbKey = Key('files-breadcrumb');
   static const Key searchFieldKey = Key('files-search');
   static const Key listKey = Key('files-list');
+  static const Key drivesKey = Key('files-drives');
   static const Key emptyKey = Key('files-empty');
   static const Key errorKey = Key('files-error');
 
@@ -341,6 +344,21 @@ class _FilesViewState extends State<FilesView> {
                   onPressed: _openSearch,
                 ),
               ),
+            // **Cambiar de disco.** Es lo que faltaba para que el navegador se
+            // parezca a Explorer: sin esto la raíz era la carpeta del `location`
+            // del server y no había forma de nombrar otro disco.
+            //
+            // Solo se ve **fuera** de la raíz: dentro de un disco el botón de
+            // arriba ya cumple ese papel, y dos caminos para lo mismo es ruido.
+            if (!_model.isRoot)
+              LayerGate(
+                FilesView.layerDrives,
+                child: AppIconButton(
+                  icon: 'hard-drive',
+                  tooltip: 'Cambiar de disco',
+                  onPressed: _goToDrives,
+                ),
+              ),
             LayerGate(
               FilesView.layerOverflow,
               child: AppIconButton(
@@ -449,6 +467,10 @@ class _FilesViewState extends State<FilesView> {
     if (_model.loading && _model.nodes.isEmpty) {
       return const Center(child: CircularProgressIndicator(strokeWidth: 2));
     }
+    // La raíz **no es una carpeta**: es "Este equipo", con los discos de la PC.
+    // Ahí no hay nada que listar hasta que se pregunte, y pedir los 26 discos al
+    // abrir la pantalla era lo que la dejaba congelada un timeout entero.
+    if (_model.isRoot) return _drivesBody();
     if (_model.nodes.isEmpty) return _emptyState();
     return RefreshIndicator(
       onRefresh: _refresh,
@@ -463,6 +485,67 @@ class _FilesViewState extends State<FilesView> {
         itemBuilder: (context, index) => _row(_model.nodes[index]),
       ),
     );
+  }
+
+  /// "Este equipo": los discos de la PC.
+  ///
+  /// Se pide **recién cuando se muestra**, no al construir la pantalla: probar 26
+  /// letras al abrir Archivos era un timeout de 3 s con la pantalla en blanco.
+  /// Y se pide **una sola vez** por sesión de pantalla — el usuario no cambia de
+  /// disco en caliente, y si lo hace, el botón de discos lo vuelve a pedir.
+  Widget _drivesBody() {
+    if (_model.roots == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_model.loadRoots());
+      });
+      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+    }
+    final roots = _model.roots!;
+    if (roots.isEmpty) {
+      return _emptyState(
+        // Decirlo: "no hay discos" sin haber preguntado sería mentir, y "no se
+        // pudo" sin saber por qué tampoco ayuda.
+        message: 'No se encontraron discos. Si la PC tiene alguno, revisá que el '
+            'server lo vea desde su ubicación.',
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: () => _model.loadRoots(),
+      child: ListView.separated(
+        key: FilesView.drivesKey,
+        physics: const AlwaysScrollableScrollPhysics(),
+        itemCount: roots.length,
+        separatorBuilder: (context, index) =>
+            Divider(height: 1, color: Theme.of(context).dividerColor),
+        itemBuilder: (context, index) {
+          final drive = roots[index];
+          return ListTile(
+            key: Key('files-drive-$drive'),
+            leading: AppIcon('hard-drive', size: 20),
+            title: Text(drive, style: Theme.of(context).textTheme.bodyMedium),
+            subtitle: Text(
+              'Disco local',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            onTap: () => unawaited(_model.openDrive(drive)),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Abre la hoja de discos.
+  ///
+  /// Es el otro camino a "Este equipo", además del botón del app bar: desde la
+  /// raíz de un disco, "subir" ya vuelve acá, pero el botón es el que se ve.
+  /// Vuelve a "Este equipo" (la lista de discos).
+  ///
+  /// Antes abría una hoja con los discos: redundante, porque la vista de
+  /// discos **es** "Este equipo". Y con la hoja encima, el usuario cree que
+  /// está cambiando de disco cuando en realidad sigue viendo la carpeta de
+  /// antes, que es justo la confusión que se quiso evitar.
+  Future<void> _goToDrives() async {
+    await _model.loadRoots();
   }
 
   Widget _row(FileNode node) {
@@ -595,7 +678,10 @@ class _FilesViewState extends State<FilesView> {
   }
 
   /// Carpeta vacía: `.empty` del prototipo (icono grande apagado + texto).
-  Widget _emptyState() {
+  /// [message] cuando el vacío **no** es "no hay nada": no hay discos,
+  /// o una carpeta que no se pudo leer. Decirlo distinto es lo que
+  /// separa un estado vacío de un error disfrazado.
+  Widget _emptyState({String? message}) {
     final theme = Theme.of(context);
     return Center(
       key: FilesView.emptyKey,
@@ -611,6 +697,18 @@ class _FilesViewState extends State<FilesView> {
             ),
           ),
           const SizedBox(height: AppSpacing.sm),
+          if (message != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.lg,
+                vertical: 0,
+              ),
+              child: Text(
+                message,
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall,
+              ),
+            ),
           Text(
             _model.query.isEmpty
                 ? 'Esta carpeta está vacía.'

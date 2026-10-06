@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart' show ChangeNotifier;
 
 import '../../../data/repositories/file_repository.dart';
 import '../../../domain/models/errors.dart';
+import 'fs_path.dart';
 
 /// Una parte de la ruta actual, para la fila de breadcrumbs.
 ///
@@ -58,6 +59,19 @@ class FilesViewModel extends ChangeNotifier {
   /// Directorio actual, relativo a la raíz del `location`. `''` es la raíz.
   String get path => _path;
 
+  /// Los discos de la PC, o `null` si todavía no se preguntaron.
+  ///
+  /// `null` y no `[]` porque son cosas distintas: `[]` es "pregunté y no hay
+  /// discos", y `null` es "todavía no pregunté". Confundirlas hacía que la
+  /// pantalla mostrara "no hay discos" antes de tiempo.
+  List<String>? _roots;
+
+  List<String>? get roots => _roots;
+
+  /// ¿Se está en la raíz de un **disco**? Ahí el padre no es una carpeta: es la
+  /// lista de discos.
+  bool get isDriveRoot => _path.isNotEmpty && esRaiz(_path);
+
   bool _loading = false;
 
   /// ¿Hay una request en vuelo? Se puede refrescar con la lista vieja en pantalla.
@@ -77,10 +91,16 @@ class FilesViewModel extends ChangeNotifier {
   /// ¿Se está en la raíz del `location`? (no hay padre al que subir)
   bool get isRoot => _path.isEmpty;
 
+
   /// Directorio vacío: se puede pintar "Esta carpeta está vacía".
   bool get isEmpty => !_loading && _error == null && _nodes.isEmpty;
 
   /// La fila de breadcrumbs del [path] actual.
+  ///
+  /// El **primer trozo es el disco**, no `/`: la app navega el disco de la PC, y
+  /// el nivel de arriba de `G:/Proyectos/web` es `G:`, no la raíz del `location`
+  /// del server. Antes el primer trozo era `/` y por eso no había forma de
+  /// volver a la lista de discos.
   List<FileCrumb> get crumbs => buildCrumbs(_path);
 
   /// El `location` del server es una ruta absoluta en la máquina de aquél: la
@@ -88,15 +108,33 @@ class FilesViewModel extends ChangeNotifier {
   /// eso la raíz se muestra como `/` y los segmentos con su nombre.
   static List<FileCrumb> buildCrumbs(String path) {
     final segments = FileNode.segmentsOf(path);
-    final crumbs = <FileCrumb>[
-      FileCrumb(
-        label: '/',
-        path: FileRepository.rootPath,
-        isTail: segments.isEmpty,
-      ),
-    ];
-    var accumulated = '';
+    final crumbs = <FileCrumb>[];
+
+    // ¿Hay disco? `G:/Proyectos/web` -> `G:`. Sin disco (ruta relativa vieja) se
+    // conserva el `/` de antes, para no romper lo que ya funciona.
+    final drive = _driveOf(path);
+    if (drive != null) {
+      crumbs.add(
+        // Con la barra: `_crumbsText` **concatena** las etiquetas, así que
+        // `C:` + `lib` daba `C:lib`. Con `C:/` da `C:/lib`, que es la
+        // ruta de verdad y lo que el breadcrumb tiene que mostrar.
+        FileCrumb(label: normalizarRuta(drive), path: normalizarRuta(drive), isTail: segments.length <= 1),
+      );
+    } else {
+      crumbs.add(
+        FileCrumb(
+          label: '/',
+          path: FileRepository.rootPath,
+          isTail: segments.isEmpty,
+        ),
+      );
+    }
+
+    var accumulated = drive == null ? '' : normalizarRuta(drive);
     for (var i = 0; i < segments.length; i++) {
+      // El primer segmento de una ruta absoluta es el nombre del disco, que ya
+      // va en el trozo de arriba.
+      if (drive != null && i == 0) continue;
       accumulated = accumulated.isEmpty
           ? segments[i]
           : FileNode.join(accumulated, segments[i]);
@@ -111,24 +149,78 @@ class FilesViewModel extends ChangeNotifier {
     return crumbs;
   }
 
+  /// El disco de una ruta absoluta, o `null` si no lo tiene.
+  ///
+  /// `G:/a` -> `G:`; `G:` -> `G:`; `lib/ui` -> `null`.
+  static String? _driveOf(String path) {
+    final normal = normalizarRuta(path);
+    final match = RegExp(r'^([A-Za-z]:)').firstMatch(normal);
+    return match?.group(1);
+  }
+
   // ───────────────────────────── movimientos ──────────────────────────────────
 
   /// Lista [path]. Navegar **sale** de la búsqueda: si estás viendo un
   /// directorio, no estás buscando.
-  Future<void> load(String path) => _fetch(
-    path: path,
-    query: '',
-    request: () => repository.listDirectory(path: path),
-  );
+  Future<void> load(String path) {
+    // La misma ruta normalizada va **al server** y al estado. Antes el estado
+    // quedaba normalizado y el pedido no: `parentOf(C:/fotos')` da `C:` y el
+    // server manda `?path=C%3A`, que contesta 500 (medido).
+    final limpio = normalizarRuta(path);
+    return _fetch(
+      path: limpio,
+      query: '',
+      request: () => repository.listDirectory(path: limpio),
+    );
+  }
 
   /// Entra a la carpeta [name] dentro de [path].
   Future<void> navigateTo(String name) => load(FileNode.join(_path, name));
 
   /// Sube al padre. En la raíz no hace nada (y no pide nada).
+  ///
+  /// Desde la raíz de un **disco** el padre no es una carpeta: es la lista de
+  /// discos. Ahí "subir" significa volver a "Este equipo", que es lo que hace
+  /// Explorer con el botón de arriba.
   Future<void> up() async {
     if (isRoot) return;
+    if (isDriveRoot) {
+      await loadRoots();
+      return;
+    }
     await load(FileNode.parentOf(_path));
   }
+
+  /// Pide los discos de la PC y los deja en [roots].
+  ///
+  /// No lista nada: la pantalla muestra "Este equipo" con los discos, y recién
+  /// cuando el usuario toca uno se lista. Pedir los discos y listar el primero a
+  /// la vez era lo que hacía que abrir Archivos tardara un timeout entero.
+  Future<void> loadRoots() async {
+    _loading = true;
+    _error = null;
+    _notify();
+    // La vista de "Este equipo" solo se muestra con la raiz vacia: sin esto,
+    // `up()` desde un disco llamaba a loadRoots y el path seguia siendo `C:/`,
+    // asi que la lista de discos nunca aparecia.
+    _path = FileRepository.rootPath;
+    _query = '';
+    _nodes = const <FileNode>[];
+    try {
+      _roots = await repository.roots();
+    } catch (e) {
+      _error = describeFilesError(e);
+    } finally {
+      _loading = false;
+      _notify();
+    }
+  }
+
+  /// Entra a un disco: `G:/`.
+  ///
+  /// Es el mismo camino que [load], pero con la ruta absoluta del disco. El
+  /// server la resuelve aunque el `location` sea otro (medido).
+  Future<void> openDrive(String drive) => load(normalizarRuta(drive));
 
   /// Busca por nombre en todo el `location` (`/api/fs/find`).
   ///
@@ -168,7 +260,11 @@ class FilesViewModel extends ChangeNotifier {
     required Future<List<FileNode>> Function() request,
   }) async {
     final generation = ++_generation;
-    _path = path;
+    // La ruta se **normaliza** al guardarla: `FileNode.parentOf(C:/fotos)`
+    // devuelve `C:` (sin barra), y el resto del modelo —`esRaiz`, `buildCrumbs`,
+    // la comparación con `rootPath`— trabaja con `C:/`. Sin normalizar acá, el
+    // path guardado y el de la vista se desalineaban por una barra.
+    _path = normalizarRuta(path);
     _query = query;
     _loading = true;
     _error = null;

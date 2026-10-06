@@ -46,6 +46,7 @@ import 'package:http/http.dart' as http;
 import '../../core/network/api_client.dart';
 import '../../core/network/server_config.dart';
 import '../../domain/models/errors.dart';
+import '../../ui/features/files/fs_path.dart';
 
 /// Una entrada del árbol de archivos: una carpeta o un archivo.
 ///
@@ -199,10 +200,53 @@ class FileRepository {
   /// El `location[directory]` **no** se manda: cada server habla del `location`
   /// que el usuario abrió al conectar, y mandarle otro sería pedirle un
   /// directorio que la app ni conoce.
+  ///
+  /// **Acepta rutas absolutas**, y eso es lo que habilita cambiar de disco.
+  /// Medido 2026-10-6: `path=G:/` lista el disco `G:` aunque el `location` del
+  /// server sea `C:\Users\perca`. El doc viejo decía que el path era "nunca
+  /// absoluto"; era falso y era lo que bloqueaba salir de la carpeta base.
   Future<List<FileNode>> listDirectory({String path = rootPath}) async {
     final page = await _api.listDirectory(path: path.isEmpty ? null : path);
     return _map(page.data);
   }
+
+  /// Los discos de la PC, **descubiertos probando** cada letra.
+  ///
+  /// El server **no tiene** un endpoint que los enumere: medido 2026-10-6,
+  /// `/api/fs/roots`, `/api/fs/drives` y `/api/drives` dan **404**. La única
+  /// forma de saber qué discos hay es pedir la lista de cada raíz y ver cuál
+  /// contesta.
+  ///
+  /// **En paralelo y con timeout corto**, y no por gusto: en serie, 26 requests
+  /// a un server que puede tardar 10 s por una unidad de red muerta son cuatro
+  /// minutos de pantalla congelada. En paralelo, el peor caso es un timeout.
+  ///
+  /// Devuelve las raíces que contestaron, en orden de letra. Una letra que no
+  /// existe simplemente no aparece: no hay forma de distinguir "no existe" de
+  /// "está caída", y decirlo en pantalla es trabajo de la UI.
+  Future<List<String>> roots() async {
+    final resultados = await Future.wait(
+      kLetrasDeDisco.map((letra) async {
+        final raiz = discoDe(letra);
+        try {
+          await _api
+              .listDirectory(path: raiz)
+              .timeout(kRootProbeTimeout);
+          return raiz;
+        } catch (_) {
+          return null;
+        }
+      }),
+    );
+    return <String>[for (final r in resultados) if (r != null) r];
+  }
+
+  /// Cuánto se espera a una letra antes de darla por muerta.
+  ///
+  /// 3 s: el server es local o va por Tailscale, así que una respuesta sana
+  /// llega en milisegundos. Lo que tarda más es una unidad de red que no
+  /// contesta, y esa hay que descartarla rápido.
+  static const Duration kRootProbeTimeout = Duration(seconds: 3);
 
   /// `GET /api/fs/find` — búsqueda por nombre, en todo el `location`.
   ///
