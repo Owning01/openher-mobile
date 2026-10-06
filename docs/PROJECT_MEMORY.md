@@ -797,3 +797,27 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
 - Publicado **1.15.0+23** (30.023.593 B, 12 intents / 12 actions, zip de 416
   entradas, minSdk 24 / targetSdk 36). Verificado sobre el APK **publicado**
   bajado con cache-buster, no sobre el local.
+
+## 2026-10-06 - Publicado 1.15.0+23
+
+- Version **1.15.0+23** publicada en `Owning01/openher-mobile` y en
+  `Owning01/mis-apps`. Verificada sobre el APK **descargado** (con cache-buster,
+  no el local): 30.023.593 B, `versionCode=23`, `versionName=1.15.0`, minSdk 24,
+  targetSdk 36, zip de 416 entradas, **12 `<intent>` / 12 `<action>` (1:1)**.
+- Verificado antes de publicar: `flutter analyze lib` sin errores ni warnings,
+  **912 tests verdes (6 skipped)**, y `dart format` sin cambios en los 12
+  archivos tocados.
+- Ojo con `dart format --output=none --set-exit-if-changed lib test` sobre el
+  repo entero: marca **20 archivos cambiados que no son de este trabajo**. Es
+  drift de formato preexistente; reformatearlos metería un diff ajeno en el
+  commit. Se verifica archivo por archivo.
+- Entra en esta release: mensaje en cola (gris + 3 botones de solo icono),
+  tarjeta de la pregunta del agente (el server la manda en `running`, no
+  `pending`), caja del turno 148 -> 900 px, luz en el titulo de la sesion que
+  corre + orden por mas reciente, miniaturas de imagenes del agente
+  expandibles, boton de volver a descargar, copiar mensaje y deshacer que
+  devuelve el texto al composer.
+- **Sin verificar en pantalla**: el Xiaomi sigue sin aparecer en `adb`, asi que
+  nada de esto se vio correr en un telefono real. Lo verificado es contra el
+  server real y contra el APK publicado.
+- Pendiente sin tocar: el **aviso de modo de bajo consumo**.
