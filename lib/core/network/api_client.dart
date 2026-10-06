@@ -225,10 +225,7 @@ class ApiClient {
   Future<List<Map<String, dynamic>>> listMcpResources({
     String? directory,
   }) async {
-    final obj = await _object(
-      '/mcp/resource',
-      directory: directory,
-    );
+    final obj = await _object('/mcp/resource', directory: directory);
     final raw = obj['resources'];
     if (raw is! List) return const [];
     return [
@@ -510,6 +507,39 @@ class ApiClient {
   static Duration defaultBackoff(int attempt) => Duration(
     milliseconds: min(1000.0 * pow(0.8, attempt).toDouble(), 2000.0).round(),
   );
+
+  /// `DELETE /api/session/{id}` — borra la sesión **en el server**.
+  ///
+  /// **Medido 2026-10-06 contra el server real**: devuelve **204 con cuerpo
+  /// vacío** (que `_send` ya resuelve como `null`), después `GET` de esa sesión
+  /// da 404 y desaparece de `GET /api/session`. Funciona **sin `directory`**.
+  ///
+  /// El reintento sin `directory` viene del cliente web de este repo, que lo
+  /// dejó medido: un `directory` que no coincide con el de la sesión hace
+  /// fallar el call, y reintentar sin él lo salva. Acá el borrado se hace con
+  /// el `directory` de la sesión cuando se conoce, así que el reintento es la
+  /// red de seguridad para el caso raro.
+  Future<void> deleteSession(String sessionId, {String? directory}) async {
+    final path = '/session/$sessionId';
+    try {
+      await _send(
+        'DELETE',
+        path,
+        query: <String, String?>{'location[directory]': directory},
+        timeout: _timeout,
+        allowRetry: false,
+      );
+    } catch (e) {
+      if (directory == null) rethrow;
+      await _send(
+        'DELETE',
+        path,
+        query: const <String, String?>{},
+        timeout: _timeout,
+        allowRetry: false,
+      );
+    }
+  }
 
   Future<dynamic> _send(
     String method,

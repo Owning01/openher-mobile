@@ -131,6 +131,16 @@ class SessionRepository {
     };
   }
 
+  /// `DELETE /api/session/{id}` → borra la sesión **en el server**.
+  ///
+  /// Devuelve `true` si el server la borró. El `directory` es el de la sesión
+  /// (su `location.directory`): el server ubica la sesión por ese path, y
+  /// mandarlo mal hace fallar el call aunque la sesión exista.
+  Future<bool> delete(String id, {String? directory}) async {
+    await _api.deleteSession(id, directory: directory);
+    return true;
+  }
+
   /// `POST /api/session` → la sesión recién creada.
   ///
   /// Sin `directory` el server usa el directorio actual de la máquina, que es

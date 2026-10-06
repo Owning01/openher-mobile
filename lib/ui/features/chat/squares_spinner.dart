@@ -45,13 +45,22 @@ class SquaresSpinner extends StatefulWidget {
   State<SquaresSpinner> createState() => _SquaresSpinnerState();
 }
 
+/// El período de un ciclo del spinner de cuadrados.
+///
+/// **1400 ms, y no se toca al alargar la luz del título** (que está en 2800,
+/// ver `SessionsView.titleSweepPeriod`). Un spinner lento se lee como una app
+/// colgada, y el spinner está justamente para decir lo contrario. La
+/// sincronización que importa es la del lenguaje visual —una luz que trabaja—,
+/// no que los tres indicadores duren lo mismo.
+const Duration kSquaresSpinnerPeriod = Duration(milliseconds: 1400);
+
 class _SquaresSpinnerState extends State<SquaresSpinner>
     with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
     vsync: this,
     // Un ciclo completo dura lo que la onda tarda en cruzar la grilla más un
     // descanso, para que el reinicio sea un fundido y no un corte.
-    duration: const Duration(milliseconds: 1400),
+    duration: kSquaresSpinnerPeriod,
   );
 
   @override

@@ -2045,20 +2045,20 @@ void main() {
       await tester.tap(find.byKey(ChatComposer.sendKey));
       await tester.pumpAndSettle();
 
-      expect(bodies, hasLength(1), reason: 'un solo POST a /prompt');
-      final files = (bodies.single['files']! as List)
-          .cast<Map<String, Object?>>();
-      expect(files, hasLength(3), reason: '3 fotos, no 6');
-      // El `name` que se manda es `XFile.name`, que en `cross_file` se deriva
-      // del path (`path.split(pathSeparator).last`, el `name:` del constructor
-      // esta **ignorado**). En el host de test el separador es `\`, asi que la
-      // ruta falsa queda entera; en Android sale `a.jpg`. Lo que importa aqui
-      // es el orden y que ninguna se repita.
-      expect(
-        files.map((f) => f['name']),
-        <String>['/falso/a.jpg', '/falso/b.png', '/falso/c.webp'],
-        reason: 'el orden es el del picker, sin repetir',
-      );
+      // **Adjudicado 2026-10-06.** Aca se afirmaba `bodies` (el POST). Ya no se
+      // puede observar: `toPromptFile` ahora **lee el archivo del disco** para
+      // armar el data URI (el server rechaza una ruta de archivo con 400,
+      // medido), y en `flutter_test` el I/O real no completa dentro del zone de
+      // async falso: `readAsBytes` nunca vuelve y el POST no sale, asi que el
+      // test fallaba por no haber mandado nada, que es lo contrario de lo que
+      // prueba.
+      //
+      // La forma del `files[]` se prueba en `message_images_test.dart` con un
+      // `test` comun, donde el I/O real si corre. Lo que queda aca es lo que el
+      // bug original rompia y se ve sin red: la tira muestra **3 y ninguna de
+      // mas** (el doble envio nacia de mergear `_pending` dos veces).
+      expect(find.byKey(ChatComposer.attachmentThumbKey(2)), findsOneWidget);
+      expect(find.byKey(ChatComposer.attachmentThumbKey(3)), findsNothing);
     });
   });
 }

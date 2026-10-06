@@ -20,6 +20,9 @@
 /// aunque el viewmodel tenga los datos.
 library;
 
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:speech_to_text/speech_to_text.dart';
@@ -39,11 +42,27 @@ class ComposerAttachment {
 
   /// `{'uri': …, 'name': …, 'mime': …}`, que es lo que espera
   /// `POST /api/session/{id}/prompt`.
-  Map<String, String> toPromptFile() => {
-    'uri': uri,
-    'name': name,
-    'mime': ?mime,
-  };
+  ///
+  /// **El `uri` va como data URI, no como ruta de archivo.** Medido 2026-10-06
+  /// contra el server real: mandar la ruta del teléfono —o `file://`, o
+  /// `content://`, o una URL— devuelve
+  /// `400 InvalidRequestError: Unsupported attachment URI`, y `file://` da
+  /// `Invalid file URI`. Con `data:<mime>;base64,<bytes>` de una imagen real
+  /// devuelve **200**. El server no puede leer el disco del teléfono, así que
+  /// el contenido tiene que viajar en el cuerpo.
+  ///
+  /// Tira si el archivo no se puede leer: el que llama decide qué decir. Un
+  /// adjunto que no se pudo leer y se manda igual se convierte en un 400 que no
+  /// explica nada.
+  Future<Map<String, String>> toPromptFile() async {
+    final bytes = await File(uri).readAsBytes();
+    final tipo = mime ?? 'application/octet-stream';
+    return {
+      'uri': 'data:$tipo;base64,${base64Encode(bytes)}',
+      'name': name,
+      'mime': tipo,
+    };
+  }
 }
 
 class ChatComposer extends StatefulWidget {
