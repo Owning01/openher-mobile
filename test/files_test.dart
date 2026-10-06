@@ -440,6 +440,9 @@ void main() {
       );
       addTearDown(model.dispose);
       await model.load(FileRepository.rootPath);
+      // La raiz ya no es una carpeta: es "Este equipo". Los tests que
+      // quieren ver archivos entran a un disco, que es el modelo nuevo.
+      await model.openDrive('C:/');
       await pumpView(tester, model, onAddToChat: onAddToChat);
       return model;
     }
@@ -455,8 +458,11 @@ void main() {
       );
 
       expect(find.text('Archivos'), findsOneWidget);
-      // El breadcrumb muestra el directorio actual: raíz ⇒ `/`.
-      expect(_crumbsText(tester), '/');
+      // **Adjudicado 2026-10-06.** La raíz ya no es `/`: es "Este equipo"
+      // y el primer trozo del breadcrumb es el **disco**, no la raíz del
+      // `location` del server. La etiqueta lleva la barra (`C:/`) porque
+      // `_crumbsText` concatena las etiquetas y tiene que dar la ruta.
+      expect(_crumbsText(tester), 'C:/');
       expect(find.text('main.dart'), findsOneWidget);
       expect(find.text('dart'), findsOneWidget, reason: 'files.row.ext');
       // La carpeta se muestra con la barra del prototipo.
@@ -491,8 +497,12 @@ void main() {
       await tester.tap(find.byKey(FilesView.rowKey('lib')));
       await tester.pumpAndSettle();
 
-      expect(model.path, 'lib');
-      expect(_crumbsText(tester), '/lib');
+      // **Adjudicado 2026-10-06.** `pumpFiles` entra al disco `C:/` (la raíz ya
+      // no es una carpeta), así que la ruta es **absoluta**: `C:/lib`, no `lib`.
+      // El criterio no cambia: tocar la carpeta entra a ella y el breadcrumb
+      // refleja dónde quedó.
+      expect(model.path, 'C:/lib');
+      expect(_crumbsText(tester), 'C:/lib');
     });
 
     testWidgets('tocar largo abre la hoja y "Añadir al chat" avisa', (
@@ -634,6 +644,13 @@ void main() {
       final model = FilesViewModel(repository: _repo(fake));
       addTearDown(model.dispose);
       await pumpView(tester, model);
+      // La raiz es "Este equipo": sin entrar a un disco, la sonda de
+      // discos llena `requests` y el test mide otra cosa.
+      await model.openDrive('C:/');
+      await tester.pumpAndSettle();
+      // Entrar al disco ya hizo su request: sin limpiar, el test mide el
+      // arranque y no la búsqueda, que es lo que importa acá.
+      fake.requests.clear();
 
       await _tapIcon(tester, 'Buscar archivos');
       expect(find.byKey(FilesView.searchFieldKey), findsOneWidget);
