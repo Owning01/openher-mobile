@@ -260,6 +260,41 @@ void main() {
       expect(groupSessions([sessionAt(kNow)], kNow), hasLength(1));
     });
 
+    // Ordenado de más a menos reciente. El server devuelve las sesiones en el
+    // orden de los cursores, así que sin este sort la sesión que acabás de usar
+    // podía quedar debajo de otras del mismo día.
+    test('dentro de un grupo van de más reciente a menos reciente', () {
+      final hoy = kNow;
+      final sessions = [
+        sessionAt(hoy.subtract(const Duration(minutes: 30))),
+        sessionAt(hoy.subtract(const Duration(hours: 5))),
+        sessionAt(hoy.subtract(const Duration(minutes: 2))),
+      ];
+
+      final grupo = groupSessions(sessions, kNow).single;
+
+      expect(grupo.sessions.map((s) => s.updatedAtMs).toList(), [
+        hoy.subtract(const Duration(minutes: 2)).millisecondsSinceEpoch,
+        hoy.subtract(const Duration(minutes: 30)).millisecondsSinceEpoch,
+        hoy.subtract(const Duration(hours: 5)).millisecondsSinceEpoch,
+      ]);
+    });
+
+    // El sort no puede mezclar los grupos: el de HOY sigue arriba del de AYER.
+    test('el sort por fecha no reordena los grupos entre sí', () {
+      final sessions = [
+        sessionAt(kNow.subtract(const Duration(days: 2))),
+        sessionAt(kNow.subtract(const Duration(minutes: 1))),
+        sessionAt(kNow.subtract(const Duration(days: 1))),
+      ];
+
+      expect(groupSessions(sessions, kNow).map((g) => g.bucket.label), [
+        'HOY',
+        'AYER',
+        'ESTA SEMANA',
+      ]);
+    });
+
     test('día calendario, no 24 horas: 23:40 de ayer es AYER', () {
       final late = DateTime(2026, 9, 28, 0, 5);
       final yesterdayLate = DateTime(2026, 9, 27, 23, 40);
@@ -746,6 +781,11 @@ void main() {
       expect(find.text('openher-mobile · build'), findsOneWidget);
       expect(find.text('openher-flutter-desktop · plan'), findsOneWidget);
       expect(find.text('En ejecución'), findsOneWidget);
+      // La sesión que corre lleva la **luz en el título**, no solo el punto: el
+      // título es lo que el usuario mira al volver de otra pantalla, y con
+      // títulos largos el punto se pierde. Una sola luz en toda la lista,
+      // porque es un solo reloj compartido.
+      expect(find.byKey(SessionsView.titleSweepKey), findsOneWidget);
       expect(find.text(r'$0.42'), findsOneWidget);
       expect(find.text(r'$2.07'), findsOneWidget);
       expect(find.text('Sin sesiones'), findsNothing);

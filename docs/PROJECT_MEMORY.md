@@ -637,3 +637,163 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   con `showsBanner` sin `canRetry` caen 2; sin el boton en la UI cae 1.
 - Estado: `flutter analyze lib` sin errores ni warnings, **884 tests verdes (6
   skipped)**, publicado 1.13.2+21 (30.023.625 B, 12 intents / 12 actions).
+
+## 2026-10-03 - El mensaje en cola: se ve gris con editar / eliminar / enviar
+
+- **La razon de que "no se visualizaba" no era la UI: era que no se podia
+  llegar.** `UserMessage.pendingSend`, `ChatViewModel.pendings`,
+  `takePendingText`, `discardPending` y `confirmSend` existian hace dias, pero
+  `message_bubble.dart` **no leia `pendingSend` en ningun lado** y, mas grave,
+  el composer no dejaba mandar con el turno en curso: `_submit` hacia
+  `onStop` siempre que `working`. O sea que la burbuja en cola era codigo
+  muerto: nada la creaba.
+- El prototipo tampoco encola (`mobile.html:1718`, `doSend` llama
+  `stopWorking()` si `working`), asi que no era falta de port: era una pieza que
+  nunca existio. La decision es del shell, no del diseno.
+- **El boton del composer ahora es de dos cosas**: con el input **vacio** sigue
+  siendo Detener (rojo, icono `stop`, atajo de un toque); con **algo escrito**
+  es Enviar (`primary`, icono `send`, etiqueta "Enviar en cola") y encola. El
+  prototipo y el boton unico no能手 pueden hacer las dos cosas a la vez.
+- La burbuja en cola se ve **gris**: `surfaceContainerHighest` + borde
+  `outline`, en vez del azul `primary`. El azul dice "el server ya lo tiene", y
+  un azul para algo que nadie mando hace que el usuario lo relea creyendolo
+  entregado. Los tres botones son **solo icono** (`edit`, `trash`,
+  `arrow-upward`), 28 px de alto, y el de enviar va en `primary` porque es la
+  accion que el usuario quiere el 80% de las veces. Sin el `⋮` del menu: sus
+  tres acciones **son** el menu de ese mensaje.
+- Editar reutiliza el canal del "deshacer": el texto vuelve al input por
+  `_prefillComposer`, y la burbuja desaparece (lo decide `takePendingText`).
+- **`_streamState == StreamState.streaming` NO se metio como condicion.** El
+  pedido era "cuando hay un mensaje mio activo **y se establecio conexion con
+  el server**", pero agregar ese flag **hace la app menos segura**: durante
+  `reconnecting` o `polling` el turno sigue vivo (`working` true) y el mensaje
+  se POSTaria, que es exactamente el `delivery: steer` que el codigo ya
+  documenta. Se dejo `working` como unico disparador y quedo dicho.
+- 9 tests en `test/chat_render_test.dart`, grupo `un mensaje en cola`. Los tres
+  caminos rotos a proposito: el composer siempre-Detener cae **8 de 9** (la
+  exception es justamente "input vacio sigue siendo Detener"); el pendiente azul
+  cae 1; los botones ausentes caen 5.
+- Un test caido de paso: `_Action` de `update_banner` y el cuerpo del mensaje
+  usan `SelectableText`, y `find.text` no los matchea todos. Se agrego el helper
+  `seleccionable(String)` y `cajaDe(tester, texto)` (el `BoxDecoration` de la
+  caja que contiene un texto), porque lo que hay que afirmar es el **color**,
+  no que widget pinto.
+- **Pendiente sin tocar**: la tabla del markdown sigue con
+  `tableColumnWidth: IntrinsicColumnWidth()` (scroll lateral, sin wrap) y el
+  aviso de modo de bajo consumo sigue molestando.
+
+## 2026-10-05 - Preguntas del agente, caja del turno, y loader + orden en sesiones
+
+### La tarjeta de la pregunta no se veia nunca (medido, no supuesto)
+
+- `MessageBubble.pendingQuestionTool` exigia `tool.state is ToolPending`. **Medido
+  contra el server real** (50 sesiones, 4 tools `question`): el estado **nunca** es
+  `pending`. Es `running` (la pregunta espera de verdad, `error: null`), o
+  `completed` (ya respondida), o `error` con `{"type":"aborted","message":"The
+  user dismissed this question"}`.
+- Ahora acepta `ToolPending` **o** `ToolRunning`, y **excluye** `error`: repintar
+  una pregunta que el usuario acaba de descartar seria ofrecer algo que cerro.
+- El `state.input` real llega **parseado** (dict), no como string crudo. Las
+  opciones son objetos `{label, description}`, que `_question` ya leia bien.
+- El fixture del test que existia usaba `pending`: pasaba en verde con la
+  funcion muerta. **Adjudicado en el sitio** con el motivo escrito, y los tres
+  estados medidos quedaron cubiertos.
+
+### La caja del turno: 148 -> 900 px, con scroll interno
+
+- El tope de 148 cortaba la lista de herramientas a menos de cinco filas, asi que
+  un turno normal de agente (8+ tools) se leia a medias y habia que scrollear
+  **dentro** de la caja: un scroll anidado dentro del scroll del chat. Subido a
+  900 px **por pedido** (2026-10-03), manteniendo el scroll interno: 900 px
+  logicos es mas que la pantalla de un telefono (~873), y sin scroll interno la
+  ultima herramienta se iria de vista con el scroll del chat.
+- `live_bugs_test.dart` afirmaba `lessThan(260)`, atado al tope viejo.
+  **Adjudicado**: lo que ese test protege es que siga siendo un **tope**, no un
+  minimo, y eso se sigue verificando contra un techo. El alto real con 14 tools lo
+  mide ahora `chat_render_test.dart`.
+
+### Sesiones: luz en el titulo de la que corre, y orden por reciente
+
+- `groupSessions` ordenaba cada grupo como venía del server (el orden de los
+  cursores), asi que la sesion que acababas de usar podia quedar debajo de otras
+  del mismo dia. Ahora cada bucket se ordena por `updatedMs` **descendente**. El
+  orden de los **grupos** no cambio: `SessionBucket.values` ya va de HOY hacia
+  atras.
+- La sesion corriendo lleva una **luz que recorre el titulo** de 0 a 100 de
+  izquierda a derecha: un `ShaderMask` con un degradado lineal cuya franja
+  brillante se desplaza, en 0.28 del ancho (el numero del `.shimmer-text` del
+  cliente web). Va en el titulo y no en la fila entera porque el titulo es lo que
+  se mira al volver de otra pantalla.
+- **Un solo `AnimationController` para toda la lista**, en el shell: uno por fila
+  arrancaria cuando cada una se monta y quedarian desfasados, y dos sesiones
+  corriendo se leerian como dos cargas distintas. Son los mismos **1400 ms** que
+  usan `_SquaresSpinner` y `_PulseDot`, para que las tres señales de "esta
+  trabajando" laten a la vez.
+- **Trampa de `late final` + `dispose()`**: con un `late final` normal, el
+  `dispose()` **crea** el controller si nunca se uso, y crearlo con el elemento ya
+  desmontado revienta un assert de `TickerProvider` en cada salida de la pantalla
+  (tumbaba 4 tests de `sessions_test.dart` y `widget_test.dart`). Por eso es
+  `AnimationController? _sweep` con un getter perezoso: ademas, una lista sin
+  sesiones vivas no tiene ningun ticker corriendo en segundo plano.
+
+### Guardas
+
+8 tests nuevos. Los cuatro caminos rotos a proposito:
+
+| roto                                            | que cae |
+|-------------------------------------------------|---------|
+| la card vuelve a exigir `ToolPending`          | 1       |
+| el tope de la caja vuelve a 148                | 1 (148 vs >300) |
+| el titulo nunca lleva la luz                   | 1       |
+| sin sort por fecha en los grupos               | 1       |
+
+- Estado: `flutter analyze lib` sin errores ni warnings, **899 tests verdes (6
+  skipped)**.
+- Pendiente sin tocar: el **aviso de modo de bajo consumo** sigue molestando.
+
+## 2026-10-06 - Imagenes del agente en el chat: miniaturas que se expanden
+
+- **Medido antes de escribir nada** (60 sesiones del server real): el agente
+  **no manda markdown**. 0 imagenes `![]()` y 6 rutas **desnudas** en el texto
+  (`bautismoOlivia2021.jpeg`, `rociiorz-20220305-0001.webp`). Por eso un builder
+  de `img` de markdown no habria encontrado ninguna: no hay elemento `img` que
+  construir. La deteccion se hace **sobre el texto**.
+- `imagePathsIn(String)` es pura y testeable: extension en lista cerrada
+  (`png jpg jpeg webp gif bmp heic`), corta en los delimitadores de la prosa
+  (backticks, comillas, parentesis, corchetes, comas), descarta URIs con
+  esquema (no las sirve el server de la sesion y una miniatura rota es peor que
+  ninguna) y exige **al menos un caracter** antes del punto.
+- `MessageImages`: tira de miniaturas de **72 px de alto** (`BoxFit.cover`), al
+  final del texto y no incrustada entre parrafos — el agente nombra las rutas
+  dentro de una frase, y una miniatura en medio del renglon rompe el parrafo.
+  Solo se pinta con el turno **ya terminado**: con el texto llegando por deltas
+  las rutas estan a medias y saldrian miniaturas de nombres truncados.
+- Al tocar una miniatura se expande a pantalla completa con `altura = 75% del
+  alto de la pantalla` y `BoxFit.contain`. **Porcentaje y no un fijo**: un alto
+  en pixeles se veria gigante en un telefono y diminuto en una tablet. El test lo
+  verifica midiendo la MISMA imagen en dos alturas de pantalla.
+- La carga va con `config.fileUrl(path)` + `config.binaryHeaders`: el server
+  sirve los bytes en `GET /api/fs/read/<path>` y **exige el Basic** (sin el,
+  401). El canal lo pasa el shell (`_vm.api.config`), que es el unico que tiene
+  la config; la burbuja suelta lo recibe en `null` y no pinta nada.
+- `errorBuilder` con el **nombre** del archivo: un cuadrado con un icono roto no
+  dice cual fallo. Y `frameBuilder` reservando la caja antes de que llegue la
+  imagen, para que la tira no empuje el chat hacia abajo al cargar.
+- **La spec de capas crecio**: `chat.msg.image` (94 -> 95 capas, 90 -> 91
+  activas). Hay que tocar los **cuatro** lugares o cae uno de los gates:
+  `spec/layers.json`, `assets/spec/layers.json` (los dos con el `_meta`),
+  `layer_contract_test.dart` (los conteos a mano) y `layer_gate_test.dart` (el
+  titulo y los `"total"/"active"` del asset). Las 4 capas apagadas siguen siendo
+  las 4 aprobadas.
+- **Trampa de la guarda no verificada**: el primer break que hice (sacar la
+  guarda del nombre) **no tumbo ningun test**, porque la propia regex ya rechaza
+  un `.webp` precedido de espacio. La guarda solo es load-bearing cuando hay un
+  separador pegado a la extension (`G:\fotos\.png`), y eso no estaba cubierto.
+  Se agrego el caso; ahi si muerde.
+- 13 tests nuevos en `test/message_images_test.dart` (8 del detector, 5 del
+  widget). Estado: `flutter analyze lib` sin errores ni warnings, **912 tests
+  verdes (6 skipped)**.
+- Pendiente sin tocar: el **aviso de modo de bajo consumo** sigue molestando.
+- Publicado **1.15.0+23** (30.023.593 B, 12 intents / 12 actions, zip de 416
+  entradas, minSdk 24 / targetSdk 36). Verificado sobre el APK **publicado**
+  bajado con cache-buster, no sobre el local.

@@ -345,8 +345,16 @@ class _ChatComposerState extends State<ChatComposer> {
   /// mandarlo como prompt: `/review` no es un mensaje que el modelo lee, es una
   /// orden para el server (medido: `POST /api/session/{id}/command` devuelve
   /// 204 y el trabajo corre como un turno).
+  ///
+  /// Con el turno en curso y **algo escrito**, manda igual y deja que el shell lo
+  /// ponga en cola (`ChatViewModel.send` → `pendingSend`), en vez de eliminar
+  /// el mensaje. Es lo único que hace alcanzable ese camino: si el botón fuera
+  /// siempre Detener, el usuario no podría dejar escrito el mensaje siguiente
+  /// y el modelo lo vería solo cuando terminara el turno.
+  ///
+  /// Con el input vacío sigue siendo Detener, que es su atajo de un toque.
   void _submit() {
-    if (widget.working) {
+    if (widget.working && !_canSend) {
       widget.onStop?.call();
       return;
     }
@@ -742,24 +750,38 @@ class _ChatComposerState extends State<ChatComposer> {
   }
 
   /// `chat.composer.send`: 32 px, círculo. filled `primary` cuando hay algo que
-  /// mandar, apagado cuando no, y `danger` + `stop` mientras el turno corre.
+  /// mandar, apagado cuando no, y `danger` + `stop` mientras el turno corre
+  /// **con el input vacío**.
   Widget _sendButton(ColorScheme scheme, bool hasText) {
+    // Mientras el turno corre el botón es de dos cosas según haya texto:
+    // vacío = **Detener**, con algo escrito = **encolar**. Antes era siempre
+    // Detener, y entonces el camino del mensaje en cola era inalcanzable desde
+    // la UI: `ChatViewModel.send` sabe encolar (`pendingSend`) pero nada lo
+    // llamaba, porque el composer no dejaba mandar con el turno vivo.
+    //
+    // Detener sigue estando a un toque: con el input vacío el botón es el
+    // de.stop.
+    final encola = widget.working && _canSend;
+    final detiene = widget.working && !encola;
     // `--danger` del prototipo: el botón de Detener es el único elemento de
     // color de la pantalla, así que tiene que ser el rojo de la maqueta y no
     // el gris del chrome.
     final danger = AppColors.diffDelOf(Theme.of(context).brightness);
-    final background = widget.working
+    final background = detiene
         ? danger
         : (_canSend ? scheme.primary : scheme.surfaceContainerHighest);
-    final foreground = widget.working
+    final foreground = detiene
         // `.sendbtn.stop{color:#fff}`, también en oscuro.
         ? AppColors.lightOnPrimary
         : (_canSend ? scheme.onPrimary : scheme.onSurfaceVariant);
+    final etiqueta = encola
+        ? 'Enviar en cola'
+        : (detiene ? 'Detener' : 'Enviar');
     return Semantics(
       button: true,
-      label: widget.working ? 'Detener' : 'Enviar',
+      label: etiqueta,
       child: Tooltip(
-        message: widget.working ? 'Detener' : 'Enviar',
+        message: etiqueta,
         child: Material(
           key: ChatComposer.sendKey,
           color: background,
@@ -772,7 +794,9 @@ class _ChatComposerState extends State<ChatComposer> {
               height: 32,
               child: Center(
                 child: AppIcon(
-                  widget.working ? 'stop' : 'send',
+                  // El icono sigue al estado, no al turno: `stop` solo cuando
+                  // el botón efectivamente detiene.
+                  detiene ? 'stop' : 'send',
                   size: 16,
                   color: foreground,
                 ),

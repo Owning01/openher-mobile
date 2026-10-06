@@ -59,12 +59,27 @@ void main() {
   });
 
   group('3) las herramientas van en un bloque con alto fijo', () {
+    // Adjudicado 2026-10-03. El criterio original era `lessThan(260)`, atado al
+    // tope de 148 px. Se|subió a 900 px **por pedido explícito**: con 148 la lista
+    // cortaba a menos de cinco filas, así que un turno normal de agente (8+ tools)
+    // se leía a medias y había que scrollear DENTRO de la caja, que es un scroll
+    // anidado dentro del scroll del chat.
+    //
+    // Lo que este test protege **no cambia**: que siga siendo un **tope** y no un
+    // mínimo. Si dejara de serlo, un turno con 40 tools vuelve a medir 40 filas y
+    // el chat se hace largo, que es el síntoma que se reportó originalmente. Para
+    // que eso sea verificable hace falta un techo, no un suelo: por eso ahora se
+    // afirma el techo y que la caja exists, y elalto que de verdad toma la lista
+    // con 14 tools lo mide `chat_render_test.dart`, grupo 'la caja del turno'.
     test('kToolListMaxHeight es un tope real, no un mínimo', () {
-      // Si esto dejara de ser un tope, un turno con 40 tools vuelve a medir
-      // 40 filas de alto y el chat se vuelve largo: exactamente el síntoma que
-      // reportó el usuario.
       expect(kToolListMaxHeight, greaterThan(0));
-      expect(kToolListMaxHeight, lessThan(260));
+      expect(
+        kToolListMaxHeight,
+        lessThanOrEqualTo(1000),
+        reason:
+            'tiene que haber un techo: sin él, 40 tools miden 40 filas y el chat '
+            'se hace largo. El techo es 900 px, no 148, a pedido del usuario.',
+      );
       expect(TurnActivityBox.headKey, isNotNull);
     });
   });
