@@ -477,9 +477,99 @@ class _SessionsTabState extends State<_SessionsTab> {
     super.dispose();
   }
 
+  /// La acción que el usuario eligió en una fila: el swipe o el menú.
+  ///
+  /// **Antes no estaba cableada.** `SessionsView._action` la reportaba por
+  /// `onAction` y nadie se lo pasaba, así que las seis acciones —y el swipe de
+  /// archivar— cerraban el menú y no hacían nada. Eso es lo que se veía como
+  /// "no se pueden eliminar sesiones".
+  ///
+  /// Sólo `delete` tiene efecto real: es la única que el dialecto v2 expone
+  /// (medido: `DELETE /api/session/{id}` → 204). Las otras cinco se avisan
+  /// como lo que son, porque un menú que ofrece algo que no puede pasar es
+  /// peor que un menú corto.
+  Future<void> _onSessionAction(
+    SessionAction action,
+    SessionInfo session,
+  ) async {
+    switch (action) {
+      case SessionAction.delete:
+        await _deleteSession(session);
+      case SessionAction.toggleFavorite:
+        // Lo resuelve la vista antes de llegar acá; no debería pasar.
+        break;
+      case SessionAction.rename:
+      case SessionAction.fork:
+      case SessionAction.exportMarkdown:
+      case SessionAction.archive:
+      case SessionAction.close:
+        _aviso(
+          'Esa acción todavía no se puede desde acá: el server no la expone.',
+        );
+    }
+  }
+
+  /// Borra una sesión, con confirmación.
+  ///
+  /// Destructiva e **irreversible**: el `DELETE` la saca del server y no hay
+  /// deshacer. Por eso se confirma, y por eso el cartel dice el título — con
+  /// varias sesiones parecidas, "¿seguro?" no alcanza para saber cuál.
+  Future<void> _deleteSession(SessionInfo session) async {
+    final titulo = session.title.isEmpty ? 'Sesión sin título' : session.title;
+    final confirmado = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Eliminar la sesión'),
+        content: Text(
+          '"$titulo"\n\n'
+          'Se borra del servidor, con todos sus mensajes. No se puede deshacer.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            key: const Key('sessions-delete-confirm'),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(
+              'Eliminar',
+              style: TextStyle(
+                color: Theme.of(dialogContext).colorScheme.error,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmado != true || !mounted) return;
+
+    try {
+      await _vm.delete(session);
+      if (!mounted) return;
+      _aviso('Sesión eliminada.');
+    } catch (e) {
+      // La sesión **no** sale de la lista desde acá: eso lo hace el viewmodel
+      // sólo si el server contestó. Si no, la fila tiene que seguir ahí — al
+      // revés el usuario creería que se borró y el próximo poll la repintaría.
+      if (!mounted) return;
+      _aviso('No se pudo eliminar: $e');
+    }
+  }
+
+  void _aviso(String texto) {
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text(texto)));
+  }
+
   @override
-  Widget build(BuildContext context) =>
-      SessionsView(viewmodel: _vm, onOpen: widget.onOpen);
+  Widget build(BuildContext context) => SessionsView(
+    viewmodel: _vm,
+    onOpen: widget.onOpen,
+    onAction: _onSessionAction,
+  );
 }
 
 /// El chat de la sesión abierta.

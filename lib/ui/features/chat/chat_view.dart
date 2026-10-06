@@ -546,7 +546,26 @@ class _ChatViewState extends State<ChatView> {
               // server sirve los bytes en `GET /api/fs/read/<path>`, que exige
               // el header Basic. La config vive acá, en el shell, no en la
               // burbuja.
-              imageUrl: _vm.api.config.fileUrl,
+              //
+              // **Con `location[directory]`, y ahí estaba el bug**: medido
+              // 2026-10-06, un basename suelto contra la raíz del server da
+              // `404 FileNotFoundError`, y el mismo basename con
+              // `location[directory]` de su carpeta da `200 image/jpeg`. La
+              // ruta absoluta entera da **500**, así que tampoco sirve mandarla
+              // tal cual.
+              //
+              // De ahí la resolución: si el token trae carpeta, manda la suya;
+              // si es un nombre suelto (`bautismoOlivia2021.jpeg`, que es lo que
+              // manda el agente), se resuelve contra la carpeta de la sesión.
+              imageUrl: (path) {
+                final normal = path.replaceAll('\\', '/');
+                final corte = normal.lastIndexOf('/');
+                final nombre = corte < 0 ? normal : normal.substring(corte + 1);
+                final carpeta = corte > 0
+                    ? normal.substring(0, corte)
+                    : _vm.directory;
+                return _vm.api.config.fileUrl(nombre, directory: carpeta);
+              },
               imageHeaders: _vm.api.config.binaryHeaders,
               onPendingEdit: _onPendingEdit,
               onPendingDiscard: _vm.discardPending,
@@ -699,10 +718,7 @@ class _ChatViewState extends State<ChatView> {
         // recibe en `attachments` y los devuelve en `files`. Agregarlos otra
         // vez mandaba cada foto **dos veces** (mismo uri, mismo nombre) — no se
         // notaba porque `attachments` nunca se paso y la tira no se veia.
-        onSend: (text, files) {
-          _vm.send(text, files: [for (final f in files) f.toPromptFile()]);
-          if (_vm.error == null) setState(() => _pending = []);
-        },
+        onSend: (text, files) => _enviar(text, files),
         onStop: _vm.abort,
         onPickModel: _openModelSheet,
         onPickAgent: _openAgentSheet,
@@ -730,6 +746,31 @@ class _ChatViewState extends State<ChatView> {
         controller: _composerController,
       ),
     );
+  }
+
+  /// Manda el mensaje con sus adjuntos.
+  ///
+  /// **Es async porque leer los adjuntos lo es.** Cada uno se convierte en un
+  /// data URI leyendo el archivo del disco del teléfono: el server no puede
+  /// leer esa ruta y contesta
+  /// `400 InvalidRequestError: Unsupported attachment URI` (medido). Antes la
+  /// conversión era sincrónica y mandaba la ruta pelada, que es el 400 que se
+  /// veía al adjuntar una foto.
+  Future<void> _enviar(String text, List<ComposerAttachment> files) async {
+    final listos = <Map<String, String>>[];
+    for (final f in files) {
+      try {
+        listos.add(await f.toPromptFile());
+      } catch (e) {
+        // Si no se puede leer, **no se manda a medias**: un adjunto que falta
+        // cambia lo que el modelo ve, y el usuario no lo sabría.
+        _vm.reportError('No se pudo leer ${f.name}: $e');
+        return;
+      }
+    }
+    if (!mounted) return;
+    _vm.send(text, files: listos);
+    if (_vm.error == null) setState(() => _pending = []);
   }
 
   // ──────────────────────────── menú de / y @ ────────────────────────────

@@ -27,7 +27,7 @@ class SessionsView extends StatefulWidget {
     super.key,
     required this.viewmodel,
     required this.onOpen,
-    this.onAction,
+    required this.onAction,
   });
 
   final SessionsViewModel viewmodel;
@@ -35,9 +35,15 @@ class SessionsView extends StatefulWidget {
   /// Abrir el chat de una sesión (fila tocada o `+` recién creada).
   final void Function(SessionInfo session) onOpen;
 
-  /// Intención del swipe o del menú contextual. `null` = la pantalla todavía no
-  /// conduce esos gestos a ninguna parte.
-  final void Function(SessionAction action, SessionInfo session)? onAction;
+  /// Intención del swipe o del menú contextual.
+  ///
+  /// **Requerido, no opcional.** Era `null` por defecto y el shell no lo pasaba:
+  /// el swipe y las seis acciones del menú cerraban la hoja y no hacían nada, y
+  /// nada lo delataba — ni el analyzer, ni un test, porque los tests del widget
+  /// se lo pasan ellos mismos y el olvido estaba en `app.dart`. Con `required`
+  /// el olvido es un **error de compilación**, que es la única clase de guarda
+  /// que no se puede saltear.
+  final void Function(SessionAction action, SessionInfo session) onAction;
 
   // Claves de los widgets que los tests apuntan directo, para no depender de un
   // texto que puede repetirse en pantalla.
@@ -58,10 +64,22 @@ class SessionsView extends StatefulWidget {
   ///
   /// Va en el **título** y no en la fila entera porque el título es lo que el
   /// usuario está mirando cuando vuelve de otra pantalla: una fila brillando no
-  /// dice *qué* sesión está trabajando. Comparte los 1400 ms de
-  /// `SquaresSpinner` y de `_PulseDot` para que las tres señales de "está
-  /// trabajando" laten a la vez.
+  /// dice *qué* sesión está trabajando.
   static const Key titleSweepKey = Key('sessions-title-sweep');
+
+  /// Cuánto tarda la luz en recorrer el título de 0 a 100.
+  ///
+  /// **2800 ms, el doble que el resto.** Pedido así el 2026-10-06: a 1400 el
+  /// barrido pasaba tan rápido que el título se leía como un parpadeo y
+  /// competía con el texto en vez de acompañarlo.
+  ///
+  /// **No es el mismo período que `_PulseDot` ni que `SquaresSpinner`**, que
+  /// siguen en 1400, y es a propósito. La sincronización que importaba era la
+  /// del lenguaje visual —una luz que trabaja, no tres animaciones distintas—
+  /// y esa se mantiene. Igualar de nuevo los tres costaría caro por el otro
+  /// lado: un spinner de 2800 ms se lee como una app colgada, y el spinner está
+  /// justamente para decir lo contrario.
+  static const Duration titleSweepPeriod = Duration(milliseconds: 2800);
 
   /// Estado vacío.
   static const Key emptyKey = Key('sessions-empty');
@@ -92,7 +110,8 @@ class _SessionsViewState extends State<SessionsView>
 
   Animation<double>? get _sweepReloj => _sweep ??= AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 1400),
+    // Un latido de `titleSweepPeriod` = una pasada completa de 0 a 100.
+    duration: SessionsView.titleSweepPeriod,
   )..repeat();
 
   final TextEditingController _query = TextEditingController();
@@ -171,15 +190,22 @@ class _SessionsViewState extends State<SessionsView>
     );
   }
 
-  /// Swipe a la izquierda. El snap-back es **intencional**: archivar no existe
-  /// todavía en el server, así que la fila no puede desaparecer.
+  /// Swipe a la izquierda: **eliminar**.
+  ///
+  /// Antes reportaba `archive`, que el server no expone, así que el gesto no
+  /// hacía nada más que volver. Ahora que el borrado existe, el swipe es el
+  /// gesto natural para lo único destructivo que sí se puede hacer.
+  ///
+  /// El snap-back sigue siendo intencional: la fila vuelve y **después** sale
+  /// la confirmación. Mover la fila primero y preguntar después mostraría una
+  /// desaparición que todavía puede no pasar.
   Future<bool> _swiped(SessionInfo session) async {
-    _action(SessionAction.archive, session);
+    _action(SessionAction.delete, session);
     return false;
   }
 
   void _action(SessionAction action, SessionInfo session) =>
-      widget.onAction?.call(action, session);
+      widget.onAction(action, session);
 
   void _openMenu(SessionInfo session) {
     // El rótulo de la acción de favorito depende del estado: decir "Marcar
@@ -347,9 +373,8 @@ class _SessionsViewState extends State<SessionsView>
     running: vm.isRunning(session),
     // El **mismo** reloj para todas las filas, y por lo tanto la misma fase: si
     // cada una animara su propio controller, dos sesiones corriendo brillarían
-    // desfasadas y se leería como dos loads distintos. 1400 ms es la misma
-    // `Duration` que usan `_PulseDot` y `SquaresSpinner`. Solo se pide el reloj
-    // si esta fila está corriendo: así una lista sin sesiones vivas no tiene
+    // desfasadas y se leería como dos loads distintos. Solo se pide el reloj si
+    // esta fila está corriendo: así una lista sin sesiones vivas no tiene
     // ningún ticker.
     sweep: vm.isRunning(session) ? _sweepReloj : null,
     attention: vm.needsAttention(session),
@@ -731,11 +756,12 @@ class _PulseDotState extends State<_PulseDot>
 /// El título de una sesión **corriendo**, con una luz que lo recorre de 0 a 100
 /// de izquierda a derecha.
 ///
-/// Un `ShaderMask` con un degradado lineal cuya franja Brillante se desplaza: el
+/// Un `ShaderMask` con un degradado lineal cuya franja brillante se desplaza: el
 /// texto se pinta del color base salvo en la franja, que va al color de marca.
-/// Es el mismo `.shimmer-text` del cliente web (`chat.css`), y comparte los
-/// 1400 ms de `SquaresSpinner` y de `_PulseDot` para que las tres señales de
-/// "está trabajando" laten a la vez.
+/// Es el mismo `.shimmer-text` del cliente web (`chat.css`).
+///
+/// El período es [SessionsView.titleSweepPeriod], **más lento** que el de
+/// `_PulseDot` y `SquaresSpinner`, y está explicado ahí.
 ///
 /// Va en el **título** y no en una fila entera porque el título es lo que el
 /// usuario está mirando cuando vuelve de otra pantalla: la fila completa
@@ -960,6 +986,10 @@ class _SessionMenu extends StatelessWidget {
     (SessionAction.fork, 'Fork', 'git-branch'),
     (SessionAction.exportMarkdown, 'Exportar markdown', 'download'),
     (SessionAction.archive, 'Archivar', 'list-checks'),
+    // `Eliminar` va **antes de Cerrar** y separada por su color: es la única
+    // destructiva e irreversible de la lista, y la única de las seis que el
+    // server sí sabe hacer. Un toque de más acá no tiene vuelta.
+    (SessionAction.delete, 'Eliminar', 'trash'),
     (SessionAction.close, 'Cerrar', 'x'),
   ];
 
@@ -968,43 +998,52 @@ class _SessionMenu extends StatelessWidget {
     final theme = Theme.of(context);
     return SafeArea(
       top: false,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // La de favorito va **primera**: es la que se usa todos los días, y
-          // el escritorio también la tiene arriba del menú.
-          ListTile(
-            key: const Key('sessions-menu-toggleFavorite'),
-            dense: true,
-            leading: AppIcon(
-              'star',
-              size: 16,
-              color: isFavorite ? theme.colorScheme.primary : null,
-            ),
-            title: Text(
-              isFavorite ? 'Quitar de favoritas' : 'Marcar como favorita',
-              style: theme.textTheme.bodyMedium,
-            ),
-            onTap: () => onPick(SessionAction.toggleFavorite),
-          ),
-          for (final (action, label, icon) in _items)
+      // Con la sexta fila (`Eliminar`) la hoja **desbordaba 47 px** en una
+      // pantalla de 600: el `showModalBottomSheet` sin `isScrollControlled`
+      // limita a media pantalla y siete filas no entran. Scrollea, y así
+      // cualquier acción que se agregue en el futuro degrada en scroll en vez
+      // de en una franja amarilla y negra.
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // La de favorito va **primera**: es la que se usa todos los días, y
+            // el escritorio también la tiene arriba del menú.
             ListTile(
-              key: Key('sessions-menu-${action.name}'),
+              key: const Key('sessions-menu-toggleFavorite'),
               dense: true,
-              leading: AppIcon(icon, size: 16),
-              title: Text(
-                label,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: action == SessionAction.close
-                      ? theme.colorScheme.error
-                      : theme.colorScheme.onSurface,
-                  fontWeight: FontWeight.w500,
-                ),
+              leading: AppIcon(
+                'star',
+                size: 16,
+                color: isFavorite ? theme.colorScheme.primary : null,
               ),
-              onTap: () => onPick(action),
+              title: Text(
+                isFavorite ? 'Quitar de favoritas' : 'Marcar como favorita',
+                style: theme.textTheme.bodyMedium,
+              ),
+              onTap: () => onPick(SessionAction.toggleFavorite),
             ),
-        ],
+            for (final (action, label, icon) in _items)
+              ListTile(
+                key: Key('sessions-menu-${action.name}'),
+                dense: true,
+                leading: AppIcon(icon, size: 16),
+                title: Text(
+                  label,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color:
+                        action == SessionAction.close ||
+                            action == SessionAction.delete
+                        ? theme.colorScheme.error
+                        : theme.colorScheme.onSurface,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                onTap: () => onPick(action),
+              ),
+          ],
+        ),
       ),
     );
   }

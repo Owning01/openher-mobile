@@ -11,6 +11,7 @@ import 'package:openher_mobile/data/repositories/session_repository.dart';
 import 'package:openher_mobile/domain/models/errors.dart';
 import 'package:openher_mobile/domain/models/message.dart';
 import 'package:openher_mobile/domain/models/session.dart';
+import 'package:openher_mobile/ui/features/chat/squares_spinner.dart';
 import 'package:openher_mobile/ui/core/layer_gate.dart';
 import 'package:openher_mobile/ui/core/theme.dart';
 import 'package:openher_mobile/ui/features/sessions/session_favorites.dart';
@@ -238,6 +239,90 @@ void main() {
     });
   });
 
+  group("eliminar una sesion", () {
+    /// Un server que registra el DELETE y contesta lo que se le diga.
+    MockClient borrador({required List<String> vistos, int status = 204}) =>
+        MockClient((request) async {
+          if (request.method == "DELETE") {
+            vistos.add(request.url.path);
+            return http.Response("", status);
+          }
+          if (request.url.path == "/api/session") {
+            return json(
+              listJson([
+                sessionJson(
+                  id: "ses_a",
+                  title: "Una",
+                  updatedMs: kNow.millisecondsSinceEpoch,
+                ),
+              ]),
+            );
+          }
+          return json("{\"data\":{}}");
+        });
+
+    test("el DELETE va al server y despues sale de la lista", () async {
+      final vistos = <String>[];
+      final vm = SessionsViewModel(
+        repository: repoWith(borrador(vistos: vistos)),
+        clock: () => kNow,
+      );
+      await vm.load();
+      expect(vm.visible, hasLength(1));
+
+      final sesion = vm.visible.single;
+      await vm.delete(sesion);
+
+      // **El orden es el contrato**: primero el server, despues la lista. Al
+      // reves, un DELETE que falla deja la fila borrada en pantalla y el
+      // proximo poll la vuelve a pintar (el borrado fantasma que se reporto).
+      expect(vistos, ["/api/session/ses_a"]);
+      expect(vm.visible, isEmpty);
+      vm.dispose();
+    });
+
+    test("si el server falla, la sesion NO sale de la lista", () async {
+      final vistos = <String>[];
+      final vm = SessionsViewModel(
+        repository: repoWith(borrador(vistos: vistos, status: 500)),
+        clock: () => kNow,
+      );
+      await vm.load();
+
+      await expectLater(vm.delete(vm.visible.single), throwsA(anything));
+
+      // La fila sigue: el usuario tiene que poder reintentar, y una lista que
+      // miente sobre lo que hay en el server es peor que un error.
+      expect(vm.visible, hasLength(1));
+      vm.dispose();
+    });
+
+    test("la accion delete esta en el menu y es la unica destructiva", () {
+      // Sin esto el menu podria volver a ofrecer solo acciones que el server
+      // no sabe hacer, que es el estado del que venimos.
+      final accion = SessionAction.values.firstWhere((a) => a.name == "delete");
+      expect(accion, SessionAction.delete);
+    });
+  });
+  group("la velocidad de la luz del titulo", () {
+    test("es mas lenta que el spinner, a proposito", () {
+      // El pedido del 2026-10-06: a 1400 ms el barrido se leia como un
+      // parpadeo y competia con el texto. Ahora es el doble.
+      expect(
+        SessionsView.titleSweepPeriod,
+        greaterThan(const Duration(milliseconds: 1400)),
+      );
+      // Y no tan lenta como para que parezca que no pasa nada: con mas de
+      // seis segundos por vuelta, el titulo se lee quieto.
+      expect(
+        SessionsView.titleSweepPeriod,
+        lessThan(const Duration(seconds: 6)),
+      );
+      // El spinner NO se toco: sigue en 1400. Un spinner lento se lee como
+      // una app colgada, que es lo contrario de lo que tiene que decir.
+      expect(kSquaresSpinnerPeriod, const Duration(milliseconds: 1400));
+    });
+  });
   group('agrupado por fecha', () {
     test('HOY / AYER / ESTA SEMANA / ANTERIORES en orden', () {
       final sessions = [
@@ -768,7 +853,10 @@ void main() {
         ),
         clock: () => kNow,
       );
-      await pumpView(tester, SessionsView(viewmodel: vm, onOpen: (_) {}));
+      await pumpView(
+        tester,
+        SessionsView(viewmodel: vm, onOpen: (_) {}, onAction: (_, _) {}),
+      );
 
       expect(find.text('Sesiones'), findsOneWidget);
       await settle(tester);
@@ -798,7 +886,10 @@ void main() {
         repository: repoWith(server(list: '{"data":[]}')),
         clock: () => kNow,
       );
-      await pumpView(tester, SessionsView(viewmodel: vm, onOpen: (_) {}));
+      await pumpView(
+        tester,
+        SessionsView(viewmodel: vm, onOpen: (_) {}, onAction: (_, _) {}),
+      );
       // El primer frame sale con el spinner: `load()` ya viene en curso.
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
       await settle(tester);
@@ -821,7 +912,10 @@ void main() {
         repository: repoWith(MockClient((_) async => html(kSpaHtml))),
         clock: () => kNow,
       );
-      await pumpView(tester, SessionsView(viewmodel: vm, onOpen: (_) {}));
+      await pumpView(
+        tester,
+        SessionsView(viewmodel: vm, onOpen: (_) {}, onAction: (_, _) {}),
+      );
       await settle(tester);
 
       expect(find.byKey(SessionsView.errorKey), findsOneWidget);
@@ -843,7 +937,10 @@ void main() {
         ),
         clock: () => kNow,
       );
-      await pumpView(tester, SessionsView(viewmodel: vm, onOpen: (_) {}));
+      await pumpView(
+        tester,
+        SessionsView(viewmodel: vm, onOpen: (_) {}, onAction: (_, _) {}),
+      );
       await settle(tester);
 
       // Oculto por default.
@@ -882,7 +979,11 @@ void main() {
       );
       await pumpView(
         tester,
-        SessionsView(viewmodel: vm, onOpen: (s) => opened.add(s.id)),
+        SessionsView(
+          viewmodel: vm,
+          onOpen: (s) => opened.add(s.id),
+          onAction: (_, _) {},
+        ),
       );
       await settle(tester);
 
@@ -910,7 +1011,11 @@ void main() {
       );
       await pumpView(
         tester,
-        SessionsView(viewmodel: vm, onOpen: (s) => opened.add(s.id)),
+        SessionsView(
+          viewmodel: vm,
+          onOpen: (s) => opened.add(s.id),
+          onAction: (_, _) {},
+        ),
       );
       await settle(tester);
 
@@ -921,7 +1026,11 @@ void main() {
       await unmount(tester, vm);
     });
 
-    testWidgets('long-press abre el menú de las 5 acciones', (tester) async {
+    // Adjudicado 2026-10-06: eran **5** acciones y ahora son **6**. Se sumó
+    // `Eliminar`, que es la única de todas que el dialecto v2 sí expone
+    // (`DELETE /api/session/{id}`, medido: 204). El criterio del test no cambia:
+    // el menú lista las acciones por su rótulo, y elegir una la reporta.
+    testWidgets('long-press abre el menú de las 6 acciones', (tester) async {
       final actions = <SessionAction>[];
       final vm = SessionsViewModel(
         repository: repoWith(
@@ -951,6 +1060,8 @@ void main() {
         'Fork',
         'Exportar markdown',
         'Archivar',
+        // La única destructiva, y la única que el server sabe hacer.
+        'Eliminar',
         'Cerrar',
       ]) {
         expect(find.text(label), findsOneWidget, reason: label);
@@ -965,7 +1076,15 @@ void main() {
       await unmount(tester, vm);
     });
 
-    testWidgets('el swipe reporta Archivar y la fila vuelve (snap-back)', (
+    // Adjudicado 2026-10-06: el swipe reportaba `archive`, que el server **no
+    // expone** (`POST /session/{id}/archive` da 404 vacío, igual que una ruta
+    // inexistente), así que el gesto no hacía nada más que volver. Ahora reporta
+    // `delete`, que sí se puede (`DELETE /api/session/{id}` → 204, medido).
+    //
+    // El snap-back **sigue siendo el criterio**: la fila vuelve y la
+    // confirmación sale después. Mover la fila primero mostraría una
+    // desaparición que todavía puede no pasar.
+    testWidgets('el swipe reporta Eliminar y la fila vuelve (snap-back)', (
       tester,
     ) async {
       final actions = <SessionAction>[];
@@ -992,8 +1111,9 @@ void main() {
       await tester.drag(find.text('Diseña'), const Offset(-400, 0));
       await tester.pumpAndSettle();
 
-      expect(actions, [SessionAction.archive]);
-      // Archivar no existe en el server: la fila no puede desaparecer.
+      expect(actions, [SessionAction.delete]);
+      // La fila vuelve: la confirmación sale después, y hasta que el usuario
+      // confirme nada se borró en el server.
       expect(find.text('Diseña'), findsOneWidget);
 
       await unmount(tester, vm);

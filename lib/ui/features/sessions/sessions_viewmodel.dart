@@ -53,6 +53,11 @@ enum SessionAction {
   fork,
   exportMarkdown,
   archive,
+
+  /// Borra la sesión **en el server**. Es la única de las seis que el dialecto
+  /// v2 sí expone: `DELETE /api/session/{id}` (medido 2026-10-06: 204 con
+  /// cuerpo vacío, y después `GET` da 404).
+  delete,
   close,
 }
 
@@ -156,6 +161,26 @@ class SessionsViewModel extends ChangeNotifier {
   }
 
   bool isFavorite(String sessionId) => _favorites.contains(sessionId);
+
+  /// Borra la sesión **en el server** y la saca de la lista.
+  ///
+  /// El orden importa: primero el server y después la lista local. Al revés, si
+  /// el `DELETE` falla el usuario ve la fila desaparecer y el próximo poll la
+  /// vuelve a pintar — que es exactamente el borrado fantasma que se reportó.
+  ///
+  /// No se atrapa la excepción: el que llama decide qué mostrar. Un borrado
+  /// silencioso que no borró nada es peor que un error.
+  Future<bool> delete(SessionInfo session) async {
+    await repository.delete(session.id, directory: session.location.directory);
+    _sessions = [
+      for (final s in _sessions)
+        if (s.id != session.id) s,
+    ];
+    _running = {..._running}..remove(session.id);
+    _attention = {..._attention}..remove(session.id);
+    _notify();
+    return true;
+  }
 
   /// Marca o desmarca una favorita. La lista se repinta y el orden se persiste.
   void toggleFavorite(String sessionId) => _favorites.toggle(sessionId);

@@ -821,3 +821,169 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   nada de esto se vio correr en un telefono real. Lo verificado es contra el
   server real y contra el APK publicado.
 - Pendiente sin tocar: el **aviso de modo de bajo consumo**.
+
+## 2026-10-06 - Eliminar sesiones: el endpoint existia y el cableado no
+
+### La causa: dos capas, y la de arriba era la que fallaba
+
+- **`app.dart:482` construia `SessionsView(viewmodel: _vm, onOpen: ...)` sin
+  `onAction`.** La vista reportaba el swipe y las acciones del menu a un callback
+  `null` y volvia: **seis acciones y el swipe no hacian nada**. Eso es lo que se
+  veia como "no se pueden eliminar sesiones".
+- El doc de `sessions_view.dart` afirmaba que el dialecto v2 **no expone**
+  archivar/borrar/renombrar. Ese supuesto nunca se re-midio y era **falso**.
+
+### Medido contra el server real
+
+- `DELETE /api/session/{id}` -> **204 con cuerpo vacio**. Despues `GET` de esa
+  sesion da 404 y desaparece de `GET /api/session`. **No necesita `directory`.**
+- `PATCH /api/session/{id}` con `{title}` -> la ruta existe (renombrar se puede).
+- El discriminador que hace valida la inferencia: con un id falso,
+  `DELETE` y `PATCH` contestan **`SessionNotFoundError`** (error de dominio: la
+  ruta existe y la sesion no), mientras que `POST .../archive` y
+  `POST .../delete` contestan **404 con cuerpo vacio** (ruta inexistente). Sin
+  ese control, un 404 se lee como "no existe" y no se distingue.
+- La prueba se hizo con **sesiones descartables creadas para eso** (dos) y se
+  borraron: no se toco ningun dato real. Confirmado que no quedaron en la lista.
+- El contrato fino del cliente web de este repo (`web/src/api/sessions.ts:188`)
+  documenta dos cosas mas: que un 200 **sin JSON** hay que tolerarlo como exito,
+  y que conviene reintentar **sin `directory`** si el call falla.
+
+### Lo implementado
+
+- `ApiClient.deleteSession` (DELETE + reintento sin `directory`) ->
+  `SessionRepository.delete` -> `SessionsViewModel.delete(session)`, que llama
+  al server **primero** y recien despues saca la fila de la lista. Al reves, un
+  DELETE que falla deja la fila borrada en pantalla y el poll la repinta: el
+  borrado fantasma.
+- Menu: se agrego `SessionAction.delete` ("Eliminar", rojo, icono `trash`) y
+  **el swipe paso de `archive` a `delete`**. `archive` no existe en el server,
+  asi que el gesto no podia hacer nada.
+- Confirmacion con el **titulo** de la sesion antes de borrar: destructivo e
+  irreversible, y con varias sesiones parecidas "seguro?" no alcanza para saber
+  cual. El snap-back del swipe sigue: la fila vuelve y la confirmacion sale
+  despues.
+- Las otras cinco acciones avisan honestamente que el server no las expone, en
+  vez de cerrar la hoja sin hacer nada.
+
+### Dos cosas que salieron mal y se corrigieron
+
+- **El menu desbordaba 47 px** con la sexta fila. `showModalBottomSheet` sin
+  `isScrollControlled` limita a media pantalla. Ahora scrollea.
+- **`dart format lib` reformateo 53 archivos y toco 5 que no eran de este
+  trabajo** (drift preexistente: `message.dart`, `chat_viewmodel.dart`,
+  `code_highlight.dart`, `composer_suggestions.dart`, `file_preview.dart`).
+  Revertidos con `git checkout --`. Es el mismo error que el `json.dumps` de la
+  spec: una herramienta reescribiendo archivos que tienen formato propio.
+  Formatear **archivo por archivo**, nunca el directorio.
+
+### La guarda que importa no es un test, es el compilador
+
+- El break que sacaba `onAction` de `app.dart` **no tumbo ningun test**: no hay
+  ninguno que verifique el cableado del shell, porque los tests del widget se
+  pasan `onAction` ellos mismos. Eso es exactamente lo que dejo vivir el bug.
+- Se resolvio haciendo `SessionsView.onAction` **`required`**: olvidarlo ahora es
+  `missing_required_argument`, un error de compilacion. Verificado rompiendolo:
+  el analyzer lo frena. Es la unica clase de guarda que no se puede saltear.
+- El `required` destapo **6 llamadas mas** en `sessions_test.dart` que no lo
+  pasaban (el compilador haciendo su trabajo, en el mismo commit).
+- 6 tests nuevos en `test/sessions_test.dart`, grupo "eliminar una sesion". El
+  break de "borra la fila sin llamar al server" cae en 2.
+- Estado: `flutter analyze lib` sin errores ni warnings, **915 tests verdes (6
+  skipped)**.
+- **Sin commitear ni publicar**: pendiente de aprobacion.
+
+## 2026-10-06 - La luz del titulo mas lenta (2800 ms), y por que solo esa
+
+- Pedido: "la animacion de 0 a 100 que sea mas lenta". Estaba en 1400 ms, igual
+  que `SquaresSpinner` y `_PulseDot` (que era el pedido anterior: "sincronizado
+  con el de los demas"). Ahora son **2800 ms**, el doble.
+- **Solo se bajo la luz, no los tres.** Es una decision, no un olvido:
+  - La sincronizacion que importaba es la del **lenguaje visual** (una luz que
+    trabaja, no tres animaciones distintas) y esa se mantiene.
+  - Igualar de nuevo los tres costaria caro por el otro lado: **un spinner de
+    2800 ms se lee como una app colgada**, y el spinner esta justamente para
+    decir lo contrario.
+  - El spinner de cuadrados quedo blindado con `kSquaresSpinnerPeriod` (1400) y
+    un test que lo afirma, para que nadie "arregle" la sincronizacion
+    alargandolo.
+- `SessionsView.titleSweepPeriod` es publica y con nombre: es el numero que
+  define cuanto dura una pasada, asi que un cambio de velocidad tiene que ser
+  deliberado y visible en el diff.
+- Un `AnimationController` sigue siendo **uno solo** para toda la lista (la fase
+  compartida entre filas no cambio).
+- Test nuevo en `sessions_test.dart`, grupo "la velocidad de la luz del titulo":
+  mayor a 1400, menor a 6 s, y el spinner clavado en 1400. El break que devuelve
+  la luz a 1400 **cae**.
+- Estado: `flutter analyze lib` sin errores ni warnings, **916 tests verdes (6
+  skipped)**.
+- Sigue **sin commitear ni publicar**: pendiente de aprobacion. Entra en la
+  misma release que el borrado de sesiones.
+
+## 2026-10-06 - Adjuntar fotos daba 400, y las miniaturas no cargaban: la causa era la misma
+
+### El 400 al mandar una foto (captura del telefono, 9:07)
+
+- **Medido**: `POST /api/session/{id}/prompt` con `files:[{uri:"G:/.../x.jpeg"}]`
+  devuelve `400 InvalidRequestError: Unsupported attachment URI`. Tambien con
+  `file://` (`Invalid file URI`), con `content://` y con `http://`.
+- **El server no puede leer el disco del telefono**: el contenido tiene que
+  viajar en el cuerpo. Con `data:image/jpeg;base64,<bytes>` de una imagen real
+  devuelve **200** (probado con un JPEG de 245 KB).
+- `files[]` va en la **raiz** del body, no anidado en `prompt` (anidado da
+  `Missing key at ["text"]`), y `mime` de mas no molesta.
+- Arreglo: `ComposerAttachment.toPromptFile()` paso a **async** y arma el data
+  URI leyendo el archivo. `chat_view._enviar` lo espera y, si un adjunto no se
+  puede leer, **no manda a medias**: avisa y corta, porque un adjunto que falta
+  cambia lo que el modelo ve y el usuario no lo sabria.
+
+### Las miniaturas no cargaban (capturas 2 y 3)
+
+- Se veian las **cajas** con el nombre y el icono, que es mi `errorBuilder`: la
+  imagen nunca llegaba.
+- **Medido**: `GET /api/fs/read/bautismoOlivia2021.jpeg` -> **404
+  FileNotFoundError**; el mismo basename con
+  `?location[directory]=<su carpeta>` -> **200 image/jpeg 245128 bytes**. La
+  ruta absoluta entera -> **500**.
+- Arreglo: el shell arma la URL con `fileUrl(nombre, directory: carpeta)`. Si el
+  token trae carpeta, manda la suya; si es un nombre suelto (lo que manda el
+  agente), se resuelve contra **la carpeta de la sesion** (`_vm.directory`).
+- **Tailscale no era el problema**: el chat carga por el mismo server. Lo que
+  fallaba era la resolucion de la ruta.
+
+### Lo que NO se pudo verificar con un test de widget
+
+- `toPromptFile` hace **I/O real** (leer el archivo), y en `flutter_test` el I/O
+  real **no completa dentro del zone de async falso**: `readAsBytes` nunca
+  vuelve y el POST no sale. El test que observaba el POST fallaba por no haber
+  mandado nada, que es lo contrario de lo que probaba.
+- **Adjudicado** en `chat_render_test.dart`: ese test ahora verifica lo que el
+  bug original rompia y se ve sin red (la tira muestra 3 y ninguna de mas). La
+  forma del `files[]` queda pendiente de un `test` comun, donde el I/O si corre.
+- **Pendiente declarado**: falta ese test del data URI. No se invento uno que
+  pase por la razon equivocada.
+- Estado: `flutter analyze lib` sin errores ni warnings, **916 tests verdes (6
+  skipped)**.
+- **Sin commitear ni publicar.**
+
+## 2026-10-06 - Publicado 1.16.0+24
+
+- Version **1.16.0+24** en `Owning01/openher-mobile` y `Owning01/mis-apps`.
+  Verificada sobre el APK **descargado** (cache-buster): 30.023.621 B,
+  `versionCode=24`, `versionName=1.16.0`, minSdk 24, targetSdk 36, zip de 416
+  entradas, **12 `<intent>` / 12 `<action>` (1:1)**.
+- Verificado antes de publicar: `flutter analyze lib` limpio, **916 tests verdes
+  (6 skipped)**.
+- Entra: adjuntar fotos sin 400 (data URI), miniaturas que cargan (ruta resuelta
+  contra la carpeta de la sesion), eliminar sesiones con confirmacion y
+  `onAction` requerido, y la luz del titulo a 2800 ms.
+- **Sin verificar en pantalla**: el Xiaomi sigue sin aparecer en `adb`. Lo que
+  falta probar con el telefono en mano es **adjuntar una foto y verla en el
+  chat**: es lo unico de esta release que no se pudo ejercitar aca, porque
+  `flutter_test` no puede esperar I/O real.
+- Pendiente declarado: falta el test del data URI en un `test` comun (donde el
+  I/O real si corre). No se invento uno que pase por la razon equivocada.
+- Pendiente sin tocar: el **aviso de modo de bajo consumo**.
+- **Trampa repetida**: la vez pasada otro agente se llevo mis 17 archivos con un
+  `git commit` sin pathspec mientras estaban staged. Esta vez se commiteo
+  inmediatamente despues del `git add`.
