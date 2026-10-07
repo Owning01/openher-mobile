@@ -63,10 +63,20 @@ class FilePreview extends StatefulWidget {
     required this.config,
     required this.path,
     required this.name,
+    this.directory,
   });
 
   final ServerConfig config;
   final String path;
+
+  /// La carpeta de la que sale el archivo, **absoluta**.
+  ///
+  /// Medido 2026-10-06: pedir `/api/fs/read/<ruta-absoluta>` contesta 500; lo
+  /// que funciona es `<nombre>?location[directory]=<carpeta-absoluta>`. El
+  /// visor no abría ningún archivo de un disco, y la causa era exactamente
+  /// pedir la ruta absoluta entera.
+  final String? directory;
+
   final String name;
 
   @override
@@ -81,8 +91,9 @@ class _FilePreviewState extends State<FilePreview> {
 
   ServerConfig get config => widget.config;
   String get path => widget.path;
+  String? get directory => widget.directory;
   String get name => widget.name;
-  Uri get url => config.fileUrl(path);
+  Uri get url => config.fileUrl(path, directory: directory);
   Map<String, String> get headers => config.binaryHeaders;
 
   @override
