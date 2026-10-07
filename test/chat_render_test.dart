@@ -26,6 +26,7 @@ import 'package:openher_mobile/core/network/sse_client.dart';
 import 'package:openher_mobile/domain/models/event.dart';
 import 'package:openher_mobile/domain/models/message.dart';
 import 'package:openher_mobile/domain/models/session.dart';
+import 'package:openher_mobile/domain/models/tool.dart';
 import 'package:openher_mobile/ui/core/layer_gate.dart';
 import 'package:openher_mobile/ui/core/theme.dart';
 import 'package:openher_mobile/ui/core/tokens.dart';
@@ -654,45 +655,142 @@ void main() {
   // **este test solo ya no cubría lo que pasa**: la tarjeta se pintaba con un
   // estado que no existe en producción. Los tres estados medidos están en el
   // grupo 'la pregunta del agente' de más abajo.
+  /// El evento `question.asked` que el server manda cuando el agente pregunta.
+  ///
+  /// Es lo único que pone `pendingQuestion` y pinta la card **abajo**: sin
+  /// evento no hay card, aunque el mensaje traiga el tool `question`. Las
+  /// preguntas viajan en el evento, no en el `input` del tool.
+  Map<String, Object?> questionAskedEvent() => <String, Object?>{
+    'id': 'que_42',
+    'questions': <Object?>[
+      <String, Object?>{
+        'header': 'Arquitectura',
+        'question': 'Donde vive la lista de sesiones?',
+        'options': <Object?>[
+          <String, Object?>{
+            'label': 'App Flutter mobile nueva',
+            'description': 'Android/iOS',
+          },
+          <String, Object?>{'label': 'Modulo dentro de OpenHer'},
+        ],
+      },
+    ],
+    'tool': {'messageID': 'msg_a_q', 'callID': 'call_q'},
+  };
+
+  // ───────────────────────── helpers de la card de pregunta ────────────────
+
+  /// Un tool `question` con el `input` como **string crudo**, que es la forma
+  /// real de v2 (`tool.dart`: en `pending` el `input` es un `String`, no un
+  /// mapa). Antes la card leía sólo el mapa y quedaba siempre vacía.
+  Map<String, Object?> questionStringInput() => toolJson(
+    id: 'call_q',
+    name: 'question',
+    status: 'pending',
+    input: jsonEncode({
+      'questions': [
+        {
+          'header': 'Arquitectura',
+          'question': 'Donde vive la lista de sesiones?',
+          'options': [
+            {'label': 'App Flutter mobile nueva', 'description': 'Android/iOS'},
+            {'label': 'Modulo dentro de OpenHer'},
+          ],
+        },
+      ],
+    }),
+  );
+
+  Map<String, Object?> questionTurn() => assistantJson(
+    id: 'msg_a_q',
+    complete: false,
+    content: [questionStringInput()],
+  );
+
+  /// ViewModel con un server de laboratorio: contesta la lista, el
+  /// `POST /prompt` y el `POST …/question/{id}/reply` con el status que se le
+  /// pida (404 = el build medido en `:4098`, donde ese path no existe).
+  Future<ChatViewModel> questionVm({
+    required List<Map<String, Object?>> messages,
+    required int replyStatus,
+    required void Function(String method, String path, String body) onCall,
+    ChatEventSource? source,
+  }) async {
+    final vm = ChatViewModel(
+      ApiClient(
+        config: kConfig,
+        client: MockClient((request) async {
+          final path = request.url.path;
+          onCall(request.method, path, request.body);
+          if (path.endsWith('/reply')) {
+            if (replyStatus != 204) {
+              return http.Response(
+                jsonEncode({'message': 'not found'}),
+                replyStatus,
+                headers: const {'content-type': 'application/json'},
+              );
+            }
+            return http.Response('', 204);
+          }
+          if (path.endsWith('/prompt')) {
+            return http.Response(
+              jsonEncode({
+                'data': {'id': 'msg_1'},
+              }),
+              200,
+              headers: const {'content-type': 'application/json'},
+            );
+          }
+          return http.Response(
+            jsonEncode({'data': messages}),
+            200,
+            headers: const {'content-type': 'application/json'},
+          );
+        }),
+      ),
+      sessionId: kSessionId,
+      sessionInfo: kSession,
+      streamFactory: (config, directory) => source ?? SilentSource(),
+    );
+    await vm.load();
+    if (source != null) vm.connectStream();
+    return vm;
+  }
   testWidgets('una tool question pendiente pinta la card de pregunta', (
     tester,
   ) async {
-    final vm = await loadedVm([
-      userJson('msg_u1', 'hola'),
-      assistantJson(
-        id: 'msg_a_q',
-        complete: false,
-        content: [
-          toolJson(
-            id: 'call_q',
-            name: 'question',
-            status: 'pending',
-            input: {
-              'questions': [
-                {
-                  'header': 'Arquitectura',
-                  'question': 'Donde vive la lista de sesiones?',
-                  'options': [
-                    {
-                      'label': 'App Flutter mobile nueva',
-                      'description': 'Android/iOS',
-                    },
-                    {'label': 'Modulo dentro de OpenHer'},
-                  ],
-                },
-              ],
-            },
-          ),
-        ],
-      ),
-    ]);
+    // **Adjudicado 2026-10-07.** La card ya no sale del estado del tool en el
+    // mensaje: sale del evento `question.asked`, y va fija **abajo**, encima
+    // del composer. Sin evento no hay card, aunque el mensaje traiga el tool.
+    final source = ControllableSource();
+    final vm = await questionVm(
+      messages: [userJson('msg_u1', 'hola'), questionTurn()],
+      replyStatus: 204,
+      onCall: (_, _, _) {},
+      source: source,
+    );
     addTearDown(vm.dispose);
     await pumpChat(tester, vm);
+
+    expect(find.byType(QuestionCard), findsNothing);
+
+    source.emit('question.asked', questionAskedEvent());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump();
 
     expect(find.byType(QuestionCard), findsOneWidget);
     expect(find.text('Donde vive la lista de sesiones?'), findsOneWidget);
     expect(find.text('App Flutter mobile nueva'), findsOneWidget);
     expect(find.text('Modulo dentro de OpenHer'), findsOneWidget);
+    // Abajo, no inline en la lista de mensajes: es la barra fija.
+    expect(
+      find.descendant(
+        of: find.byKey(ChatView.listKey),
+        matching: find.byType(QuestionCard),
+      ),
+      findsNothing,
+    );
   });
 
   testWidgets('los puntos de escritura aparecen mientras no llega texto', (
@@ -914,134 +1012,62 @@ void main() {
     expect(picked, [ChatSessionAction.compact]);
   });
 
-  // ───────────────────────── helpers de la card de pregunta ────────────────
 
-  /// Un tool `question` con el `input` como **string crudo**, que es la forma
-  /// real de v2 (`tool.dart`: en `pending` el `input` es un `String`, no un
-  /// mapa). Antes la card leía sólo el mapa y quedaba siempre vacía.
-  Map<String, Object?> questionStringInput() => toolJson(
-    id: 'call_q',
-    name: 'question',
-    status: 'pending',
-    input: jsonEncode({
-      'questions': [
-        {
-          'header': 'Arquitectura',
-          'question': 'Donde vive la lista de sesiones?',
-          'options': [
-            {'label': 'App Flutter mobile nueva', 'description': 'Android/iOS'},
-            {'label': 'Modulo dentro de OpenHer'},
+  // **Adjudicado 2026-10-07.** Esto era un testWidgets que afirmaba que la
+  // card se pintaba desde el `input` en string del tool. Ese camino ya no
+  // alimenta ninguna UI: la card sale del evento `question.asked`, fijo abajo.
+  // Lo que sí sigue valiendo es el parsing (el `input` crudo es un JSON en
+  // string), así que queda como unit test puro de `questionItems`, sin widget.
+  test('una question con input en STRING se parsea con sus opciones', () {
+    final tool = AssistantTool(
+      id: 'call_q',
+      name: 'question',
+      executed: false,
+      state: ToolPending(
+        input: jsonEncode({
+          'questions': [
+            {
+              'header': 'Arquitectura',
+              'question': 'Donde vive la lista de sesiones?',
+              'options': [
+                {
+                  'label': 'App Flutter mobile nueva',
+                  'description': 'Android/iOS',
+                },
+                {'label': 'Modulo dentro de OpenHer'},
+              ],
+            },
           ],
-        },
-      ],
-    }),
-  );
-
-  Map<String, Object?> questionTurn() => assistantJson(
-    id: 'msg_a_q',
-    complete: false,
-    content: [questionStringInput()],
-  );
-
-  /// ViewModel con un server de laboratorio: contesta la lista, el
-  /// `POST /prompt` y el `POST …/question/{id}/reply` con el status que se le
-  /// pida (404 = el build medido en `:4098`, donde ese path no existe).
-  Future<ChatViewModel> questionVm({
-    required List<Map<String, Object?>> messages,
-    required int replyStatus,
-    required void Function(String method, String path, String body) onCall,
-    ChatEventSource? source,
-  }) async {
-    final vm = ChatViewModel(
-      ApiClient(
-        config: kConfig,
-        client: MockClient((request) async {
-          final path = request.url.path;
-          onCall(request.method, path, request.body);
-          if (path.endsWith('/reply')) {
-            if (replyStatus != 204) {
-              return http.Response(
-                jsonEncode({'message': 'not found'}),
-                replyStatus,
-                headers: const {'content-type': 'application/json'},
-              );
-            }
-            return http.Response('', 204);
-          }
-          if (path.endsWith('/prompt')) {
-            return http.Response(
-              jsonEncode({
-                'data': {'id': 'msg_1'},
-              }),
-              200,
-              headers: const {'content-type': 'application/json'},
-            );
-          }
-          return http.Response(
-            jsonEncode({'data': messages}),
-            200,
-            headers: const {'content-type': 'application/json'},
-          );
         }),
       ),
-      sessionId: kSessionId,
-      sessionInfo: kSession,
-      streamFactory: (config, directory) => source ?? SilentSource(),
     );
-    await vm.load();
-    if (source != null) vm.connectStream();
-    return vm;
-  }
-
-  testWidgets('una question con input en STRING pinta la card y sus opciones', (
-    tester,
-  ) async {
-    final vm = await loadedVm([userJson('msg_u1', 'hola'), questionTurn()]);
-    addTearDown(vm.dispose);
-    await pumpChat(tester, vm);
 
     // El `input` crudo es un JSON en string: si sólo se leyera el mapa, la
-    // card saldría vacía y el turno quedaría trabado detrás del botón Detener.
-    expect(find.byType(QuestionCard), findsOneWidget);
-    expect(find.text('Arquitectura'), findsOneWidget);
-    expect(find.text('Donde vive la lista de sesiones?'), findsOneWidget);
-    expect(find.text('App Flutter mobile nueva'), findsOneWidget);
-    expect(find.text('Android/iOS'), findsOneWidget);
-    expect(find.text('Modulo dentro de OpenHer'), findsOneWidget);
-    // Y no miente "pensando": con una pregunta esperando no hay puntos.
+    // pregunta saldría vacía.
+    final items = questionItems(tool);
+    expect(items, hasLength(1));
+    expect(items.single['question'], 'Donde vive la lista de sesiones?');
     expect(
-      find.byType(TypingDots),
-      findsNothing,
-      reason: 'el modelo esta esperando al usuario, no escribiendo',
+      (items.single['options'] as List),
+      hasLength(2),
     );
+    // Y no miente "pensando": con una pregunta esperando no hay puntos.
+    // (Eso lo sigue cubriendo el widget: ver el test de la barra fija.)
   });
 
-  testWidgets('un input de question que no es JSON no rompe la card', (
-    tester,
-  ) async {
-    final vm = await loadedVm([
-      userJson('msg_u1', 'hola'),
-      assistantJson(
-        id: 'msg_a_q',
-        complete: false,
-        content: [
-          toolJson(
-            id: 'call_q',
-            name: 'question',
-            status: 'pending',
-            input: 'a medio escribir',
-          ),
-        ],
-      ),
-    ]);
-    addTearDown(vm.dispose);
-    await pumpChat(tester, vm);
+  // **Adjudicado 2026-10-07.** Igual que el anterior: era un testWidgets sobre
+  // la card inline, que ya no existe. Queda el parsing como unit test: un
+  // `input` que no es JSON da lista vacía y no rompe nada.
+  test('un input de question que no es JSON da lista vacía', () {
+    final tool = AssistantTool(
+      id: 'call_q',
+      name: 'question',
+      executed: false,
+      state: const ToolPending(input: 'a medio escribir'),
+    );
 
-    // Sin preguntas que pintar: el header genérico y el "Ahora no" (que siempre
-    // funciona) siguen ahí. La lista de mensajes no se rompe.
-    expect(find.byType(QuestionCard), findsOneWidget);
-    expect(find.text('Pregunta del agente'), findsOneWidget);
-    expect(find.byKey(QuestionCard.skipKey), findsOneWidget);
+    // Sin preguntas que pintar: lista vacía, sin tirar.
+    expect(questionItems(tool), isEmpty);
   });
 
   testWidgets('la card contesta por el endpoint de reply cuando existe', (
@@ -1058,10 +1084,10 @@ void main() {
     addTearDown(vm.dispose);
     await pumpChat(tester, vm);
 
-    // El `requestID` vive en el evento, no en el mensaje.
-    source.emit('question.asked', {
-      'id': 'que_42',
-      'questions': <Object?>[],
+    // El `requestID` vive en el evento, no en el mensaje. Y las preguntas
+    // también: la card de abajo se alimenta del evento, no del tool.
+    source.emit('question.asked', <String, Object?>{
+      ...questionAskedEvent(),
       'tool': {'messageID': 'msg_a_q', 'callID': 'call_q'},
     });
     await tester.pump();
@@ -1104,13 +1130,24 @@ void main() {
     tester,
   ) async {
     final calls = <String>[];
+    final source = ControllableSource();
     final vm = await questionVm(
       messages: [userJson('msg_u1', 'hola'), questionTurn()],
       replyStatus: 404,
       onCall: (method, path, body) => calls.add('$method $path $body'),
+      source: source,
     );
     addTearDown(vm.dispose);
     await pumpChat(tester, vm);
+
+    // La card sale del evento, no del tool: sin esto no hay qué contestar.
+    source.emit('question.asked', <String, Object?>{
+      ...questionAskedEvent(),
+      'tool': {'messageID': 'msg_a_q', 'callID': 'call_q'},
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump();
 
     await tester.tap(find.text('Modulo dentro de OpenHer'));
     await tester.pump();
@@ -1801,19 +1838,41 @@ void main() {
       },
     };
 
-    Future<void> pumpCon(WidgetTester tester, Map<String, Object?> tool) async {
-      final vm = await loadedVm([
-        userJson('msg_u1', 'hola'),
-        assistantJson(id: 'msg_a_q', complete: false, content: [tool]),
-      ]);
+    Future<void> pumpCon(
+      WidgetTester tester,
+      Map<String, Object?> tool, {
+      bool conEvento = false,
+    }) async {
+      ControllableSource? source;
+      if (conEvento) source = ControllableSource();
+      final vm = await questionVm(
+        messages: [
+          userJson('msg_u1', 'hola'),
+          assistantJson(id: 'msg_a_q', complete: false, content: [tool]),
+        ],
+        replyStatus: 204,
+        onCall: (_, _, _) {},
+        source: source,
+      );
       addTearDown(vm.dispose);
       await pumpChat(tester, vm);
+      if (conEvento) {
+        // La card sale del evento `question.asked`, no del estado del tool en
+        // el mensaje: sin esto no hay qué pintar, aunque el tool diga running.
+        source!.emit('question.asked', <String, Object?>{
+          ...questionAskedEvent(),
+          'tool': {'messageID': 'msg_a_q', 'callID': 'call_q_medido'},
+        });
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pump();
+      }
     }
 
     testWidgets('running: la pregunta espera y la card se pinta', (
       tester,
     ) async {
-      await pumpCon(tester, questionTool());
+      await pumpCon(tester, questionTool(), conEvento: true);
 
       // **Este es el caso que se veía en el server y no se pintaba**: `running`,
       // nunca `pending`. Con `pending` la función no lo aceptaba y la card no

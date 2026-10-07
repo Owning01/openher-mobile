@@ -686,6 +686,77 @@ void main() {
       expect(find.text('Ir a la raíz'), findsOneWidget);
     });
   });
+
+  group('FileRepository.downloadBytes: /api/fs/read en crudo', () {
+    FileRepository repoCon(
+      Future<http.Response> Function(http.BaseRequest) handler,
+    ) => FileRepository(config: kConfig, client: MockClient(handler));
+
+    test('devuelve los bytes exactos y pide la ruta con location', () async {
+      http.BaseRequest? vista;
+      final repository = repoCon((request) async {
+        vista = request;
+        return http.Response.bytes(
+          <int>[1, 2, 3],
+          200,
+          headers: <String, String>{'content-type': 'image/png'},
+        );
+      });
+      addTearDown(repository.close);
+
+      final bytes = await repository.downloadBytes(
+        path: 'foto.png',
+        directory: 'G:/fotos',
+      );
+
+      expect(bytes, <int>[1, 2, 3]);
+      expect(vista!.url.path, '/api/fs/read/foto.png');
+      expect(
+        vista!.url.queryParameters['location[directory]'],
+        'G:/fotos',
+      );
+    });
+
+    test('un 404 tira ApiError, no devuelve basura', () async {
+      final repository = repoCon(
+        (_) async => http.Response('{"_tag":"FileNotFoundError"}', 404),
+      );
+      addTearDown(repository.close);
+
+      expect(
+        repository.downloadBytes(path: 'noexiste.txt'),
+        throwsA(isA<ApiError>()),
+      );
+    });
+
+    test('el HTML del catch-all no se comparte como archivo', () async {
+      // El SPA devuelve 200 con `text/html` para rutas desconocidas
+      // (API_CONTRACT §1.6): compartir eso como archivo sería mentir.
+      final repository = repoCon(
+        (_) async => http.Response(
+          kSpaHtml,
+          200,
+          headers: <String, String>{'content-type': 'text/html'},
+        ),
+      );
+      addTearDown(repository.close);
+
+      expect(
+        repository.downloadBytes(path: 'raro'),
+        throwsA(isA<HtmlFallbackError>()),
+      );
+    });
+
+    test('un 401 tira AuthError', () async {
+      final repository = repoCon((_) async => http.Response('x', 401));
+      addTearDown(repository.close);
+
+      expect(
+        repository.downloadBytes(path: 'a.txt'),
+        throwsA(isA<AuthError>()),
+      );
+    });
+  });
 }
 
 /// Apretar el `AppIconButton` del app bar por su etiqueta de accesibilidad: los

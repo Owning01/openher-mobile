@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -483,6 +484,27 @@ class ApiClient {
     'limit': limit?.toString(),
   }, directory);
 
+  /// `GET /api/fs/read/<path>` — los bytes crudos del archivo.
+  ///
+  /// **Medido 2026-09-28**: devuelve el binario con el `Content-Type` correcto
+  /// (verificado con un APK de 56 MB). No pasa por [_decode]: eso intenta
+  /// `jsonDecode` y un binario no es JSON.
+  ///
+  /// Los fallos se clasifican igual que en [_decode] y en el mismo orden:
+  /// `5xx` ⇒ [ApiError], `401/403` ⇒ [AuthError], `>= 400` ⇒ [ApiError] con el
+  /// mensaje del server, y un 2xx con `text/html` ⇒ [HtmlFallbackError] (el
+  /// catch-all del SPA: compartir el `index.html` como si fuera el archivo
+  /// sería mentir). Un GET con fallo de transporte reintenta **una** vez,
+  /// como [getJson]: bajar dos veces no duplica nada.
+  Future<Uint8List> readFileBytes({String? directory, required String path}) {
+    final clean = path.startsWith('/') ? path.substring(1) : path;
+    final uri = config.api(
+      '/fs/read/$clean',
+      query: <String, String?>{ServerConfig.locationParam: directory},
+    );
+    return _sendBytes(uri);
+  }
+
   // ───────────────────────────── envoltura ──────────────────────────────────
 
   /// Desenvuelve `{"data": …}`; si no hay `data`, devuelve el sobre entero.
@@ -573,6 +595,65 @@ class ApiClient {
       } on IOException catch (e) {
         // SocketException / HandshakeException que el cliente no envolvió.
         // `IOException` no trae `message`: se usa el texto del error.
+        lastError = e.toString();
+      }
+      if (attempt + 1 < attempts) {
+        await Future<void>.delayed(_retryDelay(attempt));
+      }
+    }
+    throw NetworkError(lastError == null ? 'sin red' : '$lastError');
+  }
+
+  /// `GET` binario: devuelve los bytes crudos sin intentar `jsonDecode`.
+  ///
+  /// Misma política que [_send] (un reintento ante fallo de transporte, mismo
+  /// deadline) y mismo orden de clasificación que [_decode]: 5xx, 401/403,
+  /// resto de 4xx, y recién en 2xx el sniff de HTML del catch-all.
+  Future<Uint8List> _sendBytes(Uri uri) async {
+    final attempts = maxRetries + 1;
+    Object? lastError;
+
+    for (var attempt = 0; attempt < attempts; attempt++) {
+      try {
+        final request = http.Request('GET', uri);
+        request.headers['accept'] = '*/*';
+        final auth = config.basicAuthHeader;
+        if (auth != null) request.headers['authorization'] = auth;
+        final streamed = await _client.send(request).timeout(_timeout);
+        final response = await http.Response.fromStream(streamed);
+        final status = response.statusCode;
+        if (status >= 500) {
+          throw ApiError(
+            statusCode: status,
+            detail: _errorMessage(
+              utf8.decode(response.bodyBytes, allowMalformed: true),
+            ),
+          );
+        }
+        if (status == 401 || status == 403) {
+          throw AuthError(realm: response.headers['www-authenticate']);
+        }
+        if (status >= 400) {
+          throw ApiError(
+            statusCode: status,
+            detail: _errorMessage(
+              utf8.decode(response.bodyBytes, allowMalformed: true),
+            ),
+          );
+        }
+        if ((response.headers['content-type'] ?? '').toLowerCase().contains(
+          'text/html',
+        )) {
+          throw HtmlFallbackError(path: uri.path, statusCode: status);
+        }
+        return response.bodyBytes;
+      } on OchError {
+        rethrow;
+      } on TimeoutException {
+        lastError = 'timeout';
+      } on http.ClientException catch (e) {
+        lastError = e.message;
+      } on IOException catch (e) {
         lastError = e.toString();
       }
       if (attempt + 1 < attempts) {
