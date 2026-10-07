@@ -1000,3 +1000,51 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   le pasa el nombre del archivo y la carpeta actual; en la raíz del `location`
   sigue pasando el path del nodo como siempre.
 - 912 tests verdes, `flutter analyze lib` limpio. Publicado 1.17.1+26.
+
+## 2026-10-07 — Botón Descargar en Archivos (sin commitear ni publicar)
+
+- La hoja de acciones suma **Descargar** (`FileAction.download`, icono `download`):
+  baja los bytes por `GET /api/fs/read` y abre el compartir del sistema, donde
+  el usuario guarda (Descargas, Drive, WhatsApp). La app no elige destino: en
+  Android no hay carpeta propia sin permisos extra.
+- Camino nuevo: `ApiClient.readFileBytes` (bytes crudos, sin `jsonDecode`;
+  misma clasificación de errores y un reintento, como `getJson`) →
+  `FileRepository.downloadBytes` → temp `OpenHer-<nombre>` → `SharePlus`.
+- Fallos tipados antes que código: 404 → `ApiError`, 401 → `AuthError`, HTML del
+  catch-all → `HtmlFallbackError` (no compartir el index como archivo), sin red
+  → `NetworkError`. El nombre al temporal es solo el basename: un `../` no sale.
+- Misma resolución de ruta que Abrir: en disco, nombre + `location[directory]`
+  (la absoluta da 500, medido 2026-10-06).
+- Nueva dep `share_plus: ^12.0.2` (API `SharePlus.instance.share`; el `Share`
+  estático está deprecado en v12). `XFile` sale del mismo import.
+- Tests: 4 nuevos en `files_test.dart` (bytes exactos + URL con location, 404,
+  HTML, 401). La guarda de la hoja (`ninguna accion queda sin destino`, itera
+  `FileAction.values`) cubre la fila nueva: roto a propósito (`onPressed: null`)
+  y cae; restaurado.
+- `flutter analyze` limpio en los 4 archivos; `files_test.dart` 36/36,
+  `api_client`+`drives`+`api_measure` 69/69. La suite completa tiene 7 fallos
+  **ajenos**: `chat_view.dart`/`message_bubble.dart` no compilan (trabajo sin
+  terminar de otro agente en el árbol compartido); no se tocan (un path, un
+  escritor). PENDIENTE: commit con pathspec + bump + publicar, cuando se apruebe.
+
+## 2026-10-07 — Pregunta fija abajo + botón Descargar (publicar 1.18.0+27)
+
+- La card de pregunta va fija **abajo** (`_pendingQuestionBar` sobre el
+  composer), alimentada por `pendingQuestion` (evento `question.asked`). El
+  inline en `MessageBubble` se eliminó: pintaba dos veces lo mismo.
+- El árbol traía trabajo a medias de otro agente (`chat_view`, `message_bubble`
+  no compilaban: faltaba el import de `errors.dart`, colgaba un `pending` y
+  sobraba `_question` muerto). Con autorización del dueño se completó lo mínimo:
+  import + `pendingQuestionTool(assistant) == null` + borrar `_question`.
+- 6 tests de `chat_render_test.dart` adjudicados **en el lugar**: la card ya no
+  sale del tool sino del evento. Los de render ahora emiten `question.asked`;
+  los dos de parsing de `input` en string quedaron como unit tests puros de
+  `questionItems` (ese camino ya no alimenta UI). Helpers de question movidos
+  arriba del primer uso (Dart exige declaración previa).
+- Botón **Descargar** en la hoja de Archivos (`FileAction.download`):
+  `ApiClient.readFileBytes` (crudo, sin `jsonDecode`, misma clasificación de
+  errores) → temp `OpenHer-<nombre>` → `SharePlus.instance.share`. Nueva dep
+  `share_plus: ^12.0.2`. 4 tests nuevos en `files_test.dart`; la guarda de la
+  hoja cubre la fila (verificado rompiéndola).
+- Suite: **928 verdes (6 skipped)**, `flutter analyze lib` sin errores ni
+  warnings.

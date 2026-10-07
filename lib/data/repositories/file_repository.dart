@@ -41,6 +41,8 @@
 /// viewmodel compartan exactamente la misma aritmética.
 library;
 
+import 'dart:typed_data';
+
 import 'package:http/http.dart' as http;
 
 import '../../core/network/api_client.dart';
@@ -238,7 +240,7 @@ class FileRepository {
         }
       }),
     );
-    return <String>[for (final r in resultados) if (r != null) r];
+    return resultados.whereType<String>().toList(growable: false);
   }
 
   /// Cuánto se espera a una letra antes de darla por muerta.
@@ -247,6 +249,15 @@ class FileRepository {
   /// llega en milisegundos. Lo que tarda más es una unidad de red que no
   /// contesta, y esa hay que descartarla rápido.
   static const Duration kRootProbeTimeout = Duration(seconds: 3);
+
+  /// `GET /api/fs/read/<path>` — los bytes crudos del archivo.
+  ///
+  /// Es lo que alimenta "Descargar": el server no tiene endpoint de descarga
+  /// con otro formato, el binario **es** la descarga.
+  Future<Uint8List> downloadBytes({
+    required String path,
+    String? directory,
+  }) => _api.readFileBytes(directory: directory, path: path);
 
   /// `GET /api/fs/find` — búsqueda por nombre, en todo el `location`.
   ///

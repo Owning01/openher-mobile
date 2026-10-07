@@ -238,8 +238,14 @@ class MessageBubble extends StatelessWidget {
     // Una pregunta pendiente tiene prioridad visual sobre el texto: es la
     // única forma de desbloquear el turno (y sin ella el botón Detener era la
     // única salida).
-    final pending = pendingQuestionTool(assistant);
-    if (pending != null) children.add(_question(context, pending));
+    // La pregunta ya NO se pinta inline en la burbuja: va fija abajo del chat
+    // (en `_pendingQuestionBar` de `chat_view`). Si la poníamos inline también,
+    // aparecía dos veces  la misma pregunta, una pegada al mensaje y otra
+    // pegada al composer.
+    // La pregunta ya NO se pinta inline en la burbuja: va fija al pie del chat,
+    // en `_pendingQuestionBar` de `chat_view`. Si además la pintáramos acá,
+    // aparecía dos veces la misma pregunta (una pegada al mensaje y otra al
+    // composer).
 
     // Canal A de §5: el turno murió. Va antes del texto porque es lo que hay
     // que leer primero; el texto parcial que quedó sigue debajo.
@@ -273,7 +279,7 @@ class MessageBubble extends StatelessWidget {
     // terminar el turno.
     if (working &&
         isOpenAssistant != false &&
-        pending == null &&
+        pendingQuestionTool(assistant) == null &&
         assistant.textContent.trim().isEmpty) {
       children.add(const LayerGate('chat.typing', child: TypingDots()));
     }
@@ -610,33 +616,6 @@ class MessageBubble extends StatelessWidget {
             ),
           ),
         ),
-      ),
-    );
-  }
-
-  /// `chat.msg.question`: la card de la tool `question` en `pending`.
-  Widget _question(BuildContext context, AssistantTool tool) {
-    final questions = questionItems(tool);
-    final first = questions.isEmpty
-        ? const <String, Object?>{}
-        : questions.first;
-    final requestId = questionRequestId;
-    return LayerGate(
-      'chat.msg.question',
-      child: QuestionCard(
-        header: asStr(first['header']) ?? 'Pregunta del agente',
-        question: asStr(first['question']) ?? '',
-        options: [
-          for (final option in asMapList(first['options']))
-            QuestionOption(
-              label: asStr(option['label']) ?? '',
-              detail: asStr(option['description']),
-            ),
-        ],
-        // Se lee el campo, no `widget.x`: mismo valor, y no depende de que el
-        // analyzer resuelva el getter `widget` de `StatelessWidget` acá.
-        onSubmit: (answers) => onQuestionAnswer?.call(requestId, answers),
-        onSkip: (answers) => onQuestionAnswer?.call(requestId, answers),
       ),
     );
   }

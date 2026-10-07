@@ -28,9 +28,12 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/network/server_config.dart';
@@ -44,7 +47,7 @@ import 'file_preview.dart';
 import 'files_viewmodel.dart';
 
 /// Qué se pidió desde la hoja de acciones de una fila.
-enum FileAction { open, openInBrowser, copyPath, diff, addToChat }
+enum FileAction { open, download, openInBrowser, copyPath, diff, addToChat }
 
 class FilesView extends StatefulWidget {
   const FilesView({
@@ -274,11 +277,68 @@ class _FilesViewState extends State<FilesView> {
           ),
         );
         break;
+      case FileAction.download:
+        // Baja los bytes y abre el compartir del sistema: ahí el usuario
+        // guarda donde quiere (Descargas, Drive, WhatsApp…). La app no elige
+        // destino porque en Android no hay "carpeta de descargas" propia sin
+        // permisos extra, y pedirlos por un botón es peor que compartir.
+        if (!mounted) return;
+        await _downloadFile(node);
+        break;
       case FileAction.diff:
         // El diff necesita un repo git en el directorio. Sin destino todavia,
         // y se dice en vez de fingir que funciona.
         _toast('Diff: todavia no disponible');
         break;
+    }
+  }
+
+  /// Baja el archivo y abre el compartir del sistema.
+  ///
+  /// Misma resolución de ruta que "Abrir": en un disco se pide el nombre
+  /// relativo a `location[directory]` (la ruta absoluta entera da 500).
+  /// El archivo se escribe en el temporal del sistema con su nombre real y se
+  /// comparte desde ahí: `share_plus` necesita un path en disco, no bytes.
+  Future<void> _downloadFile(FileNode node) async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('Descargando…')));
+    final Uint8List bytes;
+    try {
+      bytes = await _model.repository.downloadBytes(
+        path: _enDisco ? node.name : node.path,
+        directory: _enDisco ? _model.path : null,
+      );
+    } on Object catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(SnackBar(content: Text('No se pudo descargar: $e')));
+      return;
+    }
+    // Solo el basename al temporal: un `../` en el nombre no puede salir de
+    // ahí a escribir en otro lado.
+    final safeName = node.name.isEmpty ? 'archivo' : node.name;
+    final file = File(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}OpenHer-$safeName',
+    );
+    try {
+      await file.writeAsBytes(bytes, flush: true);
+    } on Object catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('No se pudo guardar el archivo: $e')),
+      );
+      return;
+    }
+    if (!mounted) return;
+    messenger.hideCurrentSnackBar();
+    try {
+      await SharePlus.instance.share(
+        ShareParams(files: <XFile>[XFile(file.path)], text: safeName),
+      );
+    } on Object catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('No se pudo compartir: $e')),
+      );
     }
   }
 
@@ -823,6 +883,12 @@ class _FileActionsSheet extends StatelessWidget {
             icon: 'external-link',
             label: 'Abrir',
             onPressed: () => Navigator.of(context).pop(FileAction.open),
+          ),
+          _SheetAction(
+            name: FileAction.download.name,
+            icon: 'download',
+            label: 'Descargar',
+            onPressed: () => Navigator.of(context).pop(FileAction.download),
           ),
           if (_browserCanShow)
             _SheetAction(

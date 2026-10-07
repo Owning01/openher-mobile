@@ -32,6 +32,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../../data/repositories/catalog_repository.dart';
 import '../../../domain/models/agent_catalog.dart';
+import '../../../domain/models/errors.dart';
 import '../../../domain/models/message.dart';
 import '../../../domain/models/turn_activity.dart';
 import '../../core/app_icon.dart';
@@ -321,6 +322,14 @@ class _ChatViewState extends State<ChatView> {
             ],
           ),
         ),
+        // La pregunta del agente **va siempre abajo**, fija, justo encima del
+        // composer. No más inline en la burbuja del assistant, que era donde se
+        // perdía entre mensajes.
+        //
+        // Solo aparece mientras está pendiente. Cuando el usuario responde,
+        // `pendingQuestion` cae a null y la tarjeta se va: en ese momento el
+        // turno continúa y la respuesta queda en el flujo como un mensaje más.
+        if (_vm.pendingQuestion != null) _pendingQuestionBar(_vm.pendingQuestion!),
         _composer(),
       ],
     );
@@ -587,6 +596,43 @@ class _ChatViewState extends State<ChatView> {
     final callId = tool?.id;
     if (callId == null) return null;
     return _vm.requestIdFor(callId);
+  }
+
+  /// La card de la pregunta del agente, fija al pie.
+  ///
+  /// Mientras está pendiente va siempre acá, no en la burbuja del mensaje.
+  /// Cuando el usuario responde, `pendingQuestion` se anula y la card se va:
+  /// el hilo del agente continúa y la respuesta empieza a aparecer como un
+  /// mensaje más. Así la pregunta queda quieta en el fondo hasta que hay
+  /// respuesta, y después se vuelve a integrar al chat (directamente, porque
+  /// al contestarse deja de estar).
+  Widget _pendingQuestionBar(PendingQuestion q) {
+    final questions = q.questions;
+    final first = questions.isEmpty ? <String, Object?>{} : questions.first;
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surface,
+      elevation: 1,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(AppSpacing.md, AppSpacing.sm, AppSpacing.md, 0),
+          child: QuestionCard(
+            header: asStr(first['header']) ?? 'Pregunta del agente',
+            question: asStr(first['question']) ?? '',
+            options: [
+              for (final option in asMapList(first['options']))
+                QuestionOption(
+                  label: asStr(option['label']) ?? '',
+                  detail: asStr(option['description']),
+                ),
+            ],
+            onSubmit: (answers) => _onQuestion(q.requestId, answers),
+            onSkip: (answers) => _onQuestion(q.requestId, answers),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _emptyState() {
