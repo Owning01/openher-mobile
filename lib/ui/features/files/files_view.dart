@@ -262,7 +262,13 @@ class _FilesViewState extends State<FilesView> {
           MaterialPageRoute<void>(
             builder: (_) => FilePreview(
               config: widget.config,
-              path: node.path,
+              // En un disco (ruta absoluta) el server solo resuelve un
+              // nombre relativo a `location[directory]`: la ruta absoluta
+              // entera da 500 (medido). Así que acá se pasa el nombre y la
+              // carpeta; en la raíz del `location` (ruta relativa) alcanza
+              // con el path del nodo, que el server lo resuelve solo.
+              path: _enDisco ? node.name : node.path,
+              directory: _enDisco ? _model.path : null,
               name: node.name,
             ),
           ),
@@ -460,6 +466,13 @@ class _FilesViewState extends State<FilesView> {
       ),
     );
   }
+
+  /// ¿El path actual es **absoluto** (un disco)?”
+  ///
+  /// En ese caso el server no resuelve una ruta absoluta: hay que pasarle el”
+  /// nombre del archivo y su carpeta por separado.
+  bool get _enDisco =>
+      _model.path.contains(':') || _model.path.startsWith('/');
 
   Widget _body() {
     final error = _model.error;

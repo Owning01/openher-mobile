@@ -987,3 +987,16 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
 - **Trampa repetida**: la vez pasada otro agente se llevo mis 17 archivos con un
   `git commit` sin pathspec mientras estaban staged. Esta vez se commiteo
   inmediatamente despues del `git add`.
+
+## 2026-10-07 — Abrir archivos de un disco: imposible porque el server no resuelve la ruta absoluta
+
+- El navegador lista discos, carpetas y archivos, pero tocar un archivo no
+  abría nada. TOCABASE en el log del server: `GET /api/fs/read/G:\...\foto.jpg`
+  contesta **500**.
+- **Medido**: `/api/fs/read/<nombre>?location[directory]=<carpeta-absoluta>`
+  contesta **200** con el archivo; la ruta absoluta entera contesta 500.
+- Causa: `FilePreview` armaba la URL con la ruta absoluta entera y **sin**
+  `directory`. Ahora recibe el path y el `directory` por separado: en un disco
+  le pasa el nombre del archivo y la carpeta actual; en la raíz del `location`
+  sigue pasando el path del nodo como siempre.
+- 912 tests verdes, `flutter analyze lib` limpio. Publicado 1.17.1+26.
