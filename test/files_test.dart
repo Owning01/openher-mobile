@@ -14,8 +14,10 @@ import 'package:http/testing.dart';
 import 'package:openher_mobile/core/network/server_config.dart';
 import 'package:openher_mobile/data/repositories/file_repository.dart';
 import 'package:openher_mobile/domain/models/errors.dart';
+import 'package:openher_mobile/ui/core/app_icon.dart';
 import 'package:openher_mobile/ui/core/layer_gate.dart';
 import 'package:openher_mobile/ui/core/theme.dart';
+import 'package:openher_mobile/ui/core/tokens.dart';
 import 'package:openher_mobile/ui/features/files/files_view.dart';
 import 'package:openher_mobile/ui/features/files/files_viewmodel.dart';
 
@@ -467,6 +469,34 @@ void main() {
       expect(find.text('dart'), findsOneWidget, reason: 'files.row.ext');
       // La carpeta se muestra con la barra del prototipo.
       expect(find.text('lib/'), findsOneWidget);
+    });
+
+    testWidgets('la carpeta va en ámbar y cada archivo con su icono', (
+      tester,
+    ) async {
+      await pumpFiles(
+        tester,
+        body:
+            '{"data":[{"path":"lib","type":"directory"},'
+            '{"path":"lib/main.dart","type":"file"}]}',
+      );
+
+      final folder = tester.widget<AppIcon>(
+        find.byWidgetPredicate(
+          (widget) => widget is AppIcon && widget.name == 'folder',
+        ),
+      );
+      expect(
+        folder.color,
+        AppColors.warnOf(Brightness.light),
+        reason: 'la carpeta es amarilla (ámbar del tema claro)',
+      );
+      final file = tester.widget<AppIcon>(
+        find.byWidgetPredicate(
+          (widget) => widget is AppIcon && widget.name == 'file',
+        ),
+      );
+      expect(file.name, 'file', reason: 'el archivo también lleva icono');
     });
 
     testWidgets('el breadcrumb muestra el directorio con sus segmentos', (
