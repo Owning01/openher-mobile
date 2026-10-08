@@ -1079,3 +1079,11 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   y Descargar) y sus 4 tests: bloqueaba descargas que sí funcionan. Test del
   catch-all adjudicado con el shell real; nuevo test de `.html` genuino.
 - Suite completa verde, analyze sin errores ni warnings.
+
+## 2026-10-08 — Iconos de Archivos: carpeta ámbar + file en todo (publicar 1.18.3+30)
+
+- La fila usaba `folder`/`file` pero la carpeta iba en gris de chrome.
+  Ahora la carpeta va en ámbar (`AppColors.warnOf`, adaptado a claro/oscuro)
+  y cada archivo lleva su icono `file` (ya lo tenía: único builder `_row`).
+- Test widget: ámbar exacto en claro + presencia del icono en archivo. Guard
+  roto y verificado. Suite verde, analyze limpio.

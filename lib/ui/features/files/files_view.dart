@@ -637,8 +637,10 @@ class _FilesViewState extends State<FilesView> {
               AppIcon(
                 node.isDirectory ? 'folder' : 'file',
                 size: 16,
+                // La carpeta en ámbar (clásico de exploradores) y el archivo en
+                // gris del chrome: se distinguen de un vistazo sin leer.
                 color: node.isDirectory
-                    ? _mutedStrongOf(theme.brightness)
+                    ? AppColors.warnOf(theme.brightness)
                     : theme.colorScheme.onSurfaceVariant,
               ),
               const SizedBox(width: AppSpacing.sm),
