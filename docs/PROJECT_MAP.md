@@ -79,6 +79,8 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 
 - **Auth:** Basic `opencode:<OPENCODE_SERVER_PASSWORD>`; el user se compara **siempre**; default `"opencode"`.
 - **Probe de versión:** `GET /api/location` (NO `/api/health`: da 404 en este build).
+  Sin red el probe dice `NetworkError` tal cual: envolverlo en
+  `UnsupportedServerError` mentía ("no es v2" con Tailscale caído, 2026-10-07).
 - **Trampa:** todo path desconocido devuelve **HTML 200** (catch-all del SPA) → el parser
   rechaza `text/html`. Un **5xx con HTML** es error de server, no el catch-all: se clasifica el
   5xx antes del sniff de HTML, o se pierde el retry.
@@ -145,6 +147,11 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
   56 MB = `application/vnd.android.package-archive`, y con PNG, SVG, PDF y `.md`). No hay otra
   vía: `/api/fs/raw/*`, `/api/fs/download/*` y `/api/file/*` dan **404**, y cualquier ruta sin
   prefijo cae en el catch-all del SPA (HTML 200). Acepta `\` y `/` en el path (probado).
+  **Sólo dentro del `location`**: con `location[directory]` absoluto fuera de él
+  devuelve el HTML del SPA con 200 (medido 2026-10-08 con `G:/Proyectos/seek-asm`);
+  absoluto en la URL da 500 y `?path=` da 404/500. Abrir y Descargar frenan antes
+  de la red si `dentroDe(location, carpeta)` da falso (`fs_path.dart` +
+  `FileRepository.locationDirectory` cacheado).
 - **`GET /api/fs/list` devuelve solo `path` y `type`** (medido): ni mime, ni tamaño, ni nombre.
   Por eso la clasificación va por extensión, y una extensión desconocida sale `binary` con un
   aviso, en vez de renderizar bytes como texto.

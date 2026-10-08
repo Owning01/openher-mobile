@@ -535,6 +535,57 @@ void main() {
       );
     });
 
+    testWidgets('fuera del location, Descargar avisa sin gastar red', (
+      tester,
+    ) async {
+      // Medido 2026-10-08 contra el server real: `GET /api/fs/read` fuera del
+      // `location` devuelve el HTML del SPA con 200. El freno va antes de la
+      // red, y con datos móviles cada byte cuenta.
+      final reads = <Uri>[];
+      final client = MockClient((request) async {
+        const jsonType = <String, String>{'content-type': 'application/json'};
+        if (request.url.path.endsWith('/location')) {
+          return http.Response(
+            '{"directory":"C:\\\\Users\\\\perca"}',
+            200,
+            headers: jsonType,
+          );
+        }
+        if (request.url.path.contains('fs/read')) {
+          reads.add(request.url);
+        }
+        return http.Response(
+          '{"data":[{"path":"G:\\\\Proyectos\\\\seek-asm\\\\mockup-bar.html",'
+          '"type":"file"}]}',
+          200,
+          headers: jsonType,
+        );
+      });
+      final model = FilesViewModel(
+        repository: FileRepository(config: kConfig, client: client),
+      );
+      addTearDown(model.dispose);
+      await model.load('G:/Proyectos/seek-asm');
+      await pumpView(tester, model);
+
+      await tester.longPress(
+        find.byKey(
+          FilesView.rowKey(r'G:\Proyectos\seek-asm\mockup-bar.html'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(FilesView.sheetActionKey(FileAction.download.name)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Descargar solo funciona dentro de la carpeta del servidor.'),
+        findsOneWidget,
+      );
+      expect(reads, isEmpty, reason: 'el freno va antes de la red');
+    });
+
     /// Cada accion de la hoja tiene que ser apretable.
     ///
     /// Salio de un bug real: "Abrir" y "Ver diff" estaban con `onPressed: null`
@@ -755,6 +806,43 @@ void main() {
         repository.downloadBytes(path: 'a.txt'),
         throwsA(isA<AuthError>()),
       );
+    });
+  });
+
+  group('FileRepository.locationDirectory: la base del read', () {
+    FileRepository repoCon(
+      Future<http.Response> Function(http.BaseRequest) handler,
+    ) => FileRepository(config: kConfig, client: MockClient(handler));
+
+    test('devuelve el directory y lo pide una sola vez', () async {
+      var calls = 0;
+      final repository = repoCon((request) async {
+        calls++;
+        expect(request.url.path, '/api/location');
+        return http.Response(
+          '{"directory":"C:\\\\Users\\\\perca","project":{"id":"p1"}}',
+          200,
+          headers: <String, String>{'content-type': 'application/json'},
+        );
+      });
+      addTearDown(repository.close);
+
+      expect(await repository.locationDirectory(), r'C:\Users\perca');
+      expect(await repository.locationDirectory(), r'C:\Users\perca');
+      expect(calls, 1, reason: 'la segunda sale del caché');
+    });
+
+    test('sin directory no hay veredicto: null y se intenta igual', () async {
+      final repository = repoCon(
+        (_) async => http.Response(
+          '{}',
+          200,
+          headers: <String, String>{'content-type': 'application/json'},
+        ),
+      );
+      addTearDown(repository.close);
+
+      expect(await repository.locationDirectory(), isNull);
     });
   });
 }

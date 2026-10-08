@@ -519,6 +519,10 @@ void main() {
     });
 
     test('el probe NO reintenta (3s de deadline, un solo intento)', () async {
+      // **Adjudicado 2026-10-07.** Antes esperaba `UnsupportedServerError`,
+      // que era el bug: sin red el probe decía "no es v2" y tapó un Tailscale
+      // caído en un teléfono real. Ahora el `NetworkError` pasa sin envolver;
+      // lo que se verifica acá es el conteo (un solo intento), no el disfraz.
       var calls = 0;
       final api = clientWith(
         MockClient((_) async {
@@ -527,11 +531,25 @@ void main() {
         }),
       );
 
+      await expectLater(api.probeServer(), throwsA(isA<NetworkError>()));
+      expect(calls, 1);
+    });
+
+    test('sin red el probe dice que no hay red, no que no es v2', () async {
+      final api = clientWith(
+        MockClient((_) async => throw const SocketException('sin server')),
+      );
+
       await expectLater(
         api.probeServer(),
-        throwsA(isA<UnsupportedServerError>()),
+        throwsA(
+          isA<NetworkError>().having(
+            (e) => e.message,
+            'message',
+            'No se pudo conectar con el servidor.',
+          ),
+        ),
       );
-      expect(calls, 1);
     });
   });
 

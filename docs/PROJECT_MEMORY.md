@@ -1048,3 +1048,19 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   hoja cubre la fila (verificado rompiéndola).
 - Suite: **928 verdes (6 skipped)**, `flutter analyze lib` sin errores ni
   warnings.
+
+## 2026-10-08 — Freno fuera del location + probe honesto (publicar 1.18.1+28)
+
+- Descargar un archivo fuera del `location` fallaba con `HtmlFallbackError`
+  (medido: `fs/read` + `location[directory]=G:/Proyectos/seek-asm` da 200 con
+  el HTML del SPA; absoluto en URL da 500; `?path=` da 404/500). El server solo
+  sirve bytes dentro de su carpeta: sin cambio de server no hay descarga de
+  otros discos.
+- Abrir y Descargar frenan antes de la red con aviso
+  ("solo funciona dentro de la carpeta del servidor"): `dentroDe` puro en
+  `fs_path.dart` + `FileRepository.locationDirectory` cacheado. Sin `location`
+  legible se intenta igual (fail-open).
+- El probe ya no disfraza `NetworkError` de "no es v2" (tapaba un Tailscale
+  caído). El campo host rechaza `IP:puerto` pegado. 2 tests adjudicados en el
+  lugar + 4 nuevos; guards rotos y verificados.
+- Suite completa verde, analyze sin errores ni warnings.

@@ -101,6 +101,26 @@ void main() {
 
       expect(find.text('Sólo el host, sin http:// ni ruta.'), findsOneWidget);
     });
+
+    testWidgets('un host con puerto pegado se rechaza en el campo', (
+      tester,
+    ) async {
+      // Pegar `IP:puerto` es común al copiar de una URL. Sin este freno el
+      // `Uri` revienta lejos con un error crudo (`Invalid argument (host)`),
+      // no con un mensaje de la app.
+      await pumpConnect(tester, ConnectView(onProbe: _neverProbe));
+      await tester.enterText(
+        find.byKey(ConnectView.hostFieldKey),
+        '192.168.1.22:4098',
+      );
+      await tester.tap(find.byKey(ConnectView.connectButtonKey));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Sin puerto: el puerto va en su campo.'),
+        findsOneWidget,
+      );
+    });
   });
 
   group('ConnectView: conectar', () {
