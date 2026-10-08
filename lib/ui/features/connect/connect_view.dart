@@ -373,6 +373,11 @@ String? _validateHost(String? value) {
   if (host.contains('://') || host.contains('/')) {
     return 'Sólo el host, sin http:// ni ruta.';
   }
+  if (host.contains(':')) {
+    // Con puerto pegado el `Uri` revienta lejos con un error crudo
+    // (`Invalid argument (host)`), no con un mensaje de la app.
+    return 'Sin puerto: el puerto va en su campo.';
+  }
   return null;
 }
 

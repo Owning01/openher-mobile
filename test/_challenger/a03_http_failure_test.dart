@@ -389,7 +389,10 @@ void main() {
       );
     });
 
-    test('timeout en el probe (3 s) ⇒ UnsupportedServerError', () async {
+    test('timeout en el probe (3 s) ⇒ NetworkError, no UnsupportedServerError', () async {
+      // **Adjudicado 2026-10-07.** El timeout es falta de respuesta, no
+      // veredicto de versión: antes se envolvía en `UnsupportedServerError` y
+      // la UI decía "no es v2" contra un server caído o inalcanzable.
       final client = raw(
         () => http.Response('{}', 200),
         delay: const Duration(seconds: 8),
@@ -401,7 +404,7 @@ void main() {
       );
       await expectLater(
         c.probeServer().timeout(const Duration(seconds: 6)),
-        throwsA(isA<UnsupportedServerError>()),
+        throwsA(isA<NetworkError>()),
       );
     });
   });

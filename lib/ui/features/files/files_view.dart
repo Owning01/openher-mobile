@@ -45,6 +45,7 @@ import '../../core/theme.dart';
 import '../../core/tokens.dart';
 import 'file_preview.dart';
 import 'files_viewmodel.dart';
+import 'fs_path.dart';
 
 /// Qué se pidió desde la hoja de acciones de una fila.
 enum FileAction { open, download, openInBrowser, copyPath, diff, addToChat }
@@ -261,6 +262,8 @@ class _FilesViewState extends State<FilesView> {
         // que el pill de agente y el microfono, un control dibujado sin
         // destino. Ahora abre el visor, que decide por el tipo de archivo.
         if (!mounted) return;
+        if (await _frenarSiFueraDelLocation('Abrir')) return;
+        if (!mounted) return;
         await Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => FilePreview(
@@ -282,6 +285,8 @@ class _FilesViewState extends State<FilesView> {
         // guarda donde quiere (Descargas, Drive, WhatsApp…). La app no elige
         // destino porque en Android no hay "carpeta de descargas" propia sin
         // permisos extra, y pedirlos por un botón es peor que compartir.
+        if (!mounted) return;
+        if (await _frenarSiFueraDelLocation('Descargar')) return;
         if (!mounted) return;
         await _downloadFile(node);
         break;
@@ -527,7 +532,36 @@ class _FilesViewState extends State<FilesView> {
     );
   }
 
-  /// ¿El path actual es **absoluto** (un disco)?”
+  /// ¿El archivo está al alcance de `GET /api/fs/read`?
+  ///
+  /// El server solo sirve bytes **dentro de su `location`** (medido 2026-10-08:
+  /// fuera devuelve el HTML del SPA con 200). En un disco eso se sabe antes de
+  /// gastar red — y con datos móviles cada byte cuenta. Si el `location` no se
+  /// puede leer, se intenta igual: sin veredicto no hay freno.
+  Future<bool> _alAlcanceDelRead() async {
+    if (!_enDisco) return true;
+    String? base;
+    try {
+      base = await _model.repository.locationDirectory();
+    } on Object {
+      return true;
+    }
+    if (base == null) return true;
+    return dentroDe(base, _model.path);
+  }
+
+  /// Freno honesto para Abrir y Descargar fuera del `location`.
+  ///
+  /// Devuelve `true` si hay que frenar (y ya avisó). Sin esto la request va
+  /// igual, el server contesta el HTML del SPA y el error culpa al dialecto.
+  Future<bool> _frenarSiFueraDelLocation(String verbo) async {
+    if (await _alAlcanceDelRead()) return false;
+    if (!mounted) return true;
+    _toast('$verbo solo funciona dentro de la carpeta del servidor.');
+    return true;
+  }
+  ///
+  /// ¿El path actual es **absoluto** (un disco)?
   ///
   /// En ese caso el server no resuelve una ruta absoluta: hay que pasarle el”
   /// nombre del archivo y su carpeta por separado.

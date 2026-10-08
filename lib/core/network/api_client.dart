@@ -113,6 +113,10 @@ class ApiClient {
   ///
   /// Si responde HTML, o 404, o 401 ⇒ no es un opencode v2 soportado por la app
   /// (decisión D1: error explícito, no modo dual) ⇒ [UnsupportedServerError].
+  ///
+  /// Lo único que NO se envuelve es [NetworkError]: sin red no hay diagnóstico
+  /// de dialecto posible, y decir "no es v2" cuando el teléfono no llegó al
+  /// host es mentir (medido 2026-10-07: ese mensaje tapó un Tailscale caído).
   Future<Map<String, dynamic>> probeServer() async {
     try {
       final body = await _send(
@@ -135,6 +139,10 @@ class ApiClient {
       // accionable, pero el motivo dice la causa real.
       throw UnsupportedServerError('credenciales rechazadas: ${e.message}');
     } on UnsupportedServerError {
+      rethrow;
+    } on NetworkError {
+      // Sin respuesta no hay veredicto de versión: se propaga tal cual para
+      // que la UI diga "no se pudo conectar", no "no es v2".
       rethrow;
     } on OchError catch (e) {
       throw UnsupportedServerError(e.message);
