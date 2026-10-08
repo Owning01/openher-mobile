@@ -535,24 +535,24 @@ void main() {
       );
     });
 
-    testWidgets('fuera del location, Descargar avisa sin gastar red', (
-      tester,
-    ) async {
-      // Medido 2026-10-08 contra el server real: `GET /api/fs/read` fuera del
-      // `location` devuelve el HTML del SPA con 200. El freno va antes de la
-      // red, y con datos móviles cada byte cuenta.
+    testWidgets('un .html de otro disco se descarga igual', (tester) async {
+      // **Adjudicado 2026-10-08.** Este test afirmaba el freno fuera del
+      // location, que nació de una medición errónea: lo que fallaba era el
+      // sniff (`text/html` ⇒ fallback), no el server — `C:/Windows` y `G:`
+      // devuelven bytes reales. Con el veredicto por cuerpo, la descarga
+      // procede: en el test los bytes llegan hasta compartir (que sin
+      // plataforma tira, y ese es el aviso que se ve).
       final reads = <Uri>[];
       final client = MockClient((request) async {
         const jsonType = <String, String>{'content-type': 'application/json'};
-        if (request.url.path.endsWith('/location')) {
-          return http.Response(
-            '{"directory":"C:\\\\Users\\\\perca"}',
-            200,
-            headers: jsonType,
-          );
-        }
         if (request.url.path.contains('fs/read')) {
           reads.add(request.url);
+          return http.Response(
+            '<!DOCTYPE html><html lang="es"><head><title>seek</title></head>'
+            '<body>maqueta</body></html>',
+            200,
+            headers: <String, String>{'content-type': 'text/html'},
+          );
         }
         return http.Response(
           '{"data":[{"path":"G:\\\\Proyectos\\\\seek-asm\\\\mockup-bar.html",'
@@ -579,11 +579,16 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // En widget no se puede afirmar el compartir: `writeAsBytes` es I/O
+      // real y bajo `flutter_test` no completa (fake async). Lo que prueba el
+      // fix es que la request sale y los bytes se aceptan (el repo-test de
+      // arriba afirma los bytes); acá se afirma que no hay freno ni error.
+      expect(reads, hasLength(1), reason: 'la descarga sale a la red');
       expect(
-        find.text('Descargar solo funciona dentro de la carpeta del servidor.'),
-        findsOneWidget,
+        find.textContaining('No se pudo descargar'),
+        findsNothing,
+        reason: 'el .html genuino ya no se confunde con el SPA',
       );
-      expect(reads, isEmpty, reason: 'el freno va antes de la red');
     });
 
     /// Cada accion de la hoja tiene que ser apretable.
@@ -780,12 +785,39 @@ void main() {
       );
     });
 
-    test('el HTML del catch-all no se comparte como archivo', () async {
-      // El SPA devuelve 200 con `text/html` para rutas desconocidas
-      // (API_CONTRACT §1.6): compartir eso como archivo sería mentir.
+    test('un .html genuino se descarga: el header no decide', () async {
+      // **Adjudicado 2026-10-08.** El sniff viejo (`text/html` ⇒ fallback)
+      // rompía descargas reales: `mockup-bar.html` en G: volvía 200 con sus
+      // bytes y la app lo tiraba. El veredicto es el cuerpo (marca del SPA).
+      const body =
+          '<!DOCTYPE html><html lang="es"><head><title>seek</title></head>'
+          '<body>maqueta</body></html>';
       final repository = repoCon(
         (_) async => http.Response(
-          kSpaHtml,
+          body,
+          200,
+          headers: <String, String>{'content-type': 'text/html'},
+        ),
+      );
+      addTearDown(repository.close);
+
+      expect(
+        await repository.downloadBytes(path: 'mockup-bar.html'),
+        isNotEmpty,
+      );
+    });
+
+    test('el shell del SPA no se comparte como archivo', () async {
+      // **Adjudicado 2026-10-08.** El fixture anterior era inventado
+      // (`<title>opencode</title>`) y la premisa también: ningún `.html`
+      // genuino es fallback. El shell real trae su marca
+      // (`v2-background-bg-deep`, medida en `/` y `/algo`); solo ese cuerpo
+      // se rechaza.
+      final repository = repoCon(
+        (_) async => http.Response(
+          '<!doctype html><html lang="en" style="background-color: '
+          'var(--v2-background-bg-deep, #fafafa)"><head></head>'
+          '<body></body></html>',
           200,
           headers: <String, String>{'content-type': 'text/html'},
         ),
@@ -806,43 +838,6 @@ void main() {
         repository.downloadBytes(path: 'a.txt'),
         throwsA(isA<AuthError>()),
       );
-    });
-  });
-
-  group('FileRepository.locationDirectory: la base del read', () {
-    FileRepository repoCon(
-      Future<http.Response> Function(http.BaseRequest) handler,
-    ) => FileRepository(config: kConfig, client: MockClient(handler));
-
-    test('devuelve el directory y lo pide una sola vez', () async {
-      var calls = 0;
-      final repository = repoCon((request) async {
-        calls++;
-        expect(request.url.path, '/api/location');
-        return http.Response(
-          '{"directory":"C:\\\\Users\\\\perca","project":{"id":"p1"}}',
-          200,
-          headers: <String, String>{'content-type': 'application/json'},
-        );
-      });
-      addTearDown(repository.close);
-
-      expect(await repository.locationDirectory(), r'C:\Users\perca');
-      expect(await repository.locationDirectory(), r'C:\Users\perca');
-      expect(calls, 1, reason: 'la segunda sale del caché');
-    });
-
-    test('sin directory no hay veredicto: null y se intenta igual', () async {
-      final repository = repoCon(
-        (_) async => http.Response(
-          '{}',
-          200,
-          headers: <String, String>{'content-type': 'application/json'},
-        ),
-      );
-      addTearDown(repository.close);
-
-      expect(await repository.locationDirectory(), isNull);
     });
   });
 }

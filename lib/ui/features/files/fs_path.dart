@@ -117,19 +117,3 @@ const List<String> kLetrasDeDisco = [
 
 /// La raíz de disco para una letra: `G` -> `G:/`.
 String discoDe(String letra) => normalizarRuta(letra.toUpperCase());
-
-/// ¿`ruta` está dentro de `base` (o es `base`)?
-///
-/// Comparación por segmento, no por prefijo de string: `C:/fotos2` no está
-/// dentro de `C:/fotos`. Insensible a mayúsculas (Windows) y a `\` vs `/`.
-/// Es lo que decide si `GET /api/fs/read` puede servir un archivo: el server
-/// solo resuelve dentro de su `location` (medido 2026-10-08: fuera devuelve
-/// el HTML del SPA con 200).
-bool dentroDe(String base, String ruta) {
-  final b = normalizarRuta(base).toLowerCase();
-  final r = normalizarRuta(ruta).toLowerCase();
-  if (b.isEmpty || r.isEmpty) return false;
-  if (r == b) return true;
-  final prefijo = b.endsWith('/') ? b : '$b/';
-  return r.startsWith(prefijo);
-}

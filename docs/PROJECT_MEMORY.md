@@ -1064,3 +1064,18 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   caído). El campo host rechaza `IP:puerto` pegado. 2 tests adjudicados en el
   lugar + 4 nuevos; guards rotos y verificados.
 - Suite completa verde, analyze sin errores ni warnings.
+
+## 2026-10-08 — Descarga de .html en cualquier disco (publicar 1.18.2+29)
+
+- El freno de 1.18.1 nació de una medición errónea: lo que devolvía HTML era
+  el archivo `mockup-bar.html` genuino, no el SPA. `fs/read` sirve cualquier
+  disco (medido: `C:/Windows/win.ini`, `G:/.../README.md` y `.exe` dan bytes;
+  `location[directory]` absoluto dentro y fuera del root da 200).
+- Bug real en `_sendBytes`: `text/html` en el header ⇒ `HtmlFallbackError`.
+  Ahora decide el cuerpo (`esShellDelSpa`, marca `v2-background-bg-deep` del
+  shell medido en `/` y `/algo`). Un 404 de archivo inexistente ya venía como
+  JSON (`FileNotFoundError`), nunca como HTML.
+- Revertido el freno entero (`dentroDe`, `locationDirectory`, avisos en Abrir
+  y Descargar) y sus 4 tests: bloqueaba descargas que sí funcionan. Test del
+  catch-all adjudicado con el shell real; nuevo test de `.html` genuino.
+- Suite completa verde, analyze sin errores ni warnings.

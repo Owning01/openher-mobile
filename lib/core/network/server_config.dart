@@ -242,6 +242,23 @@ bool looksLikeHtml(String? contentType, String body) {
   return head.startsWith('<!doctype html') || head.startsWith('<html');
 }
 
+/// ¿Este cuerpo es el shell del SPA de opencode, no un archivo genuino?
+///
+/// Se usa donde el `content-type` no decide: un `.html` genuino viene como
+/// `text/html` igual que el catch-all. La marca es el CSS del shell
+/// (`v2-background-bg-deep`, medido 2026-10-08 en `/` y en `/algo` del server
+/// real); un archivo de usuario con ese string exacto es indistinguible, y se
+/// acepta el riesgo porque la alternativa (rechazar todo HTML) rompía
+/// descargas reales. Solo se miran los primeros 2 KB: la marca vive en el
+/// `<head>`.
+bool esShellDelSpa(List<int> bytes) {
+  final head = utf8.decode(
+    bytes.length > 2048 ? bytes.sublist(0, 2048) : bytes,
+    allowMalformed: true,
+  );
+  return head.contains('v2-background-bg-deep');
+}
+
 /// Mensaje canónico del fallback HTML, con la hint de qué hacer.
 const String htmlFallbackMessage =
     'el server respondió HTML: esa ruta no existe en opencode v2 (o no estás '

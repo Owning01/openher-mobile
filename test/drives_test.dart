@@ -79,17 +79,6 @@ void main() {
       expect(unirRuta('G:/', 'fotos'), 'G:/fotos');
       expect(unirRuta('G:/a', 'b'), 'G:/a/b');
     });
-
-    test('dentroDe compara por segmento, sin importar mayúsculas ni barras', () {
-      // El caso medido: el `location` es `C:\Users\perca` y el disco es otro.
-      expect(dentroDe(r'C:\Users\perca', 'C:/Users/perca'), isTrue);
-      expect(dentroDe(r'C:\Users\perca', 'c:/users/perca/foto.png'), isTrue);
-      expect(dentroDe(r'C:\Users\perca', 'G:/Proyectos/seek-asm'), isFalse);
-      // Por segmento, no por prefijo: `fotos2` no está en `fotos`.
-      expect(dentroDe('C:/fotos', 'C:/fotos2/a.png'), isFalse);
-      expect(dentroDe('C:/fotos', 'C:/fotos/a.png'), isTrue);
-      expect(dentroDe('', 'C:/a'), isFalse);
-    });
   });
 
   group('la detección de discos', () {
