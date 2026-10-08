@@ -652,7 +652,16 @@ class ApiClient {
         if ((response.headers['content-type'] ?? '').toLowerCase().contains(
           'text/html',
         )) {
-          throw HtmlFallbackError(path: uri.path, statusCode: status);
+          // Un `.html` genuino también viene como `text/html`: el header solo
+          // no distingue nada (medido 2026-10-08: `mockup-bar.html` en G: daba
+          // `HtmlFallbackError` con el archivo adentro). El veredicto es el
+          // cuerpo: el shell del SPA trae su marca (`v2-background-bg-deep`,
+          // medida en `/` y en `/algo`); sin ella son los bytes del archivo.
+          final body = response.bodyBytes;
+          if (esShellDelSpa(body)) {
+            throw HtmlFallbackError(path: uri.path, statusCode: status);
+          }
+          return body;
         }
         return response.bodyBytes;
       } on OchError {

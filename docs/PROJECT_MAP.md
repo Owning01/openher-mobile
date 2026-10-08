@@ -147,11 +147,11 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
   56 MB = `application/vnd.android.package-archive`, y con PNG, SVG, PDF y `.md`). No hay otra
   vía: `/api/fs/raw/*`, `/api/fs/download/*` y `/api/file/*` dan **404**, y cualquier ruta sin
   prefijo cae en el catch-all del SPA (HTML 200). Acepta `\` y `/` en el path (probado).
-  **Sólo dentro del `location`**: con `location[directory]` absoluto fuera de él
-  devuelve el HTML del SPA con 200 (medido 2026-10-08 con `G:/Proyectos/seek-asm`);
-  absoluto en la URL da 500 y `?path=` da 404/500. Abrir y Descargar frenan antes
-  de la red si `dentroDe(location, carpeta)` da falso (`fs_path.dart` +
-  `FileRepository.locationDirectory` cacheado).
+  Sirve **cualquier disco** (`C:/Windows`, `G:/Proyectos/...`, medido 2026-10-08):
+  el `read` no está atado al `location`. Un `.html` genuino viene como
+  `text/html` igual que el catch-all, así que `_sendBytes` decide por el cuerpo
+  (`esShellDelSpa`: marca `v2-background-bg-deep` del shell real), nunca por el
+  header solo.
 - **`GET /api/fs/list` devuelve solo `path` y `type`** (medido): ni mime, ni tamaño, ni nombre.
   Por eso la clasificación va por extensión, y una extensión desconocida sale `binary` con un
   aviso, en vez de renderizar bytes como texto.

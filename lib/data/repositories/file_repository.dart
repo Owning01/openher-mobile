@@ -259,24 +259,6 @@ class FileRepository {
     String? directory,
   }) => _api.readFileBytes(directory: directory, path: path);
 
-  /// El `directory` del `location` del server (`GET /api/location`).
-  ///
-  /// Se cachea: no cambia mientras el server corre, y la pantalla de Archivos
-  /// lo pregunta en cada descarga para decidir si el archivo está al alcance
-  /// de `GET /api/fs/read` (solo sirve dentro del `location`; fuera devuelve
-  /// el HTML del SPA con 200, medido 2026-10-08). Un fallo se propaga: sin
-  /// saber la base no hay veredicto y se intenta igual.
-  String? _locationDirectory;
-  Future<String?> locationDirectory() async {
-    final cached = _locationDirectory;
-    if (cached != null) return cached;
-    final map = await _api.location();
-    final directory = map['directory'];
-    if (directory is! String || directory.isEmpty) return null;
-    _locationDirectory = directory;
-    return directory;
-  }
-
   /// `GET /api/fs/find` — búsqueda por nombre, en todo el `location`.
   ///
   /// A diferencia de [listDirectory], acá los paths vienen de la raíz: son
