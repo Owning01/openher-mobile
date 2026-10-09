@@ -263,6 +263,13 @@ Regla de UI móvil:
 
 ## 6. Preguntas y permisos
 
+> **Corrección 2026-10-09.** El build de `:4098` ya **no emite `question.asked`**
+> (0 frames en 688 capturados con una pregunta real en vivo). La pregunta viaja
+> como **`form.created`** (`data.form` con la sesión anidada) y se responde
+> `POST /api/session/{id}/form/{formID}/reply` con `{answer: {key: value}}` →
+> 204, medido punta a punta (el agente siguió con el turno). Cierra con
+> `form.replied`. El camino viejo se conserva como fallback.
+
 Events y respuestas (contrato v1, que es el que se publica — los `.v2.` están declarados
 pero **nunca se emiten**):
 - `question.asked` `{ id, sessionID, questions: QuestionInfo[], tool? }` — la UI muestra la card.
@@ -270,9 +277,6 @@ pero **nunca se emiten**):
   Se responde `question.replied { sessionID, requestID, answers: string[][] }`.
 - `permission.asked` `{ id, sessionID, permission, patterns[], metadata, always[], tool? }`.
   Se responde `permission.replied { sessionID, requestID, reply: "once"|"always"|"reject" }`.
-
-`[POR VERIFICAR]` los endpoints REST exactos para responder pregunta/permisos (los voy a
-confirmar contra el server antes de implementar la fase de sheets).
 
 ---
 

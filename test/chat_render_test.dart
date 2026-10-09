@@ -1171,6 +1171,87 @@ void main() {
     );
   });
 
+  testWidgets('un form.created pinta la card y contesta con {answer}', (
+    tester,
+  ) async {
+    // El protocolo nuevo (medido 2026-10-09 en `:4098`): el server ya no
+    // manda `question.asked` y la card salía nunca. El evento trae `value`
+    // por opción, que es lo que viaja en `{answer: {key: value}}` — a
+    // propósito distinto del label para que el test lo distinga.
+    final calls = <String>[];
+    final source = ControllableSource();
+    final vm = await questionVm(
+      messages: [userJson('msg_u1', 'hola'), questionTurn()],
+      replyStatus: 204,
+      onCall: (method, path, body) => calls.add('$method $path $body'),
+      source: source,
+    );
+    addTearDown(vm.dispose);
+    await pumpChat(tester, vm);
+
+    source.emit('form.created', <String, Object?>{
+      'form': <String, Object?>{
+        'id': 'frm_1',
+        'sessionID': kSessionId,
+        'title': 'Questions',
+        'metadata': <String, Object?>{
+          'kind': 'question',
+          'tool': {'messageID': 'msg_a_q', 'id': 'call_q'},
+        },
+        'fields': <Object?>[
+          <String, Object?>{
+            'key': 'q0',
+            'title': 'Continuar o detenerse',
+            'description': 'Qué querés hacer?',
+            'type': 'string',
+            'options': <Object?>[
+              <String, Object?>{
+                'value': 'seguir',
+                'label': 'Continuar',
+                'description': 'Seguir con la tarea.',
+              },
+              <String, Object?>{
+                'value': 'parar',
+                'label': 'Detenerse',
+                'description': '',
+              },
+            ],
+            'custom': true,
+          },
+        ],
+      },
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump();
+
+    expect(find.byType(QuestionCard), findsOneWidget);
+    expect(find.text('Qué querés hacer?'), findsOneWidget);
+    expect(find.text('Continuar'), findsOneWidget);
+
+    await tester.tap(find.text('Continuar'));
+    await tester.pump();
+    await tester.tap(find.byKey(QuestionCard.submitKey));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      calls.any(
+        (c) => c.startsWith(
+          'POST /api/session/$kSessionId/form/frm_1/reply',
+        ),
+      ),
+      isTrue,
+      reason: 'la card tiene que pegarle al endpoint de forms',
+    );
+    expect(
+      calls.where((c) => c.contains('{"answer":{"q0":"seguir"}}')),
+      isNotEmpty,
+      reason: 'viaja el value de la opción, no el label',
+    );
+    expect(find.byType(QuestionCard), findsNothing);
+  });
+
   testWidgets('un status retry se muestra como "Reintentando en Ns"', (
     tester,
   ) async {

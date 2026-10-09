@@ -1087,3 +1087,19 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   y cada archivo lleva su icono `file` (ya lo tenía: único builder `_row`).
 - Test widget: ámbar exacto en claro + presencia del icono en archivo. Guard
   roto y verificado. Suite verde, analyze limpio.
+
+## 2026-10-09 — Preguntas por form.created (card no salía nunca)
+
+- Causa: el server ya no emite `question.asked` (0/688 frames en vivo). La
+  pregunta viaja como `form.created` (`data.form` con sesión anidada,
+  `metadata.kind == "question"`, fields con `{key,title,description,options:
+  [{value,label}]}`) y se responde `POST .../form/{id}/reply {answer:
+  {key:value}}` → 204. Medido punta a punta con sesión descartable (el agente
+  siguió el turno); la sesión se borró después.
+- Fix: `_applyFormCreated` + filtro por sesión anidada + cadena de reply
+  (forms → question endpoint → prompt) + `QuestionOption.value` (viaja el
+  value, no el label). `form.replied` cierra. Camino viejo conservado.
+- Tests: 6 nuevos en viewmodel + 1 de render (card desde form + POST exacto).
+  Guard conductual: sin el fix, cero `QuestionCard` (el síntoma del usuario).
+- Suite: **940 verdes (6 skipped)**, analyze sin errores ni warnings. Sin
+  commitear ni publicar: pendiente OK del dueño (versión 1.19.0+31 propuesta).

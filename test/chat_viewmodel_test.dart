@@ -913,6 +913,204 @@ void main() {
     );
   });
 
+  group('preguntas por form (protocolo nuevo, medido 2026-10-09)', () {
+    /// `form.created` tal como lo manda `:4098`: la sesión va anidada en
+    /// `data.form`, no en `data.sessionID`.
+    Map<String, Object?> formCreated({String sessionID = kSessionId}) => {
+      'form': {
+        'id': 'frm_1',
+        'sessionID': sessionID,
+        'title': 'Questions',
+        'metadata': {
+          'kind': 'question',
+          'tool': {'messageID': 'msg_a', 'id': 'toolu_1'},
+        },
+        'fields': [
+          {
+            'key': 'q0',
+            'title': 'Continuar o detenerse',
+            'description': 'Qué querés hacer?',
+            'type': 'string',
+            'options': [
+              {
+                'value': 'seguir',
+                'label': 'Continuar',
+                'description': 'Seguir con la tarea.',
+              },
+              {'value': 'parar', 'label': 'Detenerse', 'description': ''},
+            ],
+            'custom': true,
+          },
+        ],
+      },
+    };
+
+    test('form.created pone la pendiente con clave de campo y valores', () async {
+      final source = FakeEventSource();
+      final vm = buildVm(
+        questionClient(calls: <String>[], replyStatus: () => 204),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+      vm.connectStream();
+
+      source.emit('form.created', formCreated());
+      await pumpEventQueue();
+
+      expect(vm.awaitingAnswer, isTrue);
+      final pending = vm.pendingQuestion!;
+      expect(pending.requestId, 'frm_1');
+      expect(pending.fieldKey, 'q0');
+      expect(pending.callId, 'toolu_1');
+      expect(pending.messageId, 'msg_a');
+      expect(pending.questions.single['header'], 'Continuar o detenerse');
+      expect(
+        (pending.questions.single['options'] as List).singleWhere(
+          (o) => (o as Map)['label'] == 'Continuar',
+        )['value'],
+        'seguir',
+      );
+      expect(vm.requestIdFor('toolu_1'), 'frm_1');
+    });
+
+    test('un kind que no es question no pone pendiente', () async {
+      final source = FakeEventSource();
+      final vm = buildVm(
+        questionClient(calls: <String>[], replyStatus: () => 204),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+      vm.connectStream();
+
+      final other = formCreated();
+      ((other['form'] as Map)['metadata'] as Map)['kind'] = 'permission';
+      source.emit('form.created', other);
+      await pumpEventQueue();
+
+      expect(vm.awaitingAnswer, isFalse);
+    });
+
+    test('manda la sesión anidada: el de otra sesión se ignora', () async {
+      final source = FakeEventSource();
+      final vm = buildVm(
+        questionClient(calls: <String>[], replyStatus: () => 204),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+      vm.connectStream();
+
+      // `emitOther` pone `ses_otra` afuera: lo único que vale es el anidado.
+      source.emitOther('form.created', formCreated(sessionID: 'ses_otra'));
+      await pumpEventQueue();
+      expect(vm.awaitingAnswer, isFalse);
+
+      source.emitOther('form.created', formCreated(sessionID: kSessionId));
+      await pumpEventQueue();
+      expect(vm.awaitingAnswer, isTrue);
+      expect(vm.pendingQuestion!.requestId, 'frm_1');
+    });
+
+    test('la respuesta va al endpoint de forms con {answer:{key:value}}', () async {
+      final calls = <String>[];
+      String? replyBody;
+      final source = FakeEventSource();
+      final vm = buildVm(
+        questionClient(
+          calls: calls,
+          replyStatus: () => 204,
+          onReplyBody: (b) => replyBody = b,
+        ),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+      vm.connectStream();
+      source.emit('form.created', formCreated());
+      await pumpEventQueue();
+
+      final path = await vm.answerQuestion('frm_1', answers: [
+        ['seguir'],
+      ]);
+
+      expect(path, QuestionReplyPath.api);
+      expect(
+        calls,
+        contains('POST /api/session/$kSessionId/form/frm_1/reply'),
+      );
+      expect(jsonDecode(replyBody!), {
+        'answer': {'q0': 'seguir'},
+      });
+      expect(
+        calls.where((c) => c.contains('/prompt')),
+        isEmpty,
+        reason: 'si el endpoint existe no se manda un prompt de más',
+      );
+      expect(vm.awaitingAnswer, isFalse);
+    });
+
+    test('sin endpoint de forms se cae al camino viejo y al prompt', () async {
+      final calls = <String>[];
+      String? promptBody;
+      final source = FakeEventSource();
+      final vm = buildVm(
+        questionClient(
+          calls: calls,
+          replyStatus: () => 404,
+          onPromptBody: (b) => promptBody = b,
+        ),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+      vm.connectStream();
+      source.emit('form.created', formCreated());
+      await pumpEventQueue();
+
+      final path = await vm.answerQuestion('frm_1', answers: [
+        ['seguir'],
+      ]);
+
+      expect(path, QuestionReplyPath.prompt);
+      expect(
+        calls,
+        contains('POST /api/session/$kSessionId/form/frm_1/reply'),
+      );
+      expect(
+        calls,
+        contains('POST /api/session/$kSessionId/question/frm_1/reply'),
+      );
+      expect(
+        (jsonDecode(promptBody!) as Map<String, Object?>)['text'],
+        'seguir',
+      );
+    });
+
+    test('form.replied cierra la pendiente', () async {
+      final source = FakeEventSource();
+      final vm = buildVm(
+        questionClient(calls: <String>[], replyStatus: () => 204),
+        source: source,
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+      vm.connectStream();
+      source.emit('form.created', formCreated());
+      await pumpEventQueue();
+      expect(vm.awaitingAnswer, isTrue);
+
+      source.emit('form.replied', {
+        'id': 'frm_1',
+        'answer': {'q0': 'seguir'},
+      });
+      await pumpEventQueue();
+      expect(vm.awaitingAnswer, isFalse);
+      expect(vm.pendingQuestion, isNull);
+    });
+  });
+
   group('deltas por id', () {
     test(
       'el delta va al assistantMessageID que nombra, no al último',

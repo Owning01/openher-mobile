@@ -1303,10 +1303,15 @@ class _CodeChip extends StatelessWidget {
 // ─────────────────────────── card de pregunta ───────────────────────────
 
 class QuestionOption {
-  const QuestionOption({required this.label, this.detail});
+  const QuestionOption({required this.label, this.detail, String? value})
+    : value = value ?? label;
 
   final String label;
   final String? detail;
+
+  /// Lo que viaja al server. En el protocolo de forms es el `value` de la
+  /// opción (`{answer: {q0: value}}`); en el viejo, el label.
+  final String value;
 }
 
 /// La card de la tool `question` (`chat.msg.question`).
@@ -1542,7 +1547,7 @@ class _QuestionCardState extends State<QuestionCard> {
   }
 
   List<String> _answers() => [
-    for (final i in _selected) widget.options[i].label,
+    for (final i in _selected) widget.options[i].value,
   ];
 }
 

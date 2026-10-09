@@ -190,16 +190,18 @@ enum QuestionReplyPath {
   prompt,
 }
 
-/// La pregunta que el agente está esperando, tal como la mandó `question.asked`.
+/// La pregunta que el agente está esperando, tal como la mandó `question.asked`
+/// o `form.created` (el protocolo nuevo, medido 2026-10-09 en `:4098`).
 final class PendingQuestion {
   const PendingQuestion({
     required this.requestId,
     required this.questions,
     this.callId,
     this.messageId,
+    this.fieldKey,
   });
 
-  /// `que_…`, el `id` del `question.asked` y el `{requestID}` del reply.
+  /// `que_…` o `frm_…`: el `id` del evento y el `{requestID}` del reply.
   final String requestId;
 
   /// Los `QuestionInfo[]` **en crudo** (`{question, header, options[], …}`).
@@ -213,6 +215,10 @@ final class PendingQuestion {
 
   /// `tool.messageID`: el assistant dueño de la pregunta.
   final String? messageId;
+
+  /// Clave del campo en un form (`q0`): sin ella no hay `{answer:{key:value}}`
+  /// que mandar al endpoint de forms. `null` en el protocolo viejo.
+  final String? fieldKey;
 }
 
 class ChatViewModel extends ChangeNotifier {
@@ -716,15 +722,19 @@ class ChatViewModel extends ChangeNotifier {
 
   /// Responde la pregunta pendiente (`API_CONTRACT.md` §6).
   ///
-  /// **Camino 1, el del protocolo**:
+  /// **Camino 1, el protocolo nuevo** (medido 2026-10-09):
+  /// `POST /api/session/{id}/form/{formID}/reply` con `{answer: {key: value}}`
+  /// —una entrada por campo, con el `value` de la opción (no el label).
+  /// Devuelve 204.
+  ///
+  /// **Camino 2, el protocolo viejo**:
   /// `POST /api/session/{id}/question/{requestID}/reply` con
   /// `{answers: [[…]]}` — un array por pregunta, en el orden en que se
   /// hicieron. Devuelve 204.
   ///
-  /// **Camino 2, el que nunca falla**: si el endpoint no existe (404 en el
-  /// build medido) o el POST falla, las respuestas se mandan como un prompt
-  /// del usuario normal. El server los acepta como respuesta y el turno se
-  /// destraca igual.
+  /// **Camino 3, el que nunca falla**: si ningún endpoint existe (404) o el
+  /// POST falla, las respuestas se mandan como un prompt del usuario normal.
+  /// El server los acepta como respuesta y el turno se destraca igual.
   ///
   /// Devuelve (y deja en [lastQuestionReplyPath]) por cuál se fue. Un 404 **no**
   /// se reporta como error: el fallback funcionó, así que no hay nada que
@@ -740,6 +750,28 @@ class ChatViewModel extends ChangeNotifier {
 
     final id = requestId?.trim() ?? '';
     if (id.isNotEmpty) {
+      // El form manda el `value` de la opción elegida bajo la clave del campo
+      // (`{answer: {q0: value}}`). Sin `fieldKey` no hay mapa que armar: se
+      // sigue al camino viejo.
+      final key = _pendingQuestion?.fieldKey;
+      final values = [for (final a in answers) ...a.where((l) => l.isNotEmpty)];
+      if (key != null && key.isNotEmpty && values.isNotEmpty) {
+        try {
+          await _api.postJson(
+            '/session/$sessionId/form/$id/reply',
+            body: <String, Object?>{
+              'answer': <String, Object?>{key: values.first},
+            },
+          );
+          _pendingQuestion = null;
+          _lastQuestionReplyPath = QuestionReplyPath.api;
+          _recomputeWorking();
+          _safeNotify();
+          return QuestionReplyPath.api;
+        } on OchError {
+          // Sin endpoint de forms en este build: se sigue al camino viejo.
+        }
+      }
       try {
         await _api.postJson(
           '/session/$sessionId/question/$id/reply',
@@ -1223,7 +1255,11 @@ class ChatViewModel extends ChangeNotifier {
   void _applyEvent(OcEvent event) {
     // Filtro por sesión: el socket es global. Un evento sin `sessionID`
     // (`server.connected`) es de la app y se aplica.
-    final id = event.sessionID;
+    //
+    // Los `form.*` traen la sesión anidada (`data.form.sessionID`), no en
+    // `data.sessionID`: sin esa segunda mirada se aplicarían al chat
+    // equivocado (o a todos).
+    final id = _eventSessionId(event);
     if (id != null && id != sessionId) return;
 
     // Dedupe por id de evento: al reconectar, el server re-emite desde el
@@ -1264,6 +1300,20 @@ class ChatViewModel extends ChangeNotifier {
       _applyQuestionAsked(event.data);
       // La lista de mensajes todavía no tiene el tool `question` en `pending`:
       // el re-fetch lo trae y recién ahí se puede pintar la card.
+      _scheduleRefetch();
+      return;
+    }
+    // Protocolo nuevo (medido 2026-10-09): la pregunta viaja como
+    // `form.created` con `metadata.kind == 'question'` y se cierra con
+    // `form.replied`. El `question.asked` de arriba ya no lo manda el server
+    // (0 frames en 688), pero se conserva por si algún build lo emite.
+    if (lower == 'form.created') {
+      _applyFormCreated(event.data);
+      _scheduleRefetch();
+      return;
+    }
+    if (lower == 'form.replied') {
+      _clearQuestion(event.data);
       _scheduleRefetch();
       return;
     }
@@ -1309,6 +1359,62 @@ class ChatViewModel extends ChangeNotifier {
     );
     _recomputeWorking();
     _safeNotify();
+  }
+
+  /// `form.created` con `metadata.kind == 'question'`.
+  ///
+  /// Forma medida 2026-10-09:
+  /// `data.form = {id: frm_…, sessionID, title, metadata: {kind, tool?},
+  /// fields: [{key, title, description, type, options: [{value, label,
+  /// description}], custom}]}`. Los fields se proyectan al shape viejo
+  /// (`header` ← title, `question` ← description) para que la card no cambie;
+  /// lo único nuevo es el `value` de cada opción, que es lo que el endpoint de
+  /// forms espera en `{answer: {key: value}}`.
+  ///
+  /// Solo se acepta `kind == 'question'`: otros kinds (permisos, etc.) no son
+  /// preguntas y la card no sabría qué pedir.
+  void _applyFormCreated(Map<String, Object?> data) {
+    final form = asMap(data['form']);
+    if (form == null) return;
+    if (asStr(asMap(form['metadata'])?['kind']) != 'question') return;
+    final fields = asMapList(form['fields']);
+    if (fields.isEmpty) return;
+    final tool = asMap(asMap(form['metadata'])?['tool']);
+    final first = fields.first;
+    _pendingQuestion = PendingQuestion(
+      requestId: asStr(form['id']) ?? '',
+      questions: [
+        for (final field in fields)
+          <String, Object?>{
+            'header': asStr(field['title']),
+            'question': asStr(field['description']),
+            'options': [
+              for (final option in asMapList(field['options']))
+                <String, Object?>{
+                  'label': asStr(option['label']),
+                  'description': asStr(option['description']),
+                  'value': asStr(option['value']),
+                },
+            ],
+          },
+      ],
+      callId: asStr(tool?['id']),
+      messageId: asStr(tool?['messageID']),
+      fieldKey: asStr(first['key']),
+    );
+    _recomputeWorking();
+    _safeNotify();
+  }
+
+  /// Sesión dueña del evento. Los `form.*` la traen anidada
+  /// (`data.form.sessionID`), que manda sobre la externa: en el frame medido
+  /// la externa ni viene.
+  static String? _eventSessionId(OcEvent event) {
+    if (event.type.toLowerCase().startsWith('form.')) {
+      return asStr(asMap(event.data['form'])?['sessionID']) ??
+          event.sessionID;
+    }
+    return event.sessionID;
   }
 
   /// `question.replied {sessionID, requestID, answers[]}` /
