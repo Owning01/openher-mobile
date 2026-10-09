@@ -625,6 +625,7 @@ class _ChatViewState extends State<ChatView> {
                 QuestionOption(
                   label: asStr(option['label']) ?? '',
                   detail: asStr(option['description']),
+                  value: asStr(option['value']),
                 ),
             ],
             onSubmit: (answers) => _onQuestion(q.requestId, answers),
