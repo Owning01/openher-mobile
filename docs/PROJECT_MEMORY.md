@@ -1103,3 +1103,15 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
   Guard conductual: sin el fix, cero `QuestionCard` (el síntoma del usuario).
 - Suite: **940 verdes (6 skipped)**, analyze sin errores ni warnings. Sin
   commitear ni publicar: pendiente OK del dueño (versión 1.19.0+31 propuesta).
+
+## 2026-10-10 — Visor de planes html-plan en la app (publicar 1.20.0+32)
+
+- Skill `html-plan` sin referencias a Claude (js, pack.mjs `--published`,
+  SKILL, blocks) + idioma del pedido + formato Dart documentado. `pack`
+  verificado con `--lint-only` sobre el ejemplo.
+- Port 100%: `ui/features/plan/` (modelo+parser del mismo `plan.html`,
+  respuestas con formato Respond, mocks, máquina, calls, schema/code, flow,
+  tree, draft, notas, decisions con todos los controles, comentarios, copiar).
+- Entrada: `Ver plan` en la burbuja cuando el texto trae una ruta `.html`
+  (absoluta o relativa); baja bytes y cae a `FilePreview` si no es plan.
+- Suite 955 verdes, analyze limpio.
