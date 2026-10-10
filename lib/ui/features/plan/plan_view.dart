@@ -15,6 +15,7 @@ import '../../core/tokens.dart';
 import 'plan_answers.dart';
 import 'plan_blocks.dart';
 import 'plan_model.dart';
+import 'plan_theme.dart';
 
 /// Pantalla del plan. `sourceBytes` es el `plan.html` tal cual lo sirve el
 /// server (empaquetado o no).
@@ -65,6 +66,18 @@ class _PlanViewState extends State<PlanView> {
 
   @override
   Widget build(BuildContext context) {
+    // Papel del archivo, no tema de la app: lo que se ve acá es lo mismo que
+    // en el navegador (claro papel `#FAF9F5`, oscuro `#262624`).
+    final paper = planTheme(MediaQuery.platformBrightnessOf(context));
+    return Theme(
+      data: paper,
+      child: Builder(
+        builder: (paperContext) => _scaffold(paperContext),
+      ),
+    );
+  }
+
+  Widget _scaffold(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final asks = PlanAnswers.allAsksOf(_doc);
     final pending = _answers.unanswered(asks, _seenAsks);
@@ -207,80 +220,84 @@ class _PlanViewState extends State<PlanView> {
     List<({PlanAsk ask, String number})> asks,
   ) async {
     final markdown = _answers.buildResponse(_doc, _seenAsks);
+    // Hoja simple con `SafeArea`: sin `DraggableScrollableSheet` (su
+    // combinación con `Expanded` dejaba el contenido en negro en el teléfono)
+    // y sin botones tapados por la barra del sistema.
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      builder: (sheet) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.85,
-        builder: (ctx, scroll) => Padding(
-          padding: const EdgeInsets.all(AppSpacing.md),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                _strings.es ? 'Tu respuesta' : 'Your response',
-                style: Theme.of(ctx).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              Expanded(
-                child: SingleChildScrollView(
-                  controller: scroll,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      for (var i = 0; i < asks.length; i++)
-                        _decisionLine(ctx, i, asks[i]),
-                      const SizedBox(height: 8),
-                      Container(
-                        padding: const EdgeInsets.all(AppSpacing.sm),
-                        decoration: BoxDecoration(
-                          color: Theme.of(ctx).colorScheme.surfaceContainerLow,
-                          borderRadius: AppRadius.mdAll,
-                        ),
-                        child: SelectableText(
-                          markdown,
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+      builder: (sheet) => SafeArea(
+        child: Padding(
+          padding: EdgeInsets.only(
+            left: AppSpacing.md,
+            right: AppSpacing.md,
+            top: AppSpacing.md,
+            bottom:
+                MediaQuery.of(sheet).viewInsets.bottom + AppSpacing.md,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              key: const ValueKey('plan-respond'),
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _strings.es ? 'Tu respuesta' : 'Your response',
+                  style: Theme.of(sheet).textTheme.titleMedium,
                 ),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  TextButton(
-                    onPressed: () {
-                      _answers.reset();
-                      Navigator.of(ctx).pop();
-                    },
-                    child: Text(
-                      _strings.reset,
-                      style: const TextStyle(color: Colors.red),
+                const SizedBox(height: 8),
+                for (var i = 0; i < asks.length; i++)
+                  _decisionLine(sheet, i, asks[i]),
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(AppSpacing.sm),
+                  decoration: BoxDecoration(
+                    color: Theme.of(
+                      sheet,
+                    ).colorScheme.surfaceContainerLow,
+                    borderRadius: AppRadius.mdAll,
+                  ),
+                  child: SelectableText(
+                    markdown,
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12,
                     ),
                   ),
-                  const Spacer(),
-                  FilledButton.icon(
-                    icon: const Icon(Icons.copy, size: 16),
-                    label: Text(_strings.copy),
-                    onPressed: () async {
-                      await Clipboard.setData(ClipboardData(text: markdown));
-                      if (ctx.mounted) {
-                        ScaffoldMessenger.of(ctx).showSnackBar(
-                          SnackBar(content: Text(_strings.copied)),
-                        );
-                        Navigator.of(ctx).pop();
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: () {
+                        _answers.reset();
+                        Navigator.of(sheet).pop();
+                      },
+                      child: Text(
+                        _strings.reset,
+                        style: TextStyle(
+                          color: PlanPalette.of(context).red,
+                        ),
+                      ),
+                    ),
+                    const Spacer(),
+                    FilledButton.icon(
+                      icon: const Icon(Icons.copy, size: 16),
+                      label: Text(_strings.copy),
+                      onPressed: () async {
+                        await Clipboard.setData(ClipboardData(text: markdown));
+                        if (sheet.mounted) {
+                          ScaffoldMessenger.of(sheet).showSnackBar(
+                            SnackBar(content: Text(_strings.copied)),
+                          );
+                          Navigator.of(sheet).pop();
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),

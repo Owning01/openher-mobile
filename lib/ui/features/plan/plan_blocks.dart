@@ -13,6 +13,7 @@ import '../chat/code_highlight.dart';
 import 'plan_answers.dart';
 import 'plan_mock.dart';
 import 'plan_model.dart';
+import 'plan_theme.dart';
 
 /// Chrome del visor en el idioma del plan.
 class PlanStrings {
@@ -727,16 +728,17 @@ class CallsView extends StatelessWidget {
 
   Widget _row(BuildContext context, int i, CallRow row) {
     final scheme = Theme.of(context).colorScheme;
+    final pal = PlanPalette.of(context);
     final key = 'calls:$i';
     final struck = answers.strikes.contains(key);
     final commented = answers.comments.containsKey(key);
     Color? markColor;
     if (row.mark == '+') {
-      markColor = Colors.green.shade700;
+      markColor = pal.green;
     } else if (row.mark == '-') {
-      markColor = Colors.red.shade700;
+      markColor = pal.red;
     } else if (row.mark == '~') {
-      markColor = Colors.amber.shade800;
+      markColor = pal.amber;
     } else if (row.mark == '?') {
       markColor = scheme.primary;
     }
@@ -1025,15 +1027,16 @@ class _CodeViewState extends State<CodeView> {
     bool dark,
   ) {
     final scheme = Theme.of(context).colorScheme;
+    final pal = PlanPalette.of(context);
     final raw = lines[i];
     final number = widget.start + i;
     final isHl = widget.highlights.contains(number);
     Color? bg;
     var text = raw;
     if (widget.diff && raw.startsWith('+') && !raw.startsWith('++')) {
-      bg = Colors.green.withValues(alpha: dark ? 0.18 : 0.12);
+      bg = pal.green.withValues(alpha: dark ? 0.22 : 0.12);
     } else if (widget.diff && raw.startsWith('-') && !raw.startsWith('--')) {
-      bg = Colors.red.withValues(alpha: dark ? 0.18 : 0.12);
+      bg = pal.red.withValues(alpha: dark ? 0.22 : 0.12);
     } else if (isHl) {
       bg = scheme.primaryContainer.withValues(alpha: 0.5);
     }
@@ -1125,10 +1128,11 @@ class TreeView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final pal = PlanPalette.of(context);
     Color? markColor(String mark) {
-      if (mark == '+') return Colors.green.shade700;
-      if (mark == '~') return Colors.amber.shade800;
-      if (mark == '-') return Colors.red.shade700;
+      if (mark == '+') return pal.green;
+      if (mark == '~') return pal.amber;
+      if (mark == '-') return pal.red;
       return null;
     }
 
@@ -1227,9 +1231,10 @@ class NoteView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final pal = PlanPalette.of(context);
     final color = switch (note.tone) {
-      'warn' || 'risk' => Colors.amber.shade800,
-      'ok' => Colors.green.shade700,
+      'warn' || 'risk' => pal.amber,
+      'ok' => pal.green,
       'idea' => scheme.primary,
       _ => scheme.onSurfaceVariant,
     };

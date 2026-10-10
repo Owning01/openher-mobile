@@ -14,6 +14,7 @@ import 'package:html/parser.dart' as html_parser;
 
 import '../../core/tokens.dart';
 import 'plan_model.dart';
+import 'plan_theme.dart';
 
 /// Pinta el HTML de un mock/terminal/pantalla de estado, simplificado.
 class SimpleHtml extends StatelessWidget {
@@ -58,14 +59,15 @@ class SimpleHtml extends StatelessWidget {
     if (node is! dom.Element) return null;
     final name = node.localName;
     final cls = node.classes;
+    final pal = PlanPalette.of(context);
     Color fg = scheme.onSurface;
     if (terminal) {
       if (cls.contains('dim')) fg = scheme.onSurfaceVariant;
-      if (cls.contains('g')) fg = Colors.green.shade700;
-      if (cls.contains('r')) fg = Colors.red.shade700;
-      if (cls.contains('y')) fg = Colors.amber.shade800;
-      if (cls.contains('b')) fg = Colors.blue.shade700;
-      if (cls.contains('m')) fg = Colors.purple.shade700;
+      if (cls.contains('g')) fg = pal.green;
+      if (cls.contains('r')) fg = pal.red;
+      if (cls.contains('y')) fg = pal.amber;
+      if (cls.contains('b')) fg = pal.blue;
+      if (cls.contains('m')) fg = pal.purple;
     }
     switch (name) {
       case 'br':

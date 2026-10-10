@@ -523,9 +523,41 @@ void main() {
       await tester.tap(find.text('Responder'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
+      // La hoja entera tiene que verse: título, markdown y los dos botones
+      // por encima de la barra del sistema (regresión 2026-10-10: salía
+      // vacía y con los botones tapados).
       expect(find.text('Tu respuesta'), findsOneWidget);
       expect(find.textContaining('# Re: Plan de prueba'), findsOneWidget);
       expect(find.text('Copiar respuesta'), findsOneWidget);
+      expect(find.text('Borrar todo'), findsOneWidget);
+    });
+
+    testWidgets('en oscuro con el plan real la hoja sale completa', (
+      tester,
+    ) async {
+      final html = File('C:\\Users\\perca\\plan-prueba.html').readAsStringSync();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          darkTheme: AppTheme.dark(),
+          themeMode: ThemeMode.dark,
+          home: PlanView(
+            sourceBytes: utf8.encode(html),
+            fileName: 'plan-prueba',
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.text('Scheduled Send Plan'), findsOneWidget);
+      await tester.tap(find.text('Respond'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Your response'), findsOneWidget);
+      expect(find.textContaining('# Re: Scheduled Send Plan'), findsOneWidget);
+      expect(find.text('Copy response'), findsOneWidget);
     });
   });
 }
