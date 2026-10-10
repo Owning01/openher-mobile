@@ -28,6 +28,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:url_launcher/url_launcher.dart';
 
 import 'composer_suggestions.dart';
 import 'package:image_picker/image_picker.dart';
@@ -587,6 +588,8 @@ class _ChatViewState extends State<ChatView> {
               onPendingSend: _vm.confirmSend,
               // Ruta a un plan en el texto: se baja y se abre nativo.
               onOpenPlan: _openPlan,
+              // Links http/https: preguntan antes de salir al navegador.
+              onOpenLink: _confirmOpenLink,
             ),
           );
         },
@@ -765,6 +768,48 @@ class _ChatViewState extends State<ChatView> {
       MaterialPageRoute<void>(
         builder: (_) => PlanView(sourceBytes: bytes, fileName: target.name),
       ),
+    );
+  }
+
+  /// Pregunta antes de abrir un link en el navegador.
+  ///
+  /// Un toque accidental no puede sacar al usuario de la app, y la URL se
+  /// muestra para que vea a dónde va. Solo http/https llegan acá (el filtro
+  /// está en la burbuja): un `file://` nunca sale.
+  Future<void> _confirmOpenLink(String url) async {
+    final open = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('Abrir enlace'),
+        content: Text(
+          url,
+          maxLines: 4,
+          overflow: TextOverflow.ellipsis,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialog).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialog).pop(true),
+            child: const Text('Abrir'),
+          ),
+        ],
+      ),
+    );
+    if (open != true || !mounted) return;
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    bool opened = false;
+    try {
+      opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } on Object {
+      opened = false;
+    }
+    if (!mounted || opened) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('No se pudo abrir el enlace')),
     );
   }
 

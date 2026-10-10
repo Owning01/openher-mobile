@@ -365,6 +365,68 @@ void main() {
       ]);
     });
 
+    // Lo en curso va primero aunque su `updated` sea viejo: el server solo
+    // mueve `updated` al terminar el turno y sin esto el chat en progreso
+    // quedaba enterrado hasta el mensaje final.
+    test('lo en curso va primero dentro del grupo', () {
+      SessionInfo ses(String id, Duration hace) =>
+          SessionInfo.fromJson(
+            jsonDecode(
+                  sessionJson(
+                    id: id,
+                    title: id,
+                    updatedMs: kNow.subtract(hace).millisecondsSinceEpoch,
+                  ),
+                )
+                as Map<String, Object?>,
+          );
+      final sessions = [
+        ses('ses_nueva', const Duration(minutes: 2)),
+        ses('ses_vieja', const Duration(hours: 5)),
+      ];
+
+      final grupo = groupSessions(
+        sessions,
+        kNow,
+        running: {'ses_vieja'},
+      ).single;
+
+      expect(grupo.sessions.map((s) => s.id).toList(), [
+        'ses_vieja',
+        'ses_nueva',
+      ]);
+    });
+
+    // El toque local ordena pero no cambia ni el grupo ni la hora de la fila:
+    // el encabezado y el relativo siguen diciendo la verdad del server.
+    test('el toque local sube sin mover de grupo', () {
+      SessionInfo ses(String id, Duration hace) =>
+          SessionInfo.fromJson(
+            jsonDecode(
+                  sessionJson(
+                    id: id,
+                    title: id,
+                    updatedMs: kNow.subtract(hace).millisecondsSinceEpoch,
+                  ),
+                )
+                as Map<String, Object?>,
+          );
+      final sessions = [
+        ses('ses_a', const Duration(minutes: 2)),
+        ses('ses_b', const Duration(hours: 5)),
+      ];
+
+      final groups = groupSessions(sessions, kNow, touched: {
+        'ses_b': kNow.millisecondsSinceEpoch,
+      });
+
+      expect(groups.single.bucket.label, 'HOY');
+      expect(groups.single.sessions.map((s) => s.id).toList(), [
+        'ses_b',
+        'ses_a',
+      ]);
+    });
+
     // El sort no puede mezclar los grupos: el de HOY sigue arriba del de AYER.
     test('el sort por fecha no reordena los grupos entre sí', () {
       final sessions = [
@@ -464,6 +526,38 @@ void main() {
 
       expect(vm.running, contains('ses_x'));
       expect(vm.isRunning(vm.sessions.single), isTrue);
+      vm.dispose();
+    });
+
+    // El turno en curso sube arriba sin esperar al mensaje final: `pollActive`
+    // toca lo que empieza a correr y el orden usa esa marca, no el `updated`
+    // del server (que se mueve al terminar).
+    test('lo que arranca a correr sube arriba del grupo', () async {
+      int ago(Duration d) => kNow.subtract(d).millisecondsSinceEpoch;
+      final vm = SessionsViewModel(
+        repository: repoWith(
+          server(
+            list: listJson([
+              sessionJson(id: 'ses_a', title: 'nueva', updatedMs: ago(const Duration(minutes: 2))),
+              sessionJson(id: 'ses_b', title: 'vieja', updatedMs: ago(const Duration(hours: 5))),
+            ]),
+            active: '{"data":{"ses_b":{"type":"running"}}}',
+          ),
+        ),
+        clock: () => kNow,
+      );
+
+      await vm.load();
+
+      expect(
+        vm.groups.single.sessions.map((s) => s.id).toList(),
+        ['ses_b', 'ses_a'],
+      );
+      // La hora de la fila no miente: sigue la del server.
+      expect(
+        vm.groups.single.sessions.first.updatedAtMs,
+        ago(const Duration(hours: 5)),
+      );
       vm.dispose();
     });
 

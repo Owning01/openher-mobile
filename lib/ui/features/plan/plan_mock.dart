@@ -462,7 +462,6 @@ class MachineView extends StatelessWidget {
   }
 
   Widget _diagram(BuildContext context, String cur) {
-    final scheme = Theme.of(context).colorScheme;
     final rows = machine.grid.isEmpty ? _autoGrid() : machine.grid;
     return Column(
       mainAxisSize: MainAxisSize.min,

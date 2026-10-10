@@ -1115,3 +1115,12 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
 - Entrada: `Ver plan` en la burbuja cuando el texto trae una ruta `.html`
   (absoluta o relativa); baja bytes y cae a `FilePreview` si no es plan.
 - Suite 955 verdes, analyze limpio.
+
+## 2026-10-10 — Recientes con recencia efectiva + links con confirmación
+
+- Recientes: el server mueve `updated` al final del turno. `pollActive` toca
+  lo que arranca a correr y el orden usa recencia efectiva (en curso primero,
+  después lo tocado); grupo y hora siguen del server. 3 tests, guards rotos.
+- Links http/https del chat preguntan (`Abrir enlace` + URL) antes de salir;
+  `file://` y rutas nunca salen. Usuario con URL suelta lleva botón.
+  Tests puros + widget (tap real del link). Suite 963, analyze en cero.

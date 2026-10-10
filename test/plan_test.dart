@@ -309,8 +309,7 @@ void main() {
     });
   });
 
-  group('entrada desde la burbuja', () {
-    AssistantMessage assistantCon(String text) => AssistantMessage(
+  group('entrada desde la burbuja', () {    AssistantMessage assistantCon(String text) => AssistantMessage(
       id: 'msg_a',
       time: const MessageTime(createdMs: 1, completedMs: 2),
       agent: 'build',
@@ -375,6 +374,120 @@ void main() {
         find.byKey(MessageBubble.planButtonKey('msg_a')),
         findsNothing,
       );
+    });
+  });
+
+  group('links en el chat', () {
+    test('solo http/https salen al navegador', () {
+      expect(isWebLink('https://x.com/a'), isTrue);
+      expect(isWebLink('http://192.168.1.22:4098/doc'), isTrue);
+      expect(isWebLink('file:///C:/a.html'), isFalse);
+      expect(isWebLink('file://server/x'), isFalse);
+      expect(isWebLink('ftp://x/y'), isFalse);
+      expect(isWebLink('C:/docs/plan.html'), isFalse);
+      expect(isWebLink(null), isFalse);
+      expect(isWebLink(''), isFalse);
+    });
+
+    test('encuentra la primera URL suelta', () {
+      expect(
+        findWebLink('mirá https://x.com/a y http://y.org/b'),
+        'https://x.com/a',
+      );
+      expect(findWebLink('sin links'), isNull);
+      expect(findWebLink('solo C:/docs/plan.html'), isNull);
+    });
+
+    testWidgets('tocar un link del markdown avisa con su href', (
+      tester,
+    ) async {
+      final abiertas = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: MessageBubble(
+              message: AssistantMessage(
+                id: 'msg_a',
+                time: const MessageTime(createdMs: 1, completedMs: 2),
+                agent: 'build',
+                model: const ModelRef(id: 'm', providerID: 'p'),
+                content: const [
+                  AssistantText(text: 'mirá [la doc](https://x.com/a)'),
+                ],
+                finish: 'stop',
+              ),
+              working: false,
+              onOpenLink: abiertas.add,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.textContaining('la doc', findRichText: true));
+      await tester.pump();
+
+      expect(abiertas, ['https://x.com/a']);
+    });
+
+    testWidgets('un file:// en el markdown no sale', (tester) async {
+      final abiertas = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: MessageBubble(
+              message: AssistantMessage(
+                id: 'msg_a',
+                time: const MessageTime(createdMs: 1, completedMs: 2),
+                agent: 'build',
+                model: const ModelRef(id: 'm', providerID: 'p'),
+                content: const [
+                  AssistantText(text: 'abrí [esto](file:///C:/a.html)'),
+                ],
+                finish: 'stop',
+              ),
+              working: false,
+              onOpenLink: abiertas.add,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.textContaining('esto', findRichText: true));
+      await tester.pump();
+
+      expect(abiertas, isEmpty);
+    });
+
+    testWidgets('URL suelta del usuario lleva botón Abrir enlace', (
+      tester,
+    ) async {
+      final abiertas = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: MessageBubble(
+              message: const UserMessage(
+                id: 'msg_u',
+                time: MessageTime(createdMs: 1, completedMs: 2),
+                text: 'mirá https://x.com/a',
+              ),
+              working: false,
+              onOpenLink: abiertas.add,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(MessageBubble.linkButtonKey('msg_u')));
+      await tester.pump();
+
+      expect(abiertas, ['https://x.com/a']);
     });
   });
 
