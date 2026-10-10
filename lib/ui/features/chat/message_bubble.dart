@@ -43,6 +43,7 @@ import '../../core/layer_gate.dart';
 import '../../core/tokens.dart';
 import 'code_highlight.dart';
 import 'turn_activity.dart';
+import '../plan/plan_entry.dart';
 
 class MessageBubble extends StatelessWidget {
   const MessageBubble({
@@ -63,6 +64,7 @@ class MessageBubble extends StatelessWidget {
     this.onPendingSend,
     this.imageUrl,
     this.imageHeaders = const <String, String>{},
+    this.onOpenPlan,
   });
 
   /// Cómo se pide una imagen al server (`GET /api/fs/read/<path>`).
@@ -75,6 +77,15 @@ class MessageBubble extends StatelessWidget {
 
   /// El header Basic. Sin él el server contesta 401.
   final Map<String, String> imageHeaders;
+
+  /// Abre un plan html-plan cuya ruta apareció en el texto (`Ver plan`).
+  ///
+  /// `null` (tests, vista suelta) apaga el botón igual que `imageUrl` apaga
+  /// las imágenes: sin shell no hay de dónde bajar los bytes.
+  final ValueChanged<String>? onOpenPlan;
+
+  /// Botón `Ver plan`, por id de mensaje (hay varios mensajes en pantalla).
+  static Key planButtonKey(String messageId) => Key('plan-open-$messageId');
 
   /// Los tres botones de un mensaje **en cola**. Reciben el id local.
   ///
@@ -267,6 +278,14 @@ class MessageBubble extends StatelessWidget {
               )
             : LayerGate('chat.msg.assistant', child: MarkdownText(text)),
       );
+      // Ruta a un plan en el texto: se ofrece abrirlo nativo. Solo con el
+      // texto ya quieto — a medio stream la ruta está truncada.
+      if (!streaming && onOpenPlan != null) {
+        final planPath = findPlanPath(text);
+        if (planPath != null) {
+          children.add(_planButton(assistant.id, planPath));
+        }
+      }
     }
 
     // Los puntos sólo mientras el texto aún no llegó: si hay algo escrito, el
@@ -312,6 +331,25 @@ class MessageBubble extends StatelessWidget {
         if (onMenu != null) _menuButton(context),
       ],
     );
+  }
+
+  /// Botón `Ver plan` bajo el texto que trae la ruta.
+  Widget _planButton(String messageId, String path) => Align(
+    alignment: Alignment.centerLeft,
+    child: _GhostButton(
+      key: planButtonKey(messageId),
+      label: 'Ver plan',
+      onTap: () => onOpenPlan?.call(path),
+    ),
+  );
+
+  /// Botón `Ver plan` para un texto suelto (burbuja del usuario): vacío si no
+  /// hay ruta o no hay a dónde abrirla.
+  List<Widget> _planFor(String messageId, String text) {
+    if (onOpenPlan == null) return const [];
+    final path = findPlanPath(text);
+    if (path == null) return const [];
+    return [const SizedBox(height: 6), _planButton(messageId, path)];
   }
 
   /// La caja que le toca a este mensaje, o `null` si no le toca ninguna.
@@ -387,6 +425,7 @@ class MessageBubble extends StatelessWidget {
             // con `fontSize` heredaba el alto de línea de otra base.
             style: theme.textTheme.bodyMedium?.copyWith(color: tinta),
           ),
+          ..._planFor(user.id, user.text),
           if (pendiente) ...[
             const SizedBox(height: 6),
             _PendingActions(

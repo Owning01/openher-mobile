@@ -22,7 +22,9 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
@@ -43,6 +45,10 @@ import 'chat_viewmodel.dart';
 import 'composer.dart';
 import 'message_bubble.dart';
 import 'squares_spinner.dart';
+import '../files/file_preview.dart';
+import '../plan/plan_entry.dart';
+import '../plan/plan_model.dart';
+import '../plan/plan_view.dart';
 import 'agent_sheet.dart';
 import 'model_sheet.dart';
 
@@ -579,6 +585,8 @@ class _ChatViewState extends State<ChatView> {
               onPendingEdit: _onPendingEdit,
               onPendingDiscard: _vm.discardPending,
               onPendingSend: _vm.confirmSend,
+              // Ruta a un plan en el texto: se baja y se abre nativo.
+              onOpenPlan: _openPlan,
             ),
           );
         },
@@ -712,6 +720,50 @@ class _ChatViewState extends State<ChatView> {
             style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
           ),
         ),
+      ),
+    );
+  }
+
+  /// Abre un plan cuya ruta apareció en el chat (`Ver plan`).
+  ///
+  /// Baja los bytes con la misma resolución que Archivos (absoluta → carpeta +
+  /// nombre; relativa → carpeta de la sesión) y, si parsea como plan html-plan,
+  /// lo abre nativo; si no, cae al visor de archivos normal.
+  Future<void> _openPlan(String path) async {
+    final target = splitPlanTarget(path);
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('Abriendo plan…')));
+    final Uint8List bytes;
+    try {
+      bytes = await _vm.api.readFileBytes(
+        directory: target.directory ?? _vm.directory,
+        path: target.name,
+      );
+    } on Object catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('No se pudo abrir el plan: $e')),
+      );
+      return;
+    }
+    if (!mounted) return;
+    final doc = parsePlan(utf8.decode(bytes, allowMalformed: true));
+    if (doc.isEmpty) {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => FilePreview(
+            config: _vm.api.config,
+            path: target.name,
+            directory: target.directory ?? _vm.directory,
+            name: target.name,
+          ),
+        ),
+      );
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PlanView(sourceBytes: bytes, fileName: target.name),
       ),
     );
   }

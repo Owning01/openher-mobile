@@ -22,7 +22,7 @@ App **id**: `ai.openher.openher_mobile` · versión `1.2.0+7` (`versionCode=7`).
 | `lib/domain/models/` | `session`, `message`, `tool`, `event`, `errors`, `agent_catalog`, `model_catalog`, `turn_activity` |
 | `lib/ui/core/` | `tokens.dart`, `theme.dart`, `theme_variants.dart` (61 paletas), `layer_gate.dart`, `app_icon.dart`, `low_data_banner.dart`, `update_banner.dart` |
 | `lib/ui/features/chat/` | `chat_view`, `chat_viewmodel`, `composer`, **`composer_suggestions`** (disparador `/` y `@`, sin `BuildContext`), `message_bubble`, `code_highlight` (resaltado de sintaxis con `highlight` y los tokens `--code-*`), `squares_spinner`, `turn_activity`, `tool_card`, `model_sheet`, `agent_sheet` |
-| `lib/ui/features/` | `sessions/`, `files/`, `settings/`, `connect/`, `navigation/` |
+| `lib/ui/features/` | `sessions/`, `files/`, `settings/`, `connect/`, `navigation/`, `plan/` |
 | `docs/API_CONTRACT.md` | Contrato **medido** contra el server real |
 | `docs/SUPER_PLAN.md` | Decisiones, arquitectura, fases M0–M10 |
 | `prototype/mobile.html` | Maqueta navegable con toggles de capas |
@@ -74,6 +74,7 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 | D18 | `groupSessions` ordena cada bucket por `updatedMs` **descendente**. La sesión corriendo lleva una luz que recorre el **título** (`ShaderMask` + degradado lineal, franja de 0.28 del ancho), movida por **un solo** `AnimationController` de 1400 ms en `SessionsViewState`, el mismo período que `SquaresSpinner` y `_PulseDot`. El reloj es `AnimationController?` perezoso, no `late final`: con `late final` el `dispose()` lo crearía con el elemento desmontado |
 | D19 | Las rutas de imagen del texto del agente se pintan como miniaturas de 72 px (`imagePathsIn` + `MessageImages`), al final del texto y solo con el turno terminado. El agente manda rutas **desnudas**, no markdown (medido). Se expanden al 75% del **alto de pantalla**, con `BoxFit.contain`. Los bytes vienen de `GET /api/fs/read/<path>` con el header Basic, que pasa el shell |
 | D20 | `SessionsView.onAction` es **`required`** a propósito: era opcional y el shell no lo pasaba, así que el swipe y las seis acciones del menú no hacían nada y nada lo delataba (los tests del widget se lo pasan ellos). Con `required`, olvidarlo es un error de compilación. `DELETE /api/session/{id}` → **204 vacío** (medido), sin `directory`; la fila sale de la lista **después** de que el server contestó |
+| D21 | Visor de planes html-plan (`ui/features/plan/`): parsea el **mismo** `plan.html` (nada duplicado) y lo pinta nativo con las decisiones y el formato Respond de la skill. Entrada por botón `Ver plan` en la burbuja cuando el texto trae una ruta `.html` (absoluta o relativa); si no es plan, cae a `FilePreview` |
 
 ## Contrato: lo que hay que no olvidar
 
