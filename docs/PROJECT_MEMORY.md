@@ -1124,3 +1124,11 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
 - Links http/https del chat preguntan (`Abrir enlace` + URL) antes de salir;
   `file://` y rutas nunca salen. Usuario con URL suelta lleva botón.
   Tests puros + widget (tap real del link). Suite 963, analyze en cero.
+
+## 2026-10-10 — Plan con colores del archivo + hoja Respond arreglada
+
+- El visor usa tema papel espejo de `htmlplan.css` (claro `#FAF9F5`, oscuro
+  `#262624`, acento y 5 colores de datos por brillo): lo mismo que el navegador.
+- Hoja Respond reescrita (SafeArea + scroll simple): salía vacía y con los
+  botones bajo la barra del sistema. Regresión con el plan real empaquetado en
+  tema oscuro. Skill: planes en español por defecto.
