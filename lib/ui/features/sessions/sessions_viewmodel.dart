@@ -104,6 +104,14 @@ class SessionsViewModel extends ChangeNotifier {
   List<SessionInfo> _sessions = const <SessionInfo>[];
   Set<String> _running = const <String>{};
   Set<String> _attention = const <String>{};
+
+  /// Toques locales de actividad (`id` → ms del reloj inyectado).
+  ///
+  /// El server solo mueve `time.updated` cuando el turno termina, así que una
+  /// sesión en curso quedaba enterrada hasta el mensaje final. Cuando
+  /// `pollActive` ve un turno **nuevo** en curso, se anota acá y el orden usa
+  /// esa marca: el chat en progreso sube arriba sin esperar al server.
+  final Map<String, int> _touched = {};
   bool _loading = false;
   bool _loaded = false;
   bool _disposed = false;
@@ -198,7 +206,13 @@ class SessionsViewModel extends ChangeNotifier {
   }
 
   /// [visible] agrupado por día calendario de `time.updated`.
-  List<SessionGroup> get groups => groupSessions(visible, _clock());
+  ///
+  /// El orden dentro del grupo es por **recencia efectiva**: lo que el server
+  /// dice, salvo que el turno haya arrancado después (toque local). El grupo
+  /// (HOY/AYER/…) sigue saliendo del `updated` del server: mover de grupo por
+  /// un toque local mentiría el encabezado.
+  List<SessionGroup> get groups =>
+      groupSessions(visible, _clock(), running: _running, touched: _touched);
 
   /// Los `ses_…` que el server dice que están corriendo ahora mismo.
   Set<String> get running => _running;
@@ -250,6 +264,9 @@ class SessionsViewModel extends ChangeNotifier {
       // crece con el historial del usuario.
       final sessions = await repository.listAll();
       _sessions = sessions;
+      _touched.removeWhere(
+        (id, _) => !_sessions.any((s) => s.id == id),
+      );
       _attention = {
         for (final s in sessions)
           if (s.parentID != null) s.id,
@@ -312,6 +329,12 @@ class SessionsViewModel extends ChangeNotifier {
     try {
       final active = await repository.fetchActive();
       if (_disposed) return;
+      // Turnos nuevos en curso: se tocan con la hora local para que suban
+      // arriba sin esperar al `updated` del server (que llega al final).
+      final nowMs = _clock().millisecondsSinceEpoch;
+      for (final id in active) {
+        if (!_running.contains(id)) _touched[id] = nowMs;
+      }
       // Sin `notifyListeners` si no cambió: el polling no debe repintar la lista
       // cada 5 s.
       if (_setEquals(active, _running)) return;
@@ -380,7 +403,17 @@ bool _setEquals(Set<String> a, Set<String> b) =>
 ///
 /// Día calendario y no "hace 24 h": a las 23:50 la sesión de las 23:40 de ayer
 /// es `AYER` aunque no hayan pasado 24 horas.
-List<SessionGroup> groupSessions(List<SessionInfo> sessions, DateTime now) {
+///
+/// El orden dentro del grupo es por **recencia efectiva**: lo en curso primero
+/// y después lo más recientemente tocado (toque local si el turno arrancó
+/// después del `updated` del server, que solo se mueve al final). El grupo
+/// sigue saliendo del `updated` del server para no mentir el encabezado.
+List<SessionGroup> groupSessions(
+  List<SessionInfo> sessions,
+  DateTime now, {
+  Set<String> running = const {},
+  Map<String, int> touched = const {},
+}) {
   final today = DateTime(now.year, now.month, now.day);
   final buckets = <SessionBucket, List<SessionInfo>>{
     for (final b in SessionBucket.values) b: <SessionInfo>[],
@@ -390,13 +423,23 @@ List<SessionGroup> groupSessions(List<SessionInfo> sessions, DateTime now) {
     final day = DateTime(at.year, at.month, at.day);
     buckets[bucketOfDays(today.difference(day).inDays)]!.add(s);
   }
+  int effective(SessionInfo s) {
+    final touch = touched[s.id] ?? 0;
+    return touch > s.updatedAtMs ? touch : s.updatedAtMs;
+  }
+
   // **De más reciente a menos reciente dentro de cada grupo.** El server no lo
   // garantiza y sin esto las sesiones salían en el orden que vino la página, que
   // es el orden de los cursores: la sesión que acabás de usar podía quedar
   // debajo de otras del mismo día. El orden de los **grupos** ya era correcto,
   // porque `SessionBucket.values` va de HOY hacia atrás.
   for (final bucket in buckets.values) {
-    bucket.sort((a, b) => b.updatedAtMs.compareTo(a.updatedAtMs));
+    bucket.sort((a, b) {
+      final ra = running.contains(a.id) ? 0 : 1;
+      final rb = running.contains(b.id) ? 0 : 1;
+      if (ra != rb) return ra.compareTo(rb);
+      return effective(b).compareTo(effective(a));
+    });
   }
   return [
     for (final b in SessionBucket.values)

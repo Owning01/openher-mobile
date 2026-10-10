@@ -75,6 +75,7 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 | D19 | Las rutas de imagen del texto del agente se pintan como miniaturas de 72 px (`imagePathsIn` + `MessageImages`), al final del texto y solo con el turno terminado. El agente manda rutas **desnudas**, no markdown (medido). Se expanden al 75% del **alto de pantalla**, con `BoxFit.contain`. Los bytes vienen de `GET /api/fs/read/<path>` con el header Basic, que pasa el shell |
 | D20 | `SessionsView.onAction` es **`required`** a propósito: era opcional y el shell no lo pasaba, así que el swipe y las seis acciones del menú no hacían nada y nada lo delataba (los tests del widget se lo pasan ellos). Con `required`, olvidarlo es un error de compilación. `DELETE /api/session/{id}` → **204 vacío** (medido), sin `directory`; la fila sale de la lista **después** de que el server contestó |
 | D21 | Visor de planes html-plan (`ui/features/plan/`): parsea el **mismo** `plan.html` (nada duplicado) y lo pinta nativo con las decisiones y el formato Respond de la skill. Entrada por botón `Ver plan` en la burbuja cuando el texto trae una ruta `.html` (absoluta o relativa); si no es plan, cae a `FilePreview` |
+| D22 | Links http/https en el chat preguntan antes de salir (`Abrir enlace` con la URL visible); `file://` y rutas nunca salen. Recencia efectiva en Recientes: lo en curso y lo tocado ordenan primero sin mover de grupo ni mentir la hora |
 
 ## Contrato: lo que hay que no olvidar
 

@@ -14,7 +14,6 @@ import 'package:flutter/services.dart';
 import '../../core/tokens.dart';
 import 'plan_answers.dart';
 import 'plan_blocks.dart';
-import 'plan_mock.dart';
 import 'plan_model.dart';
 
 /// Pantalla del plan. `sourceBytes` es el `plan.html` tal cual lo sirve el

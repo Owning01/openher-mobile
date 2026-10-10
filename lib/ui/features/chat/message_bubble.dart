@@ -65,6 +65,7 @@ class MessageBubble extends StatelessWidget {
     this.imageUrl,
     this.imageHeaders = const <String, String>{},
     this.onOpenPlan,
+    this.onOpenLink,
   });
 
   /// Cómo se pide una imagen al server (`GET /api/fs/read/<path>`).
@@ -86,6 +87,14 @@ class MessageBubble extends StatelessWidget {
 
   /// Botón `Ver plan`, por id de mensaje (hay varios mensajes en pantalla).
   static Key planButtonKey(String messageId) => Key('plan-open-$messageId');
+
+  /// Pregunta antes de abrir un link en el navegador (`Abrir enlace`).
+  ///
+  /// `null` (tests, vista suelta) apaga links y botón igual que `onOpenPlan`.
+  final ValueChanged<String>? onOpenLink;
+
+  /// Botón `Abrir enlace`, por id de mensaje.
+  static Key linkButtonKey(String messageId) => Key('link-open-$messageId');
 
   /// Los tres botones de un mensaje **en cola**. Reciben el id local.
   ///
@@ -276,7 +285,10 @@ class MessageBubble extends StatelessWidget {
                 'chat.stream.text',
                 child: MarkdownText(text, streaming: true),
               )
-            : LayerGate('chat.msg.assistant', child: MarkdownText(text)),
+            : LayerGate(
+                'chat.msg.assistant',
+                child: MarkdownText(text, onTapUrl: onOpenLink),
+              ),
       );
       // Ruta a un plan en el texto: se ofrece abrirlo nativo. Solo con el
       // texto ya quieto — a medio stream la ruta está truncada.
@@ -350,6 +362,25 @@ class MessageBubble extends StatelessWidget {
     final path = findPlanPath(text);
     if (path == null) return const [];
     return [const SizedBox(height: 6), _planButton(messageId, path)];
+  }
+
+  /// Botón `Abrir enlace` para una URL suelta en texto plano (burbuja del
+  /// usuario, que no parsea markdown): vacío si no hay URL o no hay canal.
+  List<Widget> _linkFor(String messageId, String text) {
+    if (onOpenLink == null) return const [];
+    final url = findWebLink(text);
+    if (url == null) return const [];
+    return [
+      const SizedBox(height: 6),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: _GhostButton(
+          key: linkButtonKey(messageId),
+          label: 'Abrir enlace',
+          onTap: () => onOpenLink?.call(url),
+        ),
+      ),
+    ];
   }
 
   /// La caja que le toca a este mensaje, o `null` si no le toca ninguna.
@@ -426,6 +457,7 @@ class MessageBubble extends StatelessWidget {
             style: theme.textTheme.bodyMedium?.copyWith(color: tinta),
           ),
           ..._planFor(user.id, user.text),
+          ..._linkFor(user.id, user.text),
           if (pendiente) ...[
             const SizedBox(height: 6),
             _PendingActions(
@@ -948,6 +980,20 @@ Map<String, Object?>? _jsonObject(String raw) {
 
 // ─────────────────────────── markdown del asistente ─────────────────────────
 
+/// Solo http/https abren navegador. Un `file://`, una ruta del server o un
+/// esquema raro no salen de la app.
+bool isWebLink(String? href) {
+  if (href == null || href.isEmpty) return false;
+  final scheme = Uri.tryParse(href)?.scheme.toLowerCase();
+  return scheme == 'http' || scheme == 'https';
+}
+
+/// Primera URL http/https suelta en un texto, o null.
+String? findWebLink(String text) {
+  final match = RegExp(r'https?://[^\s<>\]\)}]+').firstMatch(text);
+  return match?.group(0);
+}
+
 /// Markdown del texto del asistente.
 ///
 /// `flutter_markdown_plus` (el sucesor mantenido de `flutter_markdown`, que
@@ -969,7 +1015,7 @@ Map<String, Object?>? _jsonObject(String raw) {
 /// Es público y sin `const` a propósito: el memo vive en el estado, así que
 /// el widget tiene que ser estable entre rebuilds.
 class MarkdownText extends StatefulWidget {
-  const MarkdownText(this.text, {super.key, this.streaming = false});
+  const MarkdownText(this.text, {super.key, this.streaming = false, this.onTapUrl});
 
   final String text;
 
@@ -978,6 +1024,10 @@ class MarkdownText extends StatefulWidget {
   /// delta, además de costly, hace parpadear los títulos y las listas a medio
   /// construir; el markdown rico entra al terminar el turno.
   final bool streaming;
+
+  /// Toque en un link del markdown. Solo se llama con URLs http/https (ver
+  /// [isWebLink]): un `file://` o una ruta del server no abren navegador.
+  final ValueChanged<String>? onTapUrl;
 
   @override
   State<MarkdownText> createState() => _MarkdownTextState();
@@ -1007,7 +1057,8 @@ class _MarkdownTextState extends State<MarkdownText> {
     final style = Theme.of(context).textTheme.bodyMedium!;
     final signature =
         '${widget.text}\u0000${widget.streaming}\u0000${style.color}\u0000'
-        '${style.fontSize}\u0000${MediaQuery.textScalerOf(context).scale(13)}';
+        '${style.fontSize}\u0000${MediaQuery.textScalerOf(context).scale(13)}\u0000'
+        '${widget.onTapUrl == null}';
     if (signature != _signature) {
       _signature = signature;
       _cached = _render(context, body);
@@ -1032,6 +1083,13 @@ class _MarkdownTextState extends State<MarkdownText> {
       styleSheet: _markdownSheet(context),
       builders: {'pre': _CodeBlockBuilder(), 'code': _InlineCodeBuilder()},
       bulletBuilder: (parameters) => _bullet(parameters, base, muted),
+      // El link pregunta antes de salir: un toque accidental no puede mandar
+      // al usuario al navegador (y un `file://` nunca sale).
+      onTapLink: widget.onTapUrl == null
+          ? null
+          : (text, href, title) {
+              if (isWebLink(href)) widget.onTapUrl!(href!);
+            },
       // La viñeta va arriba de la primera línea (`.ai li::before`), no en la
       // línea base: el punto es una caja sin texto y no tiene base que alinear.
       listItemCrossAxisAlignment: MarkdownListItemCrossAxisAlignment.start,
