@@ -10,14 +10,25 @@ import 'package:openher_mobile/core/update/update_service.dart';
 import 'package:openher_mobile/ui/core/update_banner.dart';
 
 /// El manifiesto real que publica `scripts/publish-update.ps1`.
+/// El sha256 por defecto es el de los bytes que sirve [_ManifestoYApk] (3 MB
+/// de `0x41`): así la verificación pasa en los tests de descarga entera y el
+/// test de mismatch lo rompe a propósito pasándole otro.
 String manifest(Map<String, Object?> over) => jsonEncode({
   'version': '1.1.0',
   'versionCode': 2,
   'url': 'https://example.test/app-release.apk',
+  'sha256': kApkSha,
   'notes': 'modelos y nivel de pensamiento',
   'published_at': '2026-09-28T12:00:00.000Z',
   ...over,
 });
+
+/// SHA-256 de lo que sirve el mock de APK (3 MB de `0x41`, precomputado con
+/// `hashlib`: calcularlo en Dart-JIT en cada carga colgaba el runner).
+/// Así la verificación pasa en los tests de descarga entera y el test de
+/// mismatch lo rompe a propósito pasándole otro.
+const String kApkSha =
+    'a57493c037eb3a8a86ff87072edde226110455cd7fdab2f87bb4df072f67ffb0';
 
 UpdateService service({required MockClient mock, int versionCode = 1}) {
   final s = UpdateService(client: mock, fallbackVersionCode: versionCode);
@@ -158,6 +169,79 @@ void main() {
       expect(await s.check(), isFalse);
       expect(s.state.phase, UpdatePhase.failed);
     });
+
+    test('sin sha256 no hay update: no se instala a ciegas', () async {
+      // ADJUDICADO 2026-10-11: el manifiesto trae sha256 (lo genera
+      // publish-update.ps1) y el check lo exige. Sin huella no hay qué
+      // verificar antes de `ready`, así que es fallo claro, no update.
+      final s = service(
+        mock: MockClient(
+          (_) async => http.Response(manifest({'sha256': ''}), 200),
+        ),
+        versionCode: 1,
+      );
+      expect(await s.check(), isFalse);
+      expect(s.state.phase, UpdatePhase.failed);
+      expect(s.state.error, contains('sha256'));
+    });
+
+    test('una URL de APK que no es https no es update', () async {
+      final s = service(
+        mock: MockClient(
+          (_) async => http.Response(
+            manifest({'url': 'http://example.test/app-release.apk'}),
+            200,
+          ),
+        ),
+        versionCode: 1,
+      );
+      expect(await s.check(), isFalse);
+      expect(s.state.phase, UpdatePhase.failed);
+      expect(s.state.error, contains('https'));
+    });
+
+    test('el throttle no repega a la red antes de 24 h', () async {
+      var calls = 0;
+      final s = service(
+        mock: MockClient((_) async {
+          calls++;
+          return http.Response(manifest({}), 200);
+        }),
+        versionCode: 1,
+      );
+      expect(await s.check(), isTrue);
+      expect(await s.check(), isTrue, reason: 'sale de lo ya sabido');
+      expect(calls, 1, reason: 'el segundo check no toca la red');
+    });
+
+    test('force salta el throttle ("buscar ahora")', () async {
+      var calls = 0;
+      final s = service(
+        mock: MockClient((_) async {
+          calls++;
+          return http.Response(manifest({}), 200);
+        }),
+        versionCode: 1,
+      );
+      expect(await s.check(), isTrue);
+      expect(await s.check(force: true), isTrue);
+      expect(calls, 2);
+    });
+
+    test('un fallo no consume la ventana del throttle', () async {
+      var calls = 0;
+      final s = service(
+        mock: MockClient((_) async {
+          calls++;
+          if (calls == 1) return http.Response('caído', 500);
+          return http.Response(manifest({}), 200);
+        }),
+        versionCode: 1,
+      );
+      expect(await s.check(), isFalse);
+      expect(await s.check(), isTrue, reason: 'el fallo no silencia 24 h');
+      expect(calls, 2);
+    });
   });
 
   group('UpdateState', () {
@@ -191,6 +275,30 @@ void main() {
     });
   });
 
+  group('sha256 sin dependencias', () {
+    test('vectores del estándar', () {
+      expect(
+        UpdateService.sha256Hex(utf8.encode('abc')),
+        'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+      );
+      expect(
+        UpdateService.sha256Hex(const <int>[]),
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      );
+    });
+
+    test('fingerprint es la huella corta', () {
+      final info = UpdateInfo(
+        version: '1.1.0',
+        versionCode: 2,
+        apkUrl: 'https://example.test/a.apk',
+        sha256: kApkSha,
+      );
+      expect(info.fingerprint, '${kApkSha.substring(0, 12)}…');
+      expect(info.fingerprint.length, lessThan(info.sha256.length));
+    });
+  });
+
   group('la banda no bloquea', () {
     test('se ve sólo cuando hay algo que hacer', () {
       bool shows(UpdatePhase p) => UpdateState.showsBannerFor(p);
@@ -204,6 +312,11 @@ void main() {
       expect(shows(UpdatePhase.available), isTrue);
       expect(shows(UpdatePhase.downloading), isTrue);
       expect(shows(UpdatePhase.ready), isTrue);
+      expect(
+        shows(UpdatePhase.installDenied),
+        isTrue,
+        reason: 'hay un permiso que conceder: es algo que hacer',
+      );
     });
 
     // `showsBannerFor` es la regla **por fase** y sigue igual: un fallo de
@@ -316,6 +429,92 @@ void main() {
       expect(find.byKey(UpdateBanner.retryKey), findsNothing);
       expect(find.text('Volver a descargar'), findsNothing);
     });
+
+    testWidgets('descargando muestra MB totales y el fingerprint', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: UpdateBanner(
+              state: UpdateState(
+                phase: UpdatePhase.downloading,
+                received: 1572864,
+                total: 3145728,
+                info: UpdateInfo(
+                  version: '1.1.0',
+                  versionCode: 2,
+                  apkUrl: 'https://example.test/a.apk',
+                  sha256: kApkSha,
+                ),
+              ),
+              onDownload: () {},
+              onInstall: () {},
+              onDismiss: () {},
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Descargando 1.5 MB de 3.0 MB (50%)'), findsOneWidget);
+    });
+
+    testWidgets('lista para instalar muestra el fingerprint', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: UpdateBanner(
+              state: UpdateState(
+                phase: UpdatePhase.ready,
+                info: UpdateInfo(
+                  version: '1.1.0',
+                  versionCode: 2,
+                  apkUrl: 'https://example.test/a.apk',
+                  sha256: kApkSha,
+                ),
+              ),
+              onDownload: () {},
+              onInstall: () {},
+              onDismiss: () {},
+            ),
+          ),
+        ),
+      );
+      expect(find.textContaining('SHA-256 ${kApkSha.substring(0, 12)}'), findsOneWidget);
+      expect(find.text('Instalar'), findsOneWidget);
+    });
+
+    testWidgets('sin permiso la banda lo dice y ofrece abrir ajustes', (
+      tester,
+    ) async {
+      var installs = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: UpdateBanner(
+              state: const UpdateState(
+                phase: UpdatePhase.installDenied,
+                error: 'Falta el permiso para instalar aplicaciones.',
+                info: UpdateInfo(
+                  version: '1.1.0',
+                  versionCode: 2,
+                  apkUrl: 'https://example.test/a.apk',
+                ),
+              ),
+              onDownload: () {},
+              onInstall: () => installs++,
+              onDismiss: () {},
+            ),
+          ),
+        ),
+      );
+      expect(
+        find.text('Falta el permiso para instalar aplicaciones.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Permitir instalación'));
+      await tester.pump();
+      expect(installs, 1);
+    });
   });
 
   // ─────────────────────── el archivo a medias en el disco ───────────────────
@@ -391,6 +590,76 @@ void main() {
       );
       expect(apk().existsSync(), isTrue);
     });
+
+    test('un sha256 distinto no llega a ready y el archivo se borra', () async {
+      // El guard: sin verificación, un APK inyectado en el medio llegaría al
+      // instalador. Si este test cae con `ready`, la verificación se perdió.
+      final s = UpdateService(
+        client: _ShaFalso(_ManifestoYApk(cortaApkEnElIntento: 0)),
+        fallbackVersionCode: 1,
+      )..manifestUrl = Uri.parse('https://example.test/latest.json');
+      expect(await s.check(), isTrue);
+      expect(await s.download(), isFalse);
+      expect(s.state.phase, UpdatePhase.failed);
+      expect(s.state.error, contains('sha256'));
+      expect(
+        apk().existsSync(),
+        isFalse,
+        reason: 'el APK que no coincide no se guarda',
+      );
+    });
+
+    test('cancelar cierra y borra el parcial', () async {
+      final s = _servicio(_ApkLento());
+      expect(await s.check(), isTrue);
+      final pendiente = s.download();
+      // Deja que la descarga arranque de verdad antes de cancelarla.
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(s.state.phase, UpdatePhase.downloading);
+      s.cancelDownload();
+      expect(await pendiente, isFalse);
+      expect(s.state.phase, UpdatePhase.failed);
+      expect(s.state.error, contains('cancelada'));
+      expect(
+        apk().existsSync(),
+        isFalse,
+        reason: 'cancelar no deja un parcial con el nombre correcto',
+      );
+    });
+
+    test('tras descargar ok sólo queda el APK nuevo', () async {
+      final viejo = File(
+        '${dir.path}${Platform.pathSeparator}openher-0.9.0.apk',
+      );
+      viejo.writeAsBytesSync(const <int>[1, 2, 3]);
+      final s = _servicio(_ManifestoYApk(cortaApkEnElIntento: 0));
+      expect(await s.check(), isTrue);
+      expect(await s.download(), isTrue);
+      expect(apk().existsSync(), isTrue, reason: 'el nuevo queda');
+      expect(viejo.existsSync(), isFalse, reason: 'el viejo se limpia');
+    });
+
+    test('sin permiso de instalar queda en installDenied con motivo', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('ai.openher/install'),
+            (call) async {
+              return switch (call.method) {
+                'updatesDir' => dir.path,
+                'canRequestPackageInstalls' => false,
+                'openInstallSettings' => true,
+                _ => null,
+              };
+            },
+          );
+      apk().writeAsBytesSync(const <int>[1, 2, 3]);
+      final s = _servicio(_ManifestoYApk(cortaApkEnElIntento: 0));
+      expect(await s.check(), isTrue);
+      expect(await s.install(), isFalse);
+      expect(s.state.phase, UpdatePhase.installDenied);
+      expect(s.state.error, contains('permiso'));
+      expect(s.state.showsBanner, isTrue);
+    });
   });
 }
 
@@ -399,6 +668,59 @@ void main() {
 UpdateService _servicio(http.Client cliente) =>
     UpdateService(client: cliente, fallbackVersionCode: 1)
       ..manifestUrl = Uri.parse('https://example.test/latest.json');
+
+/// Envuelve un cliente y le cambia el sha256 del manifiesto por uno falso: el
+/// APK que baja es el bueno pero el manifiesto miente, como en un MITM.
+class _ShaFalso extends http.BaseClient {
+  _ShaFalso(this.inner);
+
+  final http.BaseClient inner;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final res = await inner.send(request);
+    if (!request.url.toString().endsWith('.json')) return res;
+    final body = await res.stream.bytesToString();
+    final map = jsonDecode(body) as Map<String, dynamic>;
+    map['sha256'] = '0' * 64;
+    final fixed = utf8.encode(jsonEncode(map));
+    return http.StreamedResponse(
+      Stream<List<int>>.value(fixed),
+      res.statusCode,
+      contentLength: fixed.length,
+      request: request,
+    );
+  }
+}
+
+/// Cliente con un APK lento (100 × 64 KB con pausas): deja que el test
+/// cancele a mitad de la descarga, que con el mock instantáneo no se puede.
+class _ApkLento extends http.BaseClient {
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    if (request.url.toString().endsWith('.json')) {
+      final cuerpo = utf8.encode(manifest({}));
+      return http.StreamedResponse(
+        Stream<List<int>>.value(cuerpo),
+        200,
+        contentLength: cuerpo.length,
+        request: request,
+      );
+    }
+    Stream<List<int>> flujo() async* {
+      for (var i = 0; i < 100; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        yield List<int>.filled(64 * 1024, 0x41);
+      }
+    }
+    return http.StreamedResponse(
+      flujo(),
+      200,
+      contentLength: 100 * 64 * 1024,
+      request: request,
+    );
+  }
+}
 
 /// Cliente que responde el **manifiesto** con el JSON de siempre y el **APK**
 /// con un stream que se puede cortar.

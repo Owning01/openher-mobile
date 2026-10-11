@@ -147,7 +147,18 @@ class _ConnectViewState extends State<ConnectView> {
       if (persist) {
         await widget.creds?.write(config);
         if (!mounted) return;
+        // Se avisa antes de navegar: el destino siguiente puede descartar este
+        // contexto y el aviso se perdería.
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Conectado a ${config.baseUrl}')),
+        );
         widget.onConnected?.call(config);
+      } else if (mounted) {
+        // Probar también dice cuando sale bien: sin esto el botón no contesta
+        // nada en el caso bueno.
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Conexión OK con ${config.baseUrl}')),
+        );
       }
       if (mounted) setState(() => _busy = false);
     } catch (error) {

@@ -3,7 +3,9 @@ package ai.openher.openher_mobile
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
+import android.view.WindowManager
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -25,6 +27,17 @@ import java.io.File
 class MainActivity : FlutterActivity() {
 
     private val channel = "ai.openher/install"
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // FLAG_SECURE: bloquea capturas de pantalla y grabación sobre esta
+        // activity (el chat puede mostrar secrets del server). Opt-out: si se
+        // necesita capturar la UI para debug, comentar esta línea.
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE,
+        )
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)

@@ -266,7 +266,11 @@ class _ModelSheetState extends State<ModelSheet> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _head(),
-          _search(scheme),
+          // En error el buscador se esconde: no hay nada que filtrar, y con
+          // el campo visible su `autofocus` (que montó primero) le gana al
+          // de Reintentar —un `autofocus` se ignora si otro nodo ya tiene el
+          // foco—. Sin buscador, el foco cae en la acción segura.
+          if (_error == null) _search(scheme),
           Flexible(child: _body(scheme, groups)),
         ],
       ),
@@ -282,8 +286,16 @@ class _ModelSheetState extends State<ModelSheet> {
     ),
     child: Row(
       children: [
+        // Encabezado para el lector de pantalla: es el título del diálogo,
+        // no un texto más de la lista.
         Expanded(
-          child: Text('Modelo', style: Theme.of(context).textTheme.titleLarge),
+          child: Semantics(
+            header: true,
+            child: Text(
+              'Modelo',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+          ),
         ),
         AppIconButton(
           icon: 'x',
@@ -300,6 +312,8 @@ class _ModelSheetState extends State<ModelSheet> {
     child: TextField(
       key: ModelSheet.searchKey,
       controller: _query,
+      // La hoja se abre para buscar: el foco cae acá sin un toque previo.
+      autofocus: true,
       onChanged: (value) => setState(() => _filter = value.trim()),
       decoration: InputDecoration(
         hintText: 'Buscar modelo…',
@@ -313,6 +327,17 @@ class _ModelSheetState extends State<ModelSheet> {
     List<({String provider, List<ModelInfo> models})> groups,
   ) {
     if (_loading) {
+      // Sin animaciones no gira nada: el estado se dice con texto estático.
+      if (MediaQuery.disableAnimationsOf(context)) {
+        return Padding(
+          padding: const EdgeInsets.all(AppSpacing.xl),
+          child: SizedBox(
+            key: ModelSheet.loadingKey,
+            height: 96,
+            child: const Center(child: Text('Cargando…')),
+          ),
+        );
+      }
       return const Padding(
         padding: EdgeInsets.all(AppSpacing.xl),
         child: SizedBox(
@@ -376,7 +401,11 @@ class _ModelSheetState extends State<ModelSheet> {
       children: [
         Text(message, style: TextStyle(fontSize: 13, color: scheme.onSurface)),
         const SizedBox(height: AppSpacing.xs),
+        // La acción segura del estado de error: el foco cae acá (se monta
+        // después del buscador y toma precedencia) para que reintentar no
+        // pida un toque previo.
         TextButton.icon(
+          autofocus: true,
           onPressed: _load,
           icon: AppIcon('refresh', size: 16, color: scheme.onSurfaceVariant),
           label: Text(

@@ -596,6 +596,11 @@ void main() {
   test('el stream es el GLOBAL /api/event, no el por sesión (404 medido)', () {
     // API_CONTRACT §7.1: `/api/session/{id}/event` da 404 en el build medido.
     // La URL es parte del contrato, así que se verifica, no se supone.
+    //
+    // **Adjudicado 2026-10-11.** Dos queries salieron del contrato con medida:
+    // `?after=` no tiene endpoint que lo acepte (400 del middleware) y
+    // `?auth_token=` es redundante (header Basic solo da 200 en `/api/event`,
+    // medido contra `:4098`). El token en la URL además quedaba en logs.
     final source = GlobalSseSource(
       config: const ServerConfig(
         host: '192.168.1.10',
@@ -609,18 +614,17 @@ void main() {
 
     expect(uri.path, '/api/event');
     expect(uri.path, isNot(contains('/session/')));
-    expect(uri.queryParameters['after'], '431');
+    expect(uri.queryParameters.containsKey('after'), isFalse);
     expect(
       uri.queryParameters[ServerConfig.locationParam],
       'C:/Proyectos/openher',
     );
     // §7.3: mandar `sessionID` en la query es un 400 del middleware.
     expect(uri.queryParameters.containsKey('sessionID'), isFalse);
-    // La credencial viaja en `auth_token` y se redacta antes de loguearse.
-    expect(uri.queryParameters[ServerConfig.authTokenParam], isNotNull);
+    // Sin `auth_token` en la URL: la credencial viaja solo en el header.
     expect(
-      ServerConfig.redactAuthToken(uri).toString(),
-      contains('auth_token=REDACTED'),
+      uri.queryParameters.containsKey(ServerConfig.authTokenParam),
+      isFalse,
     );
   });
 

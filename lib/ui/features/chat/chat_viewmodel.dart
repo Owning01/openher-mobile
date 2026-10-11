@@ -108,14 +108,13 @@ class _GlobalSse extends SseClient {
   _GlobalSse({required super.config, super.directory}) : super(sessionId: '');
 
   /// `/api/event` (global). **Nunca** `?sessionID=`: no está declarado en el
-  /// schema y el middleware responde 400 (§7.3).
+  /// schema y el middleware responde 400 (§7.3). Tampoco `?auth_token=` (el
+  /// header Basic alcanza, medido 200 sin query) ni `?after=` (sin endpoint
+  /// medido que lo acepte): los queries no declarados traen 400.
   @override
   Uri streamUri({int? after}) => config.api(
     '/event',
     query: <String, String?>{
-      'after': (after ?? lastSeq)?.toString(),
-      if (config.authTokenQuery != null)
-        ServerConfig.authTokenParam: config.authTokenQuery,
       if (directory != null && directory!.isNotEmpty)
         ServerConfig.locationParam: directory,
     },
@@ -334,6 +333,34 @@ class ChatViewModel extends ChangeNotifier {
   bool _loadingEarlier = false;
   bool _visible = true;
 
+  /// La sesión se borró en el server (404 en carga o poll). Con esto la vista
+  /// pinta el banner con "Volver a la lista" y deshabilita el composer: mandar
+  /// a una sesión que no existe sólo da más 404.
+  bool _sessionGone = false;
+
+  /// El turno lleva demasiado sin novedades (ni deltas ni eventos): se da por
+  /// trabado, se avisa y se aborta como reset. La última actividad se anota en
+  /// cada envío y en cada evento; el chequeo corre en esos mismos caminos (ver
+  /// [_checkWatchdog]).
+  ///
+  /// Sin `Timer` a propósito: un timer de 120 s pendiente revienta el harness
+  /// de widget tests ("A Timer is still pending…"), que corre en zona fake
+  /// async y verifica al final del cuerpo — antes de los `addTearDown`, así
+  /// que ni siquiera el `dispose` lo salvaría.
+  ///
+  /// El costo: con el stream en vivo y silencio absoluto no hay quién dispare
+  /// el chequeo hasta el próximo evento. En la práctica el caso trabado cae al
+  /// sondeo (el SSE se rinde a `polling`) y ahí el poll lo detecta.
+  DateTime? _lastActivity;
+
+  /// Sin eventos tanto tiempo, el turno está trabado.
+  static const Duration watchdogTimeout = Duration(seconds: 120);
+
+  /// Tope de mensajes en memoria. Las sesiones largas crecen sin techo y cada
+  /// rebuild recorre la lista entera; lo viejo se recorta (ya está en el
+  /// server y vuelve con "Cargar anteriores").
+  static const int maxMessages = 300;
+
   /// ese caso la vista no lo vuelve a prender al montar: la intencion del
   int _localSeq = 0;
 
@@ -405,6 +432,10 @@ class ChatViewModel extends ChangeNotifier {
 
   /// `null` si el SSE nunca se conectó. La UI lo pinta como aviso.
   StreamState? get streamState => _streamState;
+
+  /// La sesión ya no existe en el server. La vista deshabilita el composer y
+  /// ofrece volver a la lista.
+  bool get sessionGone => _sessionGone;
 
   /// ¿El chat está en pantalla? En `false` no hay socket ni timers (batería).
   bool get visible => _visible;
@@ -582,12 +613,31 @@ class ChatViewModel extends ChangeNotifier {
       _newerCursor = page.previous;
     } on OchError catch (e) {
       if (_disposed || seq < _appliedFetch) return;
-      _error = e.message;
+      if (_isNotFound(e)) {
+        _onSessionGone();
+      } else {
+        _error = e.message;
+      }
     } finally {
       if (loading) _loading = false;
       _recomputeWorking();
       _safeNotify();
     }
+  }
+
+  /// 404 en carga o poll: la sesión se borró en el server. No es un error
+  /// reintentable: se marca, se corta el poll y la vista toma el mando
+  /// (banner + composer deshabilitado + volver a la lista).
+  static bool _isNotFound(OchError e) =>
+      e is ApiError && e.statusCode == 404;
+
+  void _onSessionGone() {
+    _sessionGone = true;
+    _stopPolling();
+    _busyStatus = false;
+    _awaitingAssistant = false;
+    _flushDeltas();
+    _recomputeWorking();
   }
 
   /// La página anterior, para el botón "Cargar N anteriores".
@@ -628,6 +678,10 @@ class ChatViewModel extends ChangeNotifier {
       }
       _earlierCursor = page.next;
       _messages.insertAll(0, older);
+      // Sin `_capMessages` a propósito: el cap recorta por el frente, que es
+      // justo donde acaba de insertarse lo pedido. Recortar acá borraría lo
+      // que el usuario pidió ver (spinner que no trae nada y gasto de datos
+      // inútil). La ventana viva se reimpone sola en la próxima ingesta.
     } on OchError catch (e) {
       if (_disposed) return;
       _error = e.message;
@@ -679,7 +733,14 @@ class ChatViewModel extends ChangeNotifier {
     // deja un cursor nuevo para el próximo poll.
     if (cursor == null) return _fetch(loading: false);
 
+    // El poll también es el chequeo del watchdog en modo sondeo: acá el stream
+    // no trae eventos y nadie más miraría el silencio.
+    _checkWatchdog();
+
     final seq = ++_fetchSeq;
+    // El `finally` notifica siempre, salvo que el camino ya haya decidido por
+    // su cuenta (poll vacío sin cambios, sesión borrada).
+    var avisado = false;
     try {
       final page = await _api.listMessages(
         sessionId,
@@ -694,7 +755,13 @@ class ChatViewModel extends ChangeNotifier {
       _appliedFetch = seq;
 
       if (page.data.isEmpty) {
-        // No hay nada nuevo. Se conserva el cursor viejo: ver el doc.
+        // No hay nada nuevo. Se conserva el cursor viejo: ver el doc. Y no se
+        // notifica salvo que el turno haya cambiado de estado: sin esto cada
+        // vuelta del poll (2 s) rebuildaba el chat entero sin motivo.
+        final antes = _working;
+        _recomputeWorking();
+        if (antes != _working) _safeNotify();
+        avisado = true;
         return;
       }
       // El orden de la respuesta con `previous` es **DESC** (medido: se tomó
@@ -707,6 +774,11 @@ class ChatViewModel extends ChangeNotifier {
       if (page.previous != null) _newerCursor = page.previous;
     } on OchError catch (e) {
       if (_disposed || seq < _appliedFetch) return;
+      if (_isNotFound(e)) {
+        _onSessionGone();
+        avisado = true;
+        return;
+      }
       // Un cursor que el server ya no entiende (400) dejaría el poll roto en
       // silencio para siempre. Se tira el ancla y el próximo poll vuelve a la
       // página completa, que es el camino caro pero seguro.
@@ -714,7 +786,9 @@ class ChatViewModel extends ChangeNotifier {
       _error = e.message;
     } finally {
       _recomputeWorking();
-      _safeNotify();
+      // Un poll vacío sin cambios no notifica: cada 2 s un rebuild entero del
+      // chat (markdown incluido) es trabajo tirado y mueve el scroll.
+      if (!avisado) _safeNotify();
     }
   }
 
@@ -843,6 +917,9 @@ class ChatViewModel extends ChangeNotifier {
   }) async {
     final body = text.trim();
     if (body.isEmpty) return;
+    // Sesión borrada: el composer ya está deshabilitado, pero un reintento
+    // programático tampoco tiene a dónde ir.
+    if (_sessionGone) return;
 
     // **Si hay un turno en curso, el prompt NO se manda.** Se queda en el
     // chat como pendiente, con las tres acciones (enviar / editar /
@@ -895,6 +972,8 @@ class ChatViewModel extends ChangeNotifier {
     // prompt nuevo.
     _busyStatus = null;
     _recomputeWorking();
+    // Hay turno nuevo en vuelo: el watchdog arranca a contar desde acá.
+    _markActivity();
     _safeNotify();
 
     try {
@@ -946,6 +1025,7 @@ class ChatViewModel extends ChangeNotifier {
     _awaitingAssistant = true;
     _busyStatus = null;
     _recomputeWorking();
+    _markActivity();
     _safeNotify();
 
     try {
@@ -973,6 +1053,44 @@ class ChatViewModel extends ChangeNotifier {
       _error = e.message;
       _safeNotify();
     }
+  }
+
+  /// Reintenta el turno: vuelve a mandar el último prompt del usuario.
+  ///
+  /// Es lo que cablea el botón Reintentar de la card de error del assistant.
+  /// Un pendiente se confirma, un no-entregado va por su camino, y un mensaje
+  /// ya admitido se manda de nuevo como prompt nuevo.
+  Future<void> retryTurn() async {
+    if (_disposed || _sessionGone) return;
+    for (var i = _messages.length - 1; i >= 0; i--) {
+      final m = _messages[i];
+      if (m is! UserMessage) continue;
+      if (m.pendingSend) {
+        await confirmSend(m.id);
+        return;
+      }
+      if (m.notDelivered || m.id.startsWith('local_')) {
+        await retrySend(m.id);
+        return;
+      }
+      _error = null;
+      await send(
+        m.text,
+        files: [
+          for (final f in m.files)
+            {
+              'uri': f.uri,
+              if (f.name != null) 'name': f.name!,
+              if (f.mime != null) 'mime': f.mime!,
+            },
+        ],
+        agents: m.agents,
+      );
+      return;
+    }
+    // Sin prompt previo no hay qué reintentar: se limpia el error y se relee.
+    _error = null;
+    await refresh();
   }
 
   /// El id del assistant **abierto**: el último de la lista, que es al que
@@ -1018,11 +1136,35 @@ class ChatViewModel extends ChangeNotifier {
   /// No queda ni rastro local: el mensaje nunca estuvo en el server, así que
   /// ningún re-fetch lo puede resucitar. El `removeWhere` por id es lo que
   /// garantiza eso.
+  ///
+  /// Se guarda para [restorePending]: la vista ofrece Deshacer 5 s en un
+  /// SnackBar, y si el usuario lo toca el mensaje vuelve a su lugar.
+  UserMessage? _lastDiscarded;
+  int _lastDiscardedIndex = -1;
+
   void discardPending(String localId) {
     final at = _indexOfUser(localId);
     if (at < 0) return;
+    final m = _messages[at];
     _messages.removeAt(at);
+    if (m is UserMessage && m.pendingSend) {
+      _lastDiscarded = m;
+      _lastDiscardedIndex = at;
+    }
     _safeNotify();
+  }
+
+  /// Devuelve el último pendiente descartado a su lugar. `false` si no hay
+  /// nada que restaurar (ya se restauró o nunca se descartó).
+  bool restorePending() {
+    final m = _lastDiscarded;
+    if (m == null) return false;
+    _lastDiscarded = null;
+    final at = _lastDiscardedIndex.clamp(0, _messages.length);
+    _lastDiscardedIndex = -1;
+    _messages.insert(at, m);
+    _safeNotify();
+    return true;
   }
 
   /// Manda un pendiente que el usuario confirmó.
@@ -1040,6 +1182,7 @@ class ChatViewModel extends ChangeNotifier {
     _awaitingAssistant = true;
     _busyStatus = null;
     _recomputeWorking();
+    _markActivity();
     _safeNotify();
 
     try {
@@ -1077,9 +1220,53 @@ class ChatViewModel extends ChangeNotifier {
   ];
 
 
-  /// `POST /api/session/{id}/interrupt`. No-op si el server ya estaba idle.
-  Future<void> abort() async {
+  /// Anota actividad del turno para el watchdog. Lo llama cada envío y cada
+  /// evento del stream. Un turno sano emite deltas o eventos seguido; 120 s de
+  /// silencio total es un turno colgado, no uno lento.
+  void _markActivity() {
+    if (_disposed) return;
+    _lastActivity = DateTime.now();
+  }
+
+  /// El chequeo del watchdog: si el turno sigue en curso y lleva
+  /// [watchdogTimeout] sin actividad, timeout (error + abort como reset).
+  /// Corre en cada evento y en cada poll; ver el doc de [_lastActivity].
+  void _checkWatchdog() {
+    if (_disposed || !_working) return;
+    final last = _lastActivity;
+    if (last == null) return;
+    if (DateTime.now().difference(last) < watchdogTimeout) return;
+    unawaited(_onWatchdogTimeout());
+  }
+
+  /// El turno no emitió nada en [watchdogTimeout]: error visible + abort como
+  /// reset local. El interrupt se intenta igual, pero aunque el server no
+  /// conteste la UI no queda clavada en Detener. Si llegó actividad mientras
+  /// se interrumpía, el turno vive y no se pisa.
+  Future<void> _onWatchdogTimeout() async {
+    if (_disposed || !_working) return;
     try {
+      await _api.interrupt(sessionId, directory: directory);
+    } on OchError {
+      // El server no contesta: igual se resetea local.
+    }
+    if (_disposed) return;
+    final last = _lastActivity;
+    if (last != null &&
+        DateTime.now().difference(last) < watchdogTimeout) {
+      return;
+    }
+    _busyStatus = false;
+    _awaitingAssistant = false;
+    _flushDeltas();
+    _recomputeWorking();
+    _error =
+        'El turno dejó de responder (120 s sin novedades). Se detuvo el turno.';
+    _safeNotify();
+  }
+
+  /// `POST /api/session/{id}/interrupt`. No-op si el server ya estaba idle.
+  Future<void> abort() async {    try {
       await _api.interrupt(sessionId, directory: directory);
     } on OchError catch (e) {
       _error = e.message;
@@ -1218,6 +1405,8 @@ class ChatViewModel extends ChangeNotifier {
   /// reasoning, cache}}`. Sin esto el contador de contexto queda congelado
   /// hasta el proximo re-fetch, que durante un turno puede tardar segundos.
   void _applyUsage(Map<String, Object?> data) {
+    final antesCost = _liveCost;
+    final antesTokens = _liveTokens;
     final cost = data['cost'];
     if (cost is num) _liveCost = cost.toDouble();
     final tokens = asMap(data['tokens']);
@@ -1240,7 +1429,9 @@ class ChatViewModel extends ChangeNotifier {
       final cacheRead = asNum(asMap(tokens['cache'])?['read']) ?? 0;
       _liveTokens = (input + cacheRead + reasoning).toInt();
     }
-    _safeNotify();
+    // Mismo valor, mismo número: un evento de uso que no cambia nada no
+    // rebuilda el chat.
+    if (_liveTokens != antesTokens || _liveCost != antesCost) _safeNotify();
   }
 
   /// `session.renamed` - el server titulo la sesion sola.
@@ -1261,6 +1452,12 @@ class ChatViewModel extends ChangeNotifier {
     // equivocado (o a todos).
     final id = _eventSessionId(event);
     if (id != null && id != sessionId) return;
+
+    // El chequeo va antes de anotar: si el turno llevaba 120 s callado, este
+    // evento llega tarde y el timeout ya corresponde.
+    _checkWatchdog();
+    // Hay actividad del turno: el watchdog vuelve a contar desde acá.
+    _markActivity();
 
     // Dedupe por id de evento: al reconectar, el server re-emite desde el
     // principio (no hay ?after= funcional porque su endpoint da 404) y los
@@ -1635,11 +1832,25 @@ class ChatViewModel extends ChangeNotifier {
   /// 30 mensajes por página: la misma ventana que el cliente de escritorio y
   /// la del prototipo ("Cargar 30 anteriores").
   /// Política de consumo. Con datos móviles se recorta el polling, la página y
-  /// el streaming (ver `DataPolicy`). Es inyectable para tests.
-  final DataPolicy _policy;
+  /// el streaming (ver `DataPolicy`). Es inyectable para tests y mutable por
+  /// [updatePolicy]: la red puede cambiar sin reconstruir el chat.
+  DataPolicy _policy;
 
   /// La política activa. El chat lee "qué hacer", no la regla.
   DataPolicy get policy => _policy;
+
+  /// Cambia la política sin reconstruir el viewmodel (la red cambió).
+  ///
+  /// Si el poll estaba corriendo se reinicia para aplicar el intervalo nuevo;
+  /// si no, sólo se guarda y se avisa para que la vista relea (imágenes, etc.).
+  void updatePolicy(DataPolicy policy) {
+    _policy = policy;
+    if (_pollTimer != null) {
+      _stopPolling();
+      _startPolling();
+    }
+    _safeNotify();
+  }
   static const int pageSize = 30;
 
   /// Buffer de deltas: 50 ms ⇒ 20 fps.
@@ -1745,6 +1956,15 @@ class ChatViewModel extends ChangeNotifier {
     _messages
       ..clear()
       ..addAll(merged);
+    _capMessages();
+  }
+
+  /// Recorta la lista a [maxMessages] por el frente (los más viejos). Los
+  /// optimistas (`local_…`) van al final, así que nunca caen en el corte; y lo
+  /// recortado sigue en el server y vuelve con "Cargar anteriores".
+  void _capMessages() {
+    if (_messages.length <= maxMessages) return;
+    _messages.removeRange(0, _messages.length - maxMessages);
   }
 
   void _recomputeWorking() {

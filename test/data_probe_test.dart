@@ -494,11 +494,12 @@ void main() {
       const seconds = 20;
       final config = mirror.local(upstream.username, upstream.password);
       final client = HttpClient();
+      // ADJUDICADO 2026-10-11: la auth del stream es el header Basic solo
+      // (medido: da 200 en `/api/event` sin query). El `?auth_token=` ya no se
+      // manda desde la app; la sonda mide lo mismo que la app hace.
       final req = await client.openUrl(
         'GET',
-        Uri.parse(
-          '${config.baseUrl}/api/event?auth_token=${config.authTokenQuery}',
-        ),
+        Uri.parse('${config.baseUrl}/api/event'),
       );
       req.headers.set(
         HttpHeaders.authorizationHeader,

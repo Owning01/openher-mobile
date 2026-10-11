@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:http/http.dart' as http;
 
+import '../../domain/models/errors.dart';
 import '../../domain/models/event.dart';
 import 'server_config.dart';
 
@@ -275,8 +276,9 @@ _Frame _parseFrame(String frame) {
 /// Dos detalles que el server no perdona:
 /// - **Nunca** mandar `sessionID` como query del stream: no está declarado en el
 ///   schema y el middleware responde **400**.
-/// - La auth va en `?auth_token=` (carrier que el server chequea antes del
-///   header). La URL se redacta antes de cualquier log.
+/// - La auth va **sólo** en el header `Authorization: Basic` (medido: el header
+///   solo da 200 en `/api/event`). El query **no** lleva `?auth_token=`: exponer
+///   la credencial en la URL la deja en logs y el server no lo necesita.
 ///
 /// ## Reanudación: NO implementada (y por qué)
 ///
@@ -363,9 +365,10 @@ class SseClient {
   /// pero el default **no** lo manda: ver la nota de reanudación de la clase.
   int? get lastSeq => _lastSeq;
 
-  /// URL del stream, con `auth_token` y **sin** `sessionID`. Contiene la
-  /// credencial: para mostrarla o loguearla, pasarla por
-  /// [ServerConfig.redactAuthToken].
+  /// URL del stream, **sin** credencial en el query y **sin** `sessionID`.
+  /// La auth viaja en el header `Authorization: Basic` (medido: el header solo
+  /// da 200 en `/api/event`), así que no hay nada que redactar antes de
+  /// loguearla; igual se le pasa [ServerConfig.redactAuthToken] por costumbre.
   ///
   /// [after] se acepta para no romper la firma que sobreescriben los
   /// consumidores, pero el default **lo ignora a propósito**: mandar `?after=`
@@ -374,12 +377,11 @@ class SseClient {
   Uri streamUri({int? after}) => config.api(
     '/event',
     query: <String, String?>{
-      if (config.authTokenQuery != null)
-        ServerConfig.authTokenParam: config.authTokenQuery,
       if (directory != null && directory!.isNotEmpty)
         ServerConfig.locationParam: directory,
-      // OJO: acá NO va `sessionID` (400 del middleware, §7.3) ni `after`
-      // (no hay endpoint medido que lo acepte).
+      // OJO: acá NO va `sessionID` (400 del middleware, §7.3), ni `after`
+      // (no hay endpoint medido que lo acepte), ni `auth_token` (la auth es
+      // el header Basic: el query expondría la credencial sin necesidad).
     },
   );
 
@@ -419,7 +421,12 @@ class SseClient {
       } catch (error) {
         attempt++;
         developer.log(
-          'sse: caída ($error) ${ServerConfig.redactAuthToken(streamUri())}',
+          'sse: caída (${sanitizeForDisplay(
+            '$error',
+            password: config.password,
+            username: config.username,
+            authToken: config.authTokenQuery,
+          )}) ${ServerConfig.redactAuthToken(streamUri())}',
           name: 'openher.sse',
         );
       }
@@ -436,8 +443,8 @@ class SseClient {
     final request = http.Request('GET', streamUri())
       ..headers['accept'] = 'text/event-stream'
       ..headers['cache-control'] = 'no-store';
-    // El query ya autentica (el server lo precedencea), pero el header no estorba
-    // y deja el stream funcionando si una URL con el token se pierde en un log.
+    // La auth es el header Basic y nada más (medido: da 200 en `/api/event`
+    // sin ningún query). El query no lleva credencial.
     final auth = config.basicAuthHeader;
     if (auth != null) request.headers['authorization'] = auth;
 

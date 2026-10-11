@@ -136,7 +136,13 @@ class CredsStore {
       _store.write(storageKey, jsonEncode(config.toJson()));
 
   /// Borra las credenciales. Idempotente.
-  Future<void> clear() => _store.delete(storageKey);
+  ///
+  /// Limpia también la caché en memoria: sin esto, un `load()` posterior
+  /// devuelve la config vieja sin tocar el disco y el "cerrar sesión" miente.
+  Future<void> clear() async {
+    await _store.delete(storageKey);
+    _cached = null;
+  }
 
   /// Última [ServerConfig] leída, para no volver a pegarle a la Keystore en
   /// cada build. `null` hasta que se llama a [load] o a [remember].

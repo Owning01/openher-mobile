@@ -413,6 +413,7 @@ void main() {
       WidgetTester tester,
       FilesViewModel model, {
       void Function(String path)? onAddToChat,
+      bool onCellular = false,
     }) async {
       tester.view.physicalSize = const Size(500, 1200);
       tester.view.devicePixelRatio = 1;
@@ -424,6 +425,7 @@ void main() {
             config: kConfig,
             onAddToChat: onAddToChat ?? (_) {},
             viewModel: model,
+            onCellular: onCellular,
           ),
         ),
       );
@@ -608,6 +610,34 @@ void main() {
         find.byKey(FilesView.sheetActionKey(FileAction.download.name)),
       );
       await tester.pumpAndSettle();
+      // ADJUDICADO 2026-10-11: la descarga se confirma SIEMPRE (tipo y
+      // nombre) antes de bajar un byte. Sin el tap en el diálogo no hay
+      // request: es el guard contra descargas sin preguntar.
+      expect(
+        find.textContaining('mockup-bar.html'),
+        findsWidgets,
+        reason: 'la confirmación dice qué se va a bajar',
+      );
+      expect(reads, isEmpty, reason: 'sin confirmar no hay request');
+      await tester.tap(find.byKey(const Key('files-download-confirm')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // En widget no se puede afirmar el compartir: `writeAsBytes` es I/O
+      // real y bajo `flutter_test` no completa (fake async). Lo que prueba el
+      // fix es que la request sale y los bytes se aceptan (el repo-test de
+      // arriba afirma los bytes); acá se afirma que no hay freno ni error.
+      expect(reads, hasLength(1), reason: 'la descarga sale a la red');
+      // El progreso es indeterminado (spinner infinito): sin cerrarlo el
+      // settle no termina nunca. Si la descarga ya lo cerró solo, no hay nada.
+      // `.last`: el diálogo de progreso está encima del de confirmación (que
+      // todavía se está animando al cerrar).
+      final cancelar = find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.text('Cancelar'),
+      );
+      if (cancelar.evaluate().isNotEmpty) await tester.tap(cancelar.last);
+      await tester.pumpAndSettle();
 
       // En widget no se puede afirmar el compartir: `writeAsBytes` es I/O
       // real y bajo `flutter_test` no completa (fake async). Lo que prueba el
@@ -770,6 +800,91 @@ void main() {
 
       expect(find.text('Actualizar'), findsOneWidget);
       expect(find.text('Ir a la raíz'), findsOneWidget);
+    });
+
+    testWidgets('la descarga se confirma con tipo y avisa con datos móviles', (
+      tester,
+    ) async {
+      final model = FilesViewModel(
+        repository: _repo(
+          _FakeFs('{"data":[{"path":"informe.pdf","type":"file"}]}'),
+        ),
+      );
+      addTearDown(model.dispose);
+      await model.load('docs');
+      await pumpView(tester, model, onCellular: true);
+
+      await tester.longPress(find.byKey(FilesView.rowKey('informe.pdf')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(FilesView.sheetActionKey(FileAction.download.name)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Descargar archivo'), findsOneWidget);
+      expect(find.textContaining('informe.pdf'), findsWidgets);
+      expect(find.textContaining('PDF'), findsWidgets);
+      expect(
+        find.textContaining('datos móviles'),
+        findsOneWidget,
+        reason: 'con cellular se avisa que consume el plan',
+      );
+    });
+
+    testWidgets('abrir en el navegador confirma con la URL redactada', (
+      tester,
+    ) async {
+      await pumpFiles(
+        tester,
+        body: '{"data":[{"path":"docs/pagina.html","type":"file"}]}',
+      );
+
+      await tester.longPress(find.byKey(FilesView.rowKey('docs/pagina.html')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(FilesView.sheetActionKey(FileAction.openInBrowser.name)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Abrir en el navegador'), findsWidgets);
+      // La URL visible no puede llevar la credencial.
+      final dialogText = tester
+          .widgetList<Text>(find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.byType(Text),
+          ))
+          .map((w) => w.data ?? '')
+          .join();
+      expect(dialogText, contains('auth_token=REDACTED'));
+      expect(dialogText, isNot(contains('aHVudGVyMg==')));
+      expect(dialogText, contains('historial'));
+    });
+
+    testWidgets('al buscar aparece el chip Buscando-en y sale al borrarse', (
+      tester,
+    ) async {
+      final fake = _FakeFs(
+        '{"data":[{"path":"lib","type":"directory"},'
+        '{"path":"lib/main.dart","type":"file"}]}',
+      );
+      final model = FilesViewModel(repository: _repo(fake));
+      addTearDown(model.dispose);
+      await pumpView(tester, model);
+      await model.openDrive('C:/');
+      await tester.pumpAndSettle();
+      fake.requests.clear();
+
+      await _tapIcon(tester, 'Buscar archivos');
+      await tester.enterText(find.byKey(FilesView.searchFieldKey), 'main');
+      await tester.pump(FilesView.searchDebounce);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('files-searching')), findsOneWidget);
+      expect(find.textContaining('Buscando en'), findsOneWidget);
+
+      await tester.tap(find.byIcon(Icons.close));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('files-searching')), findsNothing);
     });
   });
 

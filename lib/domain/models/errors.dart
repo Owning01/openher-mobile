@@ -256,3 +256,47 @@ String prettyJson(Object? value) {
     return value.toString();
   }
 }
+
+/// Redacta secretos de [text] antes de mostrarlo en UI o mandarlo a un log.
+///
+/// Opera en dos niveles:
+///
+/// 1. **Siempre**, sin conocer los valores: `?auth_token=<valor>` (o
+///    `&auth_token=`) se reemplaza por `?auth_token=REDACTED`, y un header
+///    `Basic <base64>` por `Basic REDACTED`. El carrier del SSE y del
+///    navegador lleva `base64(user:pass)`, y los logs de Android los lee
+///    cualquiera con `adb logcat`.
+/// 2. **Con valores** ([password], [username], [authToken]): borra esos
+///    literales y el `base64(user:pass)` que viaja en el header y en el query.
+///
+/// Nunca tira y nunca devuelve secretos: un texto sin nada que redactar sale
+/// igual.
+String sanitizeForDisplay(
+  String text, {
+  String? password,
+  String? username,
+  String? authToken,
+}) {
+  var out = text.replaceAllMapped(
+    RegExp(r'([?&]auth_token=)[^&\s]+'),
+    (m) => '${m.group(1)}REDACTED',
+  );
+  out = out.replaceAllMapped(
+    RegExp(r'Basic [A-Za-z0-9+/=]+'),
+    (_) => 'Basic REDACTED',
+  );
+  final secrets = <String>{
+    if (authToken != null && authToken.isNotEmpty) authToken,
+    if (password != null && password.isNotEmpty) password,
+    if (username != null && username.isNotEmpty) username,
+    if (username != null &&
+        username.isNotEmpty &&
+        password != null &&
+        password.isNotEmpty)
+      base64Encode(utf8.encode('$username:$password')),
+  };
+  for (final secret in secrets) {
+    out = out.split(secret).join('***');
+  }
+  return out;
+}

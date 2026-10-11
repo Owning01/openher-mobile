@@ -9,7 +9,6 @@ library;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:openher_mobile/core/network/api_client.dart';
 import 'package:openher_mobile/core/network/server_config.dart';
 import 'package:openher_mobile/data/repositories/file_repository.dart';
 import 'package:openher_mobile/ui/features/files/files_viewmodel.dart';

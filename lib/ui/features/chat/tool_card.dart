@@ -39,6 +39,8 @@ class ToolCard extends StatefulWidget {
     required this.tool,
     this.onOpenDiff,
     this.onCopy,
+    this.onRetryTurn,
+    this.onStopTurn,
     this.live = true,
   });
 
@@ -58,12 +60,26 @@ class ToolCard extends StatefulWidget {
   /// hay acción.
   final ValueChanged<AssistantTool>? onOpenDiff;
 
+  /// Reintentar el turno entero desde una card de error. `null` ⇒ sin chip de
+  /// reintento. Lo cablea el shell en `chat_view`.
+  final VoidCallback? onRetryTurn;
+
+  /// Detener el turno desde una card de error. `null` ⇒ sin chip de detenido.
+  /// Lo cablea el shell en `chat_view`.
+  final VoidCallback? onStopTurn;
+
   /// Override del copiado (tests, o un toast propio del shell).
   final ValueChanged<String>? onCopy;
 
   /// Fila principal. Permite que el test apunte al widget exacto y no a un
   /// texto que se repite entre tarjetas.
   static const Key headKey = Key('toolcard-head');
+
+  /// Chip de reintento en la card de error. Sólo existe con `onRetryTurn`.
+  static const Key retryKey = Key('toolcard-retry');
+
+  /// Chip de detenido en la card de error. Sólo existe con `onStopTurn`.
+  static const Key stopKey = Key('toolcard-stop');
 
   @override
   State<ToolCard> createState() => _ToolCardState();
@@ -83,6 +99,15 @@ class _ToolCardState extends State<ToolCard> {
     const withDiff = {'edit', 'write', 'patch'};
     return withDiff.contains(_tool.name);
   }
+
+  void _toggle() => setState(() => _expanded = !_expanded);
+
+  /// Copia la salida sin tocar el plegado: el long-press no expande.
+  void _copyOutput() => _copy(_outputText());
+
+  /// Lo que anuncia el lector sobre la fila: nombre y estado, sin abrir.
+  String get _headLabel =>
+      'Herramienta ${_tool.name}, ${toolStateName(_state)}';
 
   @override
   Widget build(BuildContext context) {
@@ -131,9 +156,17 @@ class _ToolCardState extends State<ToolCard> {
     return Semantics(
       button: true,
       expanded: _expanded,
+      label: _headLabel,
+      // Un solo anuncio ("Herramienta shell, error") en vez del nombre más
+      // el subtítulo más el estado por separado. El `onTap` va acá y en el
+      // `InkWell`; el long-press copia la salida sin expandir, en los dos.
+      excludeSemantics: true,
+      onTap: _toggle,
+      onLongPress: _copyOutput,
       child: InkWell(
         key: ToolCard.headKey,
-        onTap: () => setState(() => _expanded = !_expanded),
+        onTap: _toggle,
+        onLongPress: _copyOutput,
         // `.toolhead:hover{background:var(--surface-subtle)}` (:288).
         hoverColor: scheme.surfaceContainerLow,
         child: SizedBox(
@@ -261,22 +294,46 @@ class _ToolCardState extends State<ToolCard> {
             ),
             child: LayerGate(
               'chat.toolcard.footer',
-              child: Row(
-                children: [
-                  _ChipButton(
-                    icon: 'copy',
-                    label: 'Copiar',
-                    onTap: () => _copy(code),
-                  ),
-                  if (_hasDiff && widget.onOpenDiff != null) ...[
-                    const SizedBox(width: AppSpacing.sm),
+              // Con tres chips (error con reintento y detenido) la fila no
+              // entra en 360 px: scrollea en vez de desbordar (medido 1.3 px
+              // de overflow en tests). Con dos no cambia nada.
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    if (_isError && widget.onRetryTurn != null) ...[
+                      _ChipButton(
+                        key: ToolCard.retryKey,
+                        icon: 'refresh',
+                        label: 'Reintentar',
+                        onTap: widget.onRetryTurn!,
+                      ),
+                      const SizedBox(width: AppSpacing.sm),
+                    ],
                     _ChipButton(
-                      icon: 'git-branch',
-                      label: 'Abrir diff',
-                      onTap: () => widget.onOpenDiff?.call(_tool),
+                      icon: 'copy',
+                      label: 'Copiar',
+                      onTap: () => _copy(code),
                     ),
+                    if (_hasDiff && widget.onOpenDiff != null) ...[
+                      const SizedBox(width: AppSpacing.sm),
+                      _ChipButton(
+                        icon: 'git-branch',
+                        label: 'Abrir diff',
+                        onTap: () => widget.onOpenDiff?.call(_tool),
+                      ),
+                    ],
+                    if (_isError && widget.onStopTurn != null) ...[
+                      const SizedBox(width: AppSpacing.sm),
+                      _ChipButton(
+                        key: ToolCard.stopKey,
+                        icon: 'stop',
+                        label: 'Detener',
+                        onTap: widget.onStopTurn!,
+                      ),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
           ),
@@ -369,6 +426,15 @@ String toolIcon(String name) => kToolInfo[name]?.icon ?? 'terminal';
 String toolCategory(String name) =>
     kToolInfo[name]?.category ?? name.toUpperCase();
 
+/// El estado de un tool en una palabra, para el anuncio del lector
+/// ("Herramienta shell, error"). En minúscula a propósito: es continuación
+/// de la frase del nombre, no un título.
+String toolStateName(ToolState state) => switch (state) {
+  ToolError() => 'error',
+  ToolRunning() => 'ejecutando',
+  ToolPending() => 'pendiente',
+  ToolCompleted() => 'completada',
+};
 /// Una línea: el comando o el resumen de la tool. Sale del `input` crudo, que
 /// es `String` en `pending` y mapa en el resto (`tool.dart`); por eso el
 /// fallback es [ToolStateBase.inputText] y no un cast.
@@ -424,24 +490,33 @@ class _Dot extends StatelessWidget {
 }
 
 /// 12 px, como el `.spin` del prototipo.
+///
+/// Sin animaciones es un punto quieto: un giro de 12 px que el sistema pidió
+/// no ver no informa nada.
 class _Spinner extends StatelessWidget {
   const _Spinner();
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-    width: 12,
-    height: 12,
-    child: CircularProgressIndicator(
-      strokeWidth: 1.5,
-      color: Theme.of(context).colorScheme.onSurface,
-    ),
-  );
+  Widget build(BuildContext context) {
+    if (MediaQuery.disableAnimationsOf(context)) {
+      return _Dot(color: Theme.of(context).colorScheme.onSurfaceVariant);
+    }
+    return SizedBox(
+      width: 12,
+      height: 12,
+      child: CircularProgressIndicator(
+        strokeWidth: 1.5,
+        color: Theme.of(context).colorScheme.onSurface,
+      ),
+    );
+  }
 }
 
 /// Chip fantasma del pie (`.chipbtn`, `:307-308`): 26 px de alto, borde 1 px,
 /// 11.5 px y `--muted-strong` en el glifo y en el texto.
 class _ChipButton extends StatelessWidget {
   const _ChipButton({
+    super.key,
     required this.icon,
     required this.label,
     required this.onTap,

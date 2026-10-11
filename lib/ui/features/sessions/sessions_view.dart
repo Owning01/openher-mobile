@@ -1,5 +1,5 @@
 /// Pantalla de sesiones: la lista de las sesiones del server, agrupada por
-/// fecha, con búsqueda, swipe para archivar y menú contextual por long-press.
+/// fecha, con búsqueda, swipe para eliminar y menú contextual por long-press.
 ///
 /// Es el destino 1 de 4 del bottom nav. No conoce la red: recibe un
 /// [SessionsViewModel] ya construido y avisa dos cosas, [onOpen] (tocar una
@@ -15,6 +15,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../../core/storage/creds_store.dart' show redactSecret;
 import '../../../domain/models/message.dart';
 import '../../../domain/models/session.dart';
 import '../../core/app_icon.dart';
@@ -28,6 +29,8 @@ class SessionsView extends StatefulWidget {
     required this.viewmodel,
     required this.onOpen,
     required this.onAction,
+    this.secret = '',
+    this.currentDirectory,
   });
 
   final SessionsViewModel viewmodel;
@@ -44,6 +47,15 @@ class SessionsView extends StatefulWidget {
   /// el olvido es un **error de compilación**, que es la única clase de guarda
   /// que no se puede saltear.
   final void Function(SessionAction action, SessionInfo session) onAction;
+
+  /// Secreto a tachar de los mensajes de error (la contraseña del server). Los
+  /// errores vienen del server, que no controla esta app, y no pueden filtrarla
+  /// a la pantalla. Vacío = no hay nada que tachar.
+  final String secret;
+
+  /// Directorio actual del server, para el estado vacío. `null` = no se sabe
+  /// (todavía no se preguntó) y no se muestra nada.
+  final String? currentDirectory;
 
   // Claves de los widgets que los tests apuntan directo, para no depender de un
   // texto que puede repetirse en pantalla.
@@ -170,24 +182,37 @@ class _SessionsViewState extends State<SessionsView>
     }
   }
 
+  /// Crear con progreso visible y error visible.
+  ///
+  /// El `+` se deshabilita y muestra un spinner mientras el server responde;
+  /// si falla, el error queda en el banner de la pantalla (lo pone el
+  /// viewmodel), no en un silencio.
+  bool _creating = false;
+
   Future<void> _create() async {
-    final id = await widget.viewmodel.create();
-    if (!mounted || id == null || id.isEmpty) return;
-    // Se pasa la sesiÃ³n **entera**, no sÃ³lo el id: el server trae
-    // `agent` y `model` en la lista, y sin ellos el chat se abrÃ­a
-    // sin modelo ni agente (los pills volvÃ­an a "Elegir").
-    final created = widget.viewmodel.findById(id);
-    widget.onOpen(
-      created ??
-          SessionInfo(
-            id: id,
-            projectID: '',
-            title: '',
-            cost: 0,
-            tokens: const TokenUsage(),
-            time: const SessionTime(createdMs: 0, updatedMs: 0),
-          ),
-    );
+    if (_creating) return;
+    setState(() => _creating = true);
+    try {
+      final id = await widget.viewmodel.create();
+      if (!mounted || id == null || id.isEmpty) return;
+      // Se pasa la sesiÃ³n **entera**, no sÃ³lo el id: el server trae
+      // `agent` y `model` en la lista, y sin ellos el chat se abrÃ­a
+      // sin modelo ni agente (los pills volvÃ­an a "Elegir").
+      final created = widget.viewmodel.findById(id);
+      widget.onOpen(
+        created ??
+            SessionInfo(
+              id: id,
+              projectID: '',
+              title: '',
+              cost: 0,
+              tokens: const TokenUsage(),
+              time: const SessionTime(createdMs: 0, updatedMs: 0),
+            ),
+      );
+    } finally {
+      if (mounted) setState(() => _creating = false);
+    }
   }
 
   /// Swipe a la izquierda: **eliminar**.
@@ -234,9 +259,16 @@ class _SessionsViewState extends State<SessionsView>
     // El `ListenableBuilder` envuelve **todo** el Scaffold, app bar incluido:
     // el botón `+` se deshabilita mientras carga, y si el builder sólo cubriera
     // el body el app bar quedaría congelado con el `loading` del primer frame.
-    return ListenableBuilder(
-      listenable: widget.viewmodel,
-      builder: (context, _) => Scaffold(
+    // El `PopScope` cierra la búsqueda con el botón atrás del sistema: con el
+    // buscador abierto, atrás limpia el filtro en vez de salir de la pantalla.
+    return PopScope(
+      canPop: !_searchOpen,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _searchOpen) _toggleSearch();
+      },
+      child: ListenableBuilder(
+        listenable: widget.viewmodel,
+        builder: (context, _) => Scaffold(
         appBar: LayerGate(
           'sessions.appbar',
           child: AppBar(
@@ -273,12 +305,25 @@ class _SessionsViewState extends State<SessionsView>
               ),
               LayerGate(
                 'sessions.appbar.add',
-                child: AppIconButton(
-                  key: SessionsView.addButtonKey,
-                  icon: 'plus',
-                  tooltip: 'Nueva sesión',
-                  onPressed: widget.viewmodel.loading ? null : _create,
-                ),
+                // Creando: spinner en lugar del `+` y botón apagado. Sin esto
+                // el toque parecía no hacer nada hasta que el server respondía.
+                child: _creating
+                    ? const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                    : AppIconButton(
+                        key: SessionsView.addButtonKey,
+                        icon: 'plus',
+                        tooltip: 'Nueva sesión',
+                        onPressed: widget.viewmodel.loading
+                            ? null
+                            : _create,
+                      ),
               ),
               const SizedBox(width: AppSpacing.xs),
             ],
@@ -296,10 +341,12 @@ class _SessionsViewState extends State<SessionsView>
                   onClose: _toggleSearch,
                 ),
               ),
-            if (widget.viewmodel.error != null) _ErrorBanner(widget.viewmodel),
+            if (widget.viewmodel.error != null)
+              _ErrorBanner(widget.viewmodel, secret: widget.secret),
             Expanded(child: _body(widget.viewmodel)),
           ],
         ),
+      ),
       ),
     );
   }
@@ -317,9 +364,19 @@ class _SessionsViewState extends State<SessionsView>
       );
     }
     final groups = vm.groups;
+    if (groups.isEmpty) {
+      // Búsqueda sin resultados: se dice con la query, no con el vacío
+      // general. "Sin sesiones" con un filtro puesto miente: sesiones hay, lo
+      // que no hay es sesiones que coincidan.
+      if (vm.query.trim().isNotEmpty) return _NoResults(vm);
+      return RefreshIndicator(
+        onRefresh: vm.refresh,
+        child: _EmptyBody(directory: widget.currentDirectory),
+      );
+    }
     return RefreshIndicator(
       onRefresh: vm.refresh,
-      child: groups.isEmpty ? const _EmptyBody() : _groupedList(vm, groups),
+      child: _groupedList(vm, groups),
     );
   }
 
@@ -491,10 +548,10 @@ class _SessionRow extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                AppIcon('list-checks', size: 14, color: _onDanger(brightness)),
+                AppIcon('trash', size: 14, color: _onDanger(brightness)),
                 const SizedBox(height: 2),
                 Text(
-                  'Archivar',
+                  'Eliminar',
                   style: theme.textTheme.labelSmall?.copyWith(
                     color: _onDanger(brightness),
                     fontWeight: FontWeight.w600,
@@ -881,7 +938,9 @@ class _SearchBar extends StatelessWidget {
 /// Estado vacío dentro de un scroller, para que el pull-to-refresh siga
 /// funcionando cuando no hay nada que mostrar.
 class _EmptyBody extends StatelessWidget {
-  const _EmptyBody();
+  const _EmptyBody({this.directory});
+
+  final String? directory;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -889,7 +948,7 @@ class _EmptyBody extends StatelessWidget {
       physics: const AlwaysScrollableScrollPhysics(),
       child: ConstrainedBox(
         constraints: BoxConstraints(minHeight: constraints.maxHeight),
-        child: const Center(child: _EmptyState()),
+        child: Center(child: _EmptyState(directory: directory)),
       ),
     ),
   );
@@ -897,11 +956,16 @@ class _EmptyBody extends StatelessWidget {
 
 /// Sin sesiones en el server.
 class _EmptyState extends StatelessWidget {
-  const _EmptyState();
+  const _EmptyState({this.directory});
+
+  /// Directorio actual del server: dice dónde se va a crear la sesión del `+`.
+  /// `null` = no se sabe y no se muestra.
+  final String? directory;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final cwd = (directory ?? '').trim();
     return Center(
       key: SessionsView.emptyKey,
       child: Padding(
@@ -922,7 +986,74 @@ class _EmptyState extends StatelessWidget {
               textAlign: TextAlign.center,
               style: theme.textTheme.bodySmall,
             ),
+            if (cwd.isNotEmpty) ...[
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                cwd,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                ),
+              ),
+            ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Búsqueda sin coincidencias: honesta y con salida. Limpia el filtro sin
+/// cerrar el buscador.
+class _NoResults extends StatelessWidget {
+  const _NoResults(this.vm);
+
+  final SessionsViewModel vm;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: constraints.maxHeight),
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(AppSpacing.xxl),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  AppIcon(
+                    'search',
+                    size: 48,
+                    color: theme.colorScheme.onSurfaceVariant.withValues(
+                      alpha: 0.7,
+                    ),
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(
+                    'Sin resultados',
+                    style: theme.textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: AppSpacing.xs),
+                  Text(
+                    'Nada coincide con "${vm.query.trim()}".',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                  TextButton(
+                    onPressed: () => vm.search(''),
+                    child: const Text('Limpiar búsqueda'),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -931,9 +1062,13 @@ class _EmptyState extends StatelessWidget {
 
 /// Error de carga: el motivo y un botón para reintentar.
 class _ErrorBanner extends StatelessWidget {
-  const _ErrorBanner(this.vm);
+  const _ErrorBanner(this.vm, {this.secret = ''});
 
   final SessionsViewModel vm;
+
+  /// Secreto a tachar del mensaje (la contraseña del server, que puede venir
+  /// pegada en una URL del error crudo).
+  final String secret;
 
   @override
   Widget build(BuildContext context) {
@@ -952,7 +1087,7 @@ class _ErrorBanner extends StatelessWidget {
         children: [
           Expanded(
             child: Text(
-              vm.error!,
+              redactSecret(vm.error!, secret),
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.error,
               ),

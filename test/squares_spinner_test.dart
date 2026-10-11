@@ -192,6 +192,46 @@ void main() {
     expect(find.bySemanticsLabel('Pensando'), findsOneWidget);
   });
 
+  testWidgets('sin animaciones la grilla es estática pero se anuncia', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(240, 120);
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: MediaQuery(
+              data: const MediaQueryData(disableAnimations: true),
+              child: const RepaintBoundary(child: SquaresSpinner()),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 700));
+
+    // Los 8 cuadrados siguen ahí, quietos: nada los anima.
+    expect(
+      find.descendant(
+        of: find.byType(SquaresSpinner),
+        matching: find.byType(DecoratedBox),
+      ),
+      findsNWidgets(8),
+    );
+    expect(
+      find.descendant(
+        of: find.byType(SquaresSpinner),
+        matching: find.byType(AnimatedBuilder),
+      ),
+      findsNothing,
+    );
+    // El estado se anuncia igual, sólo que quieto.
+    expect(find.bySemanticsLabel('Pensando'), findsOneWidget);
+  });
+
   // ───────────────────── los PNG del spinner ─────────────────────
   //
   // Un golden por cada uno de los **8 pasos** del ciclo, más dos del tema

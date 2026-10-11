@@ -77,16 +77,23 @@ class UpdateBanner extends StatelessWidget {
                 ),
               ],
               if (state.phase == UpdatePhase.available ||
-                  state.phase == UpdatePhase.ready) ...[
+                  state.phase == UpdatePhase.ready ||
+                  state.phase == UpdatePhase.installDenied) ...[
                 const SizedBox(height: 2),
                 _Action(
-                  label: state.phase == UpdatePhase.ready
-                      ? 'Instalar'
-                      : 'Descargar y actualizar',
-                  icon: state.phase == UpdatePhase.ready ? 'check' : 'download',
-                  onPressed: state.phase == UpdatePhase.ready
-                      ? onInstall
-                      : onDownload,
+                  label: switch (state.phase) {
+                    UpdatePhase.ready => 'Instalar',
+                    UpdatePhase.installDenied => 'Permitir instalación',
+                    _ => 'Descargar y actualizar',
+                  },
+                  icon: switch (state.phase) {
+                    UpdatePhase.ready => 'check',
+                    UpdatePhase.installDenied => 'settings',
+                    _ => 'download',
+                  },
+                  onPressed: state.phase == UpdatePhase.available
+                      ? onDownload
+                      : onInstall,
                 ),
               ],
               // El reintento. Solo aparece si la descarga se pudo empezar y se
@@ -122,7 +129,12 @@ class UpdateBanner extends StatelessWidget {
   String get _headline => switch (state.phase) {
     UpdatePhase.downloading => _downloading,
     UpdatePhase.ready =>
-      'OpenHer ${state.info?.version ?? ''} lista para instalar',
+      'OpenHer ${state.info?.version ?? ''} lista para instalar'
+      '${state.info?.sha256.isNotEmpty == true ? ' · SHA-256 ${state.info!.fingerprint}' : ''}',
+    // Sin el permiso Android no abre el instalador: el motivo y el qué hacer
+    // van en la banda, no en un toast que se va solo.
+    UpdatePhase.installDenied =>
+      state.error ?? 'Falta el permiso para instalar aplicaciones.',
     // El motivo va en la banda, no en un toast que se va solo: el usuario va a
     // mirar la banda justo cuando decide si reintentar, y ahí está el dato.
     UpdatePhase.failed when state.canRetry =>
@@ -130,14 +142,20 @@ class UpdateBanner extends StatelessWidget {
           '${state.error ?? 'sin detalle'}',
     _ =>
       'Hay OpenHer ${state.info?.version ?? ''} disponible'
-          '${state.info?.notes.isNotEmpty == true ? ' · ${state.info!.notes}' : ''}',
+          '${state.info?.notes.isNotEmpty == true ? ' · ${state.info!.notes}' : ''}'
+          '${state.info?.sha256.isNotEmpty == true ? ' · SHA-256 ${state.info!.fingerprint}' : ''}',
   };
 
   String get _downloading {
     final p = state.progress;
     if (p == null) return 'Descargando la actualización...';
-    return 'Descargando ${(p * 100).round()}%';
+    // MB totales: un porcentaje sin tamaño no dice si faltan 2 MB o 50.
+    return 'Descargando ${_mb(state.received)} de ${_mb(state.total)} '
+        '(${(p * 100).round()}%)';
   }
+
+  static String _mb(int bytes) =>
+      '${(bytes / 1048576).toStringAsFixed(1)} MB';
 }
 
 /// Botón de texto plano, a la altura de la banda (no un `FilledButton` de 48 px

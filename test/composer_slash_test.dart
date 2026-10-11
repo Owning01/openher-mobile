@@ -1,12 +1,7 @@
-import 'dart:convert';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
-import 'package:openher_mobile/core/network/api_client.dart';
-import 'package:openher_mobile/core/network/server_config.dart';
-import 'package:openher_mobile/domain/models/agent_catalog.dart';
 import 'package:openher_mobile/ui/core/layer_gate.dart';
 import 'package:openher_mobile/ui/core/theme.dart';
 import 'package:openher_mobile/ui/features/chat/composer.dart';
@@ -473,6 +468,114 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(vistos.last, '-');
+    });
+  });
+
+  group('anti doble-envío: un POST por mensaje', () {
+    testWidgets('dos toques seguidos con el POST en vuelo mandan uno solo', (
+      tester,
+    ) async {
+      var llamadas = 0;
+      final vuelo = Completer<void>();
+      await pumpComposer(
+        tester,
+        suggestions: const [],
+        onSend: (text, _) async {
+          llamadas++;
+          await vuelo.future;
+        },
+      );
+
+      await tester.enterText(find.byKey(ChatComposer.inputKey), 'hola');
+      await tester.pump();
+      await tester.tap(find.byKey(ChatComposer.sendKey));
+      await tester.pump();
+
+      // En vuelo el botón se deshabilita: no hay segundo toque que entre.
+      final tinta = tester.widget<InkWell>(
+        find.descendant(
+          of: find.byKey(ChatComposer.sendKey),
+          matching: find.byType(InkWell),
+        ),
+      );
+      expect(tinta.onTap, isNull, reason: 'en vuelo no se puede reenviar');
+      // Ni por teclado: el Enter en vuelo tampoco reentra.
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(llamadas, 1);
+      // Y el texto sigue ahí: sólo se limpia tras admitir.
+      expect(
+        tester.widget<TextField>(find.byKey(ChatComposer.inputKey)).controller!.text,
+        'hola',
+      );
+
+      vuelo.complete();
+      await tester.pumpAndSettle();
+
+      expect(llamadas, 1);
+      expect(
+        tester.widget<TextField>(find.byKey(ChatComposer.inputKey)).controller!.text,
+        isEmpty,
+        reason: 'admitido: se limpia',
+      );
+    });
+
+    testWidgets('si el envío falla, el texto se restaura íntegro', (
+      tester,
+    ) async {
+      await pumpComposer(
+        tester,
+        suggestions: const [],
+        onSend: (text, _) {
+          throw StateError('red caída');
+        },
+      );
+
+      await tester.enterText(find.byKey(ChatComposer.inputKey), 'hola mundo');
+      await tester.pump();
+      await tester.tap(find.byKey(ChatComposer.sendKey));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(find.byKey(ChatComposer.inputKey)).controller!.text,
+        'hola mundo',
+        reason: 'el fallo no se lleva lo escrito',
+      );
+      expect(find.text('No se pudo enviar.'), findsOneWidget);
+    });
+
+    testWidgets('si el POST falla, el texto se restaura íntegro', (
+      tester,
+    ) async {
+      final vuelo = Completer<void>();
+      await pumpComposer(
+        tester,
+        suggestions: const [],
+        onSend: (text, _) async {
+          await vuelo.future;
+          throw StateError('400 del server');
+        },
+      );
+
+      await tester.enterText(find.byKey(ChatComposer.inputKey), 'revisá esto');
+      await tester.pump();
+      await tester.tap(find.byKey(ChatComposer.sendKey));
+      await tester.pump();
+      // En vuelo todavía está, sin limpiar anticipado.
+      expect(
+        tester.widget<TextField>(find.byKey(ChatComposer.inputKey)).controller!.text,
+        'revisá esto',
+      );
+
+      vuelo.complete();
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<TextField>(find.byKey(ChatComposer.inputKey)).controller!.text,
+        'revisá esto',
+        reason: 'el fallo restaura para reintentar sin reescribir',
+      );
+      expect(find.text('No se pudo enviar.'), findsOneWidget);
     });
   });
 }

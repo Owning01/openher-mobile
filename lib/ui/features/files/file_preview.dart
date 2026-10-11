@@ -1,13 +1,18 @@
 import 'dart:convert';
+import 'dart:developer' as developer;
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:http/http.dart' as http;
 import 'package:pdfrx/pdfrx.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../../core/network/server_config.dart';
+import '../../../domain/models/errors.dart';
 import '../../../domain/models/file_type.dart';
 import '../../core/app_icon.dart';
 import '../../core/tokens.dart';
@@ -48,6 +53,43 @@ Future<String> loadTextFile(
 }
 
 String _fmt(int n) => n >= 1000 ? '${(n / 1000).toStringAsFixed(1)}k' : '$n';
+
+/// Baja [url] con [headers] y abre el compartir del sistema.
+///
+/// La usan el visor y la vista de "tipo no soportado" para el botón
+/// Descargar: `share_plus` necesita un path en disco, no bytes. El error sale
+/// genérico en español; el detalle crudo (un status o un fallo de red, nunca
+/// la URL con el token) va al log redactado.
+Future<void> shareUrlBytes(
+  BuildContext context,
+  Uri url,
+  Map<String, String> headers, {
+  required String filename,
+}) async {
+  final messenger = ScaffoldMessenger.of(context);
+  final safe = filename.isEmpty ? 'archivo' : filename;
+  try {
+    final res = await http.get(url, headers: headers);
+    if (res.statusCode != 200) throw StateError('HTTP ${res.statusCode}');
+    final file = File(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}OpenHer-$safe',
+    );
+    await file.writeAsBytes(res.bodyBytes, flush: true);
+    await SharePlus.instance.share(
+      ShareParams(files: <XFile>[XFile(file.path)], text: safe),
+    );
+  } on Object catch (e) {
+    developer.log(
+      'visor: no se pudo descargar $safe: ${sanitizeForDisplay('$e')}',
+      name: 'openher.files',
+    );
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('No se pudo descargar el archivo. Revisá la conexión.'),
+      ),
+    );
+  }
+}
 
 /// El visor de archivos del workspace.
 ///
@@ -96,6 +138,15 @@ class _FilePreviewState extends State<FilePreview> {
   Uri get url => config.fileUrl(path, directory: directory);
   Map<String, String> get headers => config.binaryHeaders;
 
+  /// Carpeta del archivo para el subtítulo: en un disco es la carpeta
+  /// absoluta, en la raíz del `location` el padre del path (o la raíz).
+  String get _folder {
+    if (directory != null && directory!.isNotEmpty) return directory!;
+    final norm = path.replaceAll('\\', '/');
+    final cut = norm.lastIndexOf('/');
+    return cut <= 0 ? 'raíz' : path.substring(0, cut);
+  }
+
   @override
   Widget build(BuildContext context) {
     final type = FileType.of(name);
@@ -108,10 +159,10 @@ class _FilePreviewState extends State<FilePreview> {
           children: [
             Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
             Text(
-              type.kind == FileKind.html && _htmlSource
-                  ? '${type.label} - fuente'
-                  : type.label,
+              '${type.kind == FileKind.html && _htmlSource ? '${type.label} - fuente' : type.label} · $_folder',
               style: Theme.of(context).textTheme.labelSmall,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
           ],
         ),
@@ -126,14 +177,26 @@ class _FilePreviewState extends State<FilePreview> {
         ],
       ),
       body: switch (type.kind) {
-        FileKind.image => _ImageView(url: url, headers: headers),
-        FileKind.svg => _SvgView(url: url, headers: headers),
+        FileKind.image => _ImageView(
+          url: url,
+          headers: headers,
+          onDownload: () =>
+              shareUrlBytes(context, url, headers, filename: name),
+        ),
+        FileKind.svg => _SvgView(
+          url: url,
+          headers: headers,
+          onDownload: () =>
+              shareUrlBytes(context, url, headers, filename: name),
+        ),
         FileKind.video ||
         FileKind.audio =>
           _MediaView(
             url: url,
             headers: headers,
             isAudio: type.kind == FileKind.audio,
+            onDownload: () =>
+                shareUrlBytes(context, url, headers, filename: name),
           ),
         FileKind.pdf => _PdfView(url: url, headers: headers),
         FileKind.html => _htmlSource
@@ -142,12 +205,16 @@ class _FilePreviewState extends State<FilePreview> {
                   headers: headers,
                   isMarkdown: false,
                   maxChars: kHtmlMaxChars,
+                  onDownload: () =>
+                      shareUrlBytes(context, url, headers, filename: name),
                 )
             : _HtmlPreview(
                 config: config,
                 path: path,
                 url: url,
                 headers: headers,
+                onDownload: () =>
+                    shareUrlBytes(context, url, headers, filename: name),
               ),
         FileKind.markdown ||
         FileKind.text ||
@@ -156,8 +223,16 @@ class _FilePreviewState extends State<FilePreview> {
             url: url,
             headers: headers,
             isMarkdown: type.kind == FileKind.markdown,
+            onDownload: () =>
+                shareUrlBytes(context, url, headers, filename: name),
           ),
-        FileKind.binary => _Unsupported(name: name, type: type),
+        FileKind.binary => _Unsupported(
+          name: name,
+          type: type,
+          url: url,
+          headers: headers,
+          path: directory != null ? '$directory/$name' : path,
+        ),
       },
     );
   }
@@ -175,12 +250,14 @@ class _HtmlPreview extends StatefulWidget {
     required this.path,
     required this.url,
     required this.headers,
+    this.onDownload,
   });
 
   final ServerConfig config;
   final String path;
   final Uri url;
   final Map<String, String> headers;
+  final VoidCallback? onDownload;
 
   @override
   State<_HtmlPreview> createState() => _HtmlPreviewState();
@@ -201,7 +278,11 @@ class _HtmlPreviewState extends State<_HtmlPreview> {
     future: _html,
     builder: (context, snapshot) {
       if (snapshot.hasError) {
-        return _LoadError(error: '${snapshot.error}');
+        return _LoadError(
+          error: '${snapshot.error}',
+          onRetry: () => setState(() => _html = _load()),
+          onDownload: widget.onDownload,
+        );
       }
       if (!snapshot.hasData) return const Center(child: _Spinner());
       return HtmlView(
@@ -214,10 +295,19 @@ class _HtmlPreviewState extends State<_HtmlPreview> {
 }
 
 /// Imagen: `Image.network` decodifica jpg, png, gif y webp sin mas.
-class _ImageView extends StatelessWidget {
-  const _ImageView({required this.url, required this.headers});
+class _ImageView extends StatefulWidget {
+  const _ImageView({required this.url, required this.headers, this.onDownload});
   final Uri url;
   final Map<String, String> headers;
+  final VoidCallback? onDownload;
+
+  @override
+  State<_ImageView> createState() => _ImageViewState();
+}
+
+class _ImageViewState extends State<_ImageView> {
+  /// Cada reintento cambia la key y `Image.network` vuelve a pedir los bytes.
+  int _attempt = 0;
 
   @override
   Widget build(BuildContext context) => ColoredBox(
@@ -228,10 +318,15 @@ class _ImageView extends StatelessWidget {
         minScale: 0.5,
         maxScale: 6,
         child: Image.network(
-          url.toString(),
-          headers: headers,
+          widget.url.toString(),
+          key: ValueKey('preview-img-$_attempt'),
+          headers: widget.headers,
           fit: BoxFit.contain,
-          errorBuilder: (context, error, stack) => _LoadError(error: '$error'),
+          errorBuilder: (context, error, stack) => _LoadError(
+            error: '$error',
+            onRetry: () => setState(() => _attempt++),
+            onDownload: widget.onDownload,
+          ),
           loadingBuilder: (context, child, progress) => progress == null
               ? child
               : const Center(child: _Spinner()),
@@ -242,23 +337,36 @@ class _ImageView extends StatelessWidget {
 }
 
 /// SVG: `flutter_svg` los dibuja vectoriales de verdad, no los rasteriza.
-class _SvgView extends StatelessWidget {
-  const _SvgView({required this.url, required this.headers});
+class _SvgView extends StatefulWidget {
+  const _SvgView({required this.url, required this.headers, this.onDownload});
   final Uri url;
   final Map<String, String> headers;
+  final VoidCallback? onDownload;
+
+  @override
+  State<_SvgView> createState() => _SvgViewState();
+}
+
+class _SvgViewState extends State<_SvgView> {
+  int _attempt = 0;
 
   @override
   Widget build(BuildContext context) => Center(
     child: Padding(
       padding: const EdgeInsets.all(AppSpacing.lg),
       child: SvgPicture.network(
-        url.toString(),
-        headers: headers,
+        widget.url.toString(),
+        key: ValueKey('preview-svg-$_attempt'),
+        headers: widget.headers,
         fit: BoxFit.contain,
         placeholderBuilder: (context) => const Center(child: _Spinner()),
         // Sin esto, un SVG invalido se dibuja como un cuadro vacio y el
         // usuario no tiene ni idea de que fallo.
-        errorBuilder: (context, error, stack) => _LoadError(error: '$error'),
+        errorBuilder: (context, error, stack) => _LoadError(
+          error: '$error',
+          onRetry: () => setState(() => _attempt++),
+          onDownload: widget.onDownload,
+        ),
       ),
     ),
   );
@@ -270,23 +378,30 @@ class _MediaView extends StatefulWidget {
     required this.url,
     required this.headers,
     required this.isAudio,
+    this.onDownload,
   });
   final Uri url;
   final Map<String, String> headers;
   final bool isAudio;
+  final VoidCallback? onDownload;
 
   @override
   State<_MediaView> createState() => _MediaViewState();
 }
 
 class _MediaViewState extends State<_MediaView> {
-  late final VideoPlayerController _controller;
-  late final Future<void> _ready;
+  late VideoPlayerController _controller;
+  late Future<void> _ready;
   String? _error;
 
   @override
   void initState() {
     super.initState();
+    _open();
+  }
+
+  void _open() {
+    _error = null;
     _controller = VideoPlayerController.networkUrl(
       widget.url,
       httpHeaders: widget.headers,
@@ -308,7 +423,16 @@ class _MediaViewState extends State<_MediaView> {
 
   @override
   Widget build(BuildContext context) {
-    if (_error != null) return _LoadError(error: _error!);
+    if (_error != null) {
+      return _LoadError(
+        error: _error!,
+        onRetry: () => setState(() {
+          _controller.dispose();
+          _open();
+        }),
+        onDownload: widget.onDownload,
+      );
+    }
     return FutureBuilder<void>(
       future: _ready,
       builder: (context, snapshot) {
@@ -382,10 +506,12 @@ class _TextView extends StatefulWidget {
     required this.headers,
     required this.isMarkdown,
     this.maxChars = _kTextMaxChars,
+    this.onDownload,
   });
   final Uri url;
   final Map<String, String> headers;
   final bool isMarkdown;
+  final VoidCallback? onDownload;
 
   /// Techo de texto renderizado. Medido: 200 KB ya son ~12.000 lineas de `Text`,
   /// que en un handset son segundos de frame.
@@ -398,7 +524,15 @@ class _TextView extends StatefulWidget {
 }
 
 class _TextViewState extends State<_TextView> {
-  late final Future<String> _text = loadTextFile(
+  late Future<String> _text;
+
+  @override
+  void initState() {
+    super.initState();
+    _text = _load();
+  }
+
+  Future<String> _load() => loadTextFile(
     widget.url,
     widget.headers,
     maxChars: widget.maxChars,
@@ -410,7 +544,13 @@ class _TextViewState extends State<_TextView> {
     return FutureBuilder<String>(
       future: _text,
       builder: (context, snapshot) {
-        if (snapshot.hasError) return _LoadError(error: '${snapshot.error}');
+        if (snapshot.hasError) {
+          return _LoadError(
+            error: '${snapshot.error}',
+            onRetry: () => setState(() => _text = _load()),
+            onDownload: widget.onDownload,
+          );
+        }
         if (!snapshot.hasData) return const Center(child: _Spinner());
         final text = snapshot.data!;
         if (widget.isMarkdown) {
@@ -447,14 +587,29 @@ class _TextViewState extends State<_TextView> {
 }
 
 /// El tipo que el server sirve y la app no sabe mostrar.
+///
+/// Dice qué sí muestra (y con qué topes) en vez de un "no se puede" pelado, y
+/// ofrece Copiar ruta y Compartir: el archivo sale igual del teléfono aunque
+/// no tenga visor.
 class _Unsupported extends StatelessWidget {
-  const _Unsupported({required this.name, required this.type});
+  const _Unsupported({
+    required this.name,
+    required this.type,
+    required this.url,
+    required this.headers,
+    required this.path,
+  });
   final String name;
   final FileType type;
+  final Uri url;
+  final Map<String, String> headers;
+
+  /// Ruta completa para copiar (con carpeta cuando se conoce).
+  final String path;
 
   @override
   Widget build(BuildContext context) => Center(
-    child: Padding(
+    child: SingleChildScrollView(
       padding: const EdgeInsets.all(AppSpacing.xl),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -473,9 +628,45 @@ class _Unsupported extends StatelessWidget {
           const SizedBox(height: AppSpacing.xs),
           Text(
             'La app no sabe mostrar ${type.mime ?? type.label.toLowerCase()}. '
-            'Se puede copiar la ruta y abrirlo fuera.',
+            'Se puede copiar la ruta y abrirlo fuera, o compartirlo.',
             style: Theme.of(context).textTheme.bodySmall,
             textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: AppSpacing.xs),
+          Text(
+            'El visor muestra imágenes, vectores, video, audio, PDF, '
+            'Markdown, HTML, texto y código. El texto se corta en 200 KB '
+            'y el HTML en 2 MB.',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: AppSpacing.md),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextButton(
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: path));
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Ruta copiada')),
+                    );
+                  }
+                },
+                child: const Text('Copiar ruta'),
+              ),
+              TextButton(
+                onPressed: () => shareUrlBytes(
+                  context,
+                  url,
+                  headers,
+                  filename: name,
+                ),
+                child: const Text('Compartir'),
+              ),
+            ],
           ),
         ],
       ),
@@ -484,8 +675,10 @@ class _Unsupported extends StatelessWidget {
 }
 
 class _LoadError extends StatelessWidget {
-  const _LoadError({required this.error});
+  const _LoadError({required this.error, this.onRetry, this.onDownload});
   final String error;
+  final VoidCallback? onRetry;
+  final VoidCallback? onDownload;
 
   @override
   Widget build(BuildContext context) => Center(
@@ -506,12 +699,32 @@ class _LoadError extends StatelessWidget {
           ),
           const SizedBox(height: AppSpacing.xs),
           Text(
-            error,
+            // El detalle crudo puede traer la URL con el token: sale redactado
+            // y el mensaje fijo de arriba es el que se lee primero.
+            sanitizeForDisplay(error),
             style: Theme.of(context).textTheme.bodySmall,
             textAlign: TextAlign.center,
             maxLines: 4,
             overflow: TextOverflow.ellipsis,
           ),
+          if (onRetry != null || onDownload != null) ...[
+            const SizedBox(height: AppSpacing.sm),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (onRetry != null)
+                  TextButton(
+                    onPressed: onRetry,
+                    child: const Text('Reintentar'),
+                  ),
+                if (onDownload != null)
+                  TextButton(
+                    onPressed: onDownload,
+                    child: const Text('Descargar'),
+                  ),
+              ],
+            ),
+          ],
         ],
       ),
     ),

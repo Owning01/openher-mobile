@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:openher_mobile/ui/core/app_icon.dart';
 import 'package:openher_mobile/ui/core/layer_gate.dart';
 import 'package:openher_mobile/ui/features/chat/composer.dart';
 
@@ -96,5 +97,69 @@ void main() {
     await pumpComposer(tester, onPickModel: () {}, onPickAgent: () {});
     expect(find.text('Elegir modelo'), findsOneWidget);
     expect(find.text('Elegir agente'), findsOneWidget);
+  });
+
+  group('áreas táctiles de 48 (glifo igual)', () {
+    Future<void> pumpConAdjunto(WidgetTester tester) async {
+      // La tira de adjuntos vive tras su propio gate: sin él no hay X.
+      LayerCatalog.debugSetInstance(
+        LayerCatalog.forTest({
+          'chat.composer.agent': true,
+          'chat.composer.model': true,
+          'chat.composer.modelbar': true,
+          'chat.composer.input': true,
+          'chat.composer.attach': true,
+          'chat.composer.attachments': true,
+          'chat.composer.mic': true,
+          'chat.composer.send': true,
+          'chat.composer.ctx': true,
+        }),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ChatComposer(
+              working: false,
+              canSend: true,
+              attachments: const [
+                ComposerAttachment(name: 'foto.png', uri: 'data:x'),
+              ],
+              onRemoveAttachment: (_) {},
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('adjuntar y micrófono miden 48 con glifo de 20', (
+      tester,
+    ) async {
+      await pumpConAdjunto(tester);
+      expect(
+        tester.widget<AppIconButton>(find.byKey(ChatComposer.attachKey)).tapSize,
+        48,
+      );
+      expect(
+        tester.widget<AppIconButton>(find.byKey(ChatComposer.micKey)).tapSize,
+        48,
+      );
+      expect(
+        tester.widget<AppIconButton>(find.byKey(ChatComposer.attachKey)).size,
+        20,
+      );
+    });
+
+    testWidgets('enviar mide 48 con glifo de 16', (tester) async {
+      await pumpConAdjunto(tester);
+      expect(tester.getSize(find.byKey(ChatComposer.sendKey)), const Size(48, 48));
+    });
+
+    testWidgets('la X del adjunto es caja de 48 con nombre', (tester) async {
+      await pumpConAdjunto(tester);
+      final etiqueta = find.bySemanticsLabel('Quitar adjunto foto.png');
+      expect(etiqueta, findsOneWidget);
+      expect(tester.getSize(etiqueta), const Size(48, 48));
+    });
   });
 }

@@ -489,13 +489,20 @@ void main() {
       },
     );
 
-    test('la URL del stream redacta el auth_token en logs', () {
+    test('la URL del stream no lleva credencial que redactar', () {
+      // ADJUDICADO 2026-10-11: la auth del stream es el header Basic solo
+      // (medido: da 200 en `/api/event` sin query). El `?auth_token=` ya no se
+      // manda, así que no hay token que redactar; `redactAuthToken` queda como
+      // red de seguridad para URLs que sí lo traigan (navegador).
       final sse = build(MockClient((_) async => http.Response('', 500)));
       addTearDown(sse.dispose);
       final uri = sse.streamUri(after: 3);
-      expect(uri.queryParameters[ServerConfig.authTokenParam], isNotNull);
+      expect(
+        uri.queryParameters.containsKey(ServerConfig.authTokenParam),
+        isFalse,
+        reason: 'el stream no lleva credencial en el query',
+      );
       final redacted = ServerConfig.redactAuthToken(uri).toString();
-      expect(redacted, contains('auth_token=REDACTED'));
       expect(redacted, isNot(contains('s3cr3t')));
       // Y el base64 tampoco puede estar.
       expect(redacted, isNot(contains('czNjcjN0')));

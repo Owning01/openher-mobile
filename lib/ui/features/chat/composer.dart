@@ -167,6 +167,33 @@ class ChatComposer extends StatefulWidget {
   /// el boton lo dice en vez de quedarse mudo.
   static const String kDictationLocale = 'es_ES';
 
+  /// Inserta el texto dictado donde está el cursor, sin borrar lo escrito.
+  ///
+  /// Antes reemplazaba todo el campo: dictar con un borrador a medio escribir
+  /// lo borraba entero. Si hay rango seleccionado, lo reemplaza (es lo que el
+  /// usuario marcó); si no, inserta en el cursor y lo deja atrás.
+  ///
+  /// Función pura del valor + lo reconocido para probarla sin el plugin
+  /// nativo, que en tests no existe.
+  @visibleForTesting
+  static TextEditingValue insertDictation(
+    TextEditingValue value,
+    String recognized,
+  ) {
+    final text = value.text;
+    final sel = value.selection;
+    final start = (sel.isValid ? sel.start : text.length).clamp(0, text.length);
+    final end = (sel.isValid ? sel.end : text.length).clamp(0, text.length);
+    final from = start <= end ? start : end;
+    final to = start <= end ? end : start;
+    final next =
+        '${text.substring(0, from)}$recognized${text.substring(to)}';
+    return TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: from + recognized.length),
+    );
+  }
+
   /// 5 líneas es el máximo del `textarea` del prototipo (`max-height:98px` con
   /// `line-height:19.5px`).
   static const int maxLines = 5;
@@ -279,9 +306,9 @@ class _ChatComposerState extends State<ChatComposer> {
       localeId: ChatComposer.kDictationLocale,
       onResult: (r) {
         setState(() {
-          _controller.text = r.recognizedWords;
-          _controller.selection = TextSelection.collapsed(
-            offset: _controller.text.length,
+          _controller.value = ChatComposer.insertDictation(
+            _controller.value,
+            r.recognizedWords,
           );
         });
         if (r.finalResult) _endDictation();
@@ -306,6 +333,16 @@ class _ChatComposerState extends State<ChatComposer> {
   bool get _canSend =>
       widget.canSend &&
       (_controller.text.trim().isNotEmpty || widget.attachments.isNotEmpty);
+
+  /// Un envío en vuelo. Bloquea el doble-envío: el botón se deshabilita
+  /// hasta que el POST se admite o falla.
+  ///
+  /// Con un `onSend` asíncrono (el caso real: `_enviar` en `chat_view` lee
+  /// los adjuntos del disco y manda el POST) el vuelo es el `Future` que
+  /// devuelve: dos toques seguidos mandan un solo POST. Con uno síncrono la
+  /// admisión es el retorno sin excepción. El comando de barra tomado no
+  /// viaja a la red y sólo cubre reentrancia.
+  bool _sending = false;
 
   /// El disparador bajo el cursor, o `null` si el menú está cerrado.
   ///
@@ -372,32 +409,89 @@ class _ChatComposerState extends State<ChatComposer> {
   /// y el modelo lo vería solo cuando terminara el turno.
   ///
   /// Con el input vacío sigue siendo Detener, que es su atajo de un toque.
-  void _submit() {
+  ///
+  /// El campo se limpia SÓLO si el envío se admite ([_sendPrompt]); en fallo
+  /// el texto se restaura íntegro para reintentar sin reescribir.
+  Future<void> _submit() async {
+    if (_sending) return;
     if (widget.working && !_canSend) {
       widget.onStop?.call();
       return;
     }
     if (!_canSend) return;
-    final text = _controller.text.trim();
+    final snapshot = _controller.value;
+    final text = snapshot.text.trim();
     if (widget.attachments.isNotEmpty) {
-      widget.onSend?.call(text, widget.attachments);
-      _controller.clear();
+      await _sendPrompt(text, widget.attachments, snapshot);
       return;
     }
 
     final command = parseSlashCommand(text);
     if (command != null) {
-      final taken = _dispatchSlash(command.name, command.args);
-      // Si nadie lo recibe (shell de sólo lectura), cae al prompt normal en
-      // vez de perder el texto: un comando que se traga solo es peor.
-      if (taken) {
-        _controller.clear();
+      setState(() => _sending = true);
+      try {
+        final taken = _dispatchSlash(command.name, command.args);
+        // Si nadie lo recibe (shell de sólo lectura), cae al prompt normal en
+        // vez de perder el texto: un comando que se traga solo es peor.
+        if (taken) {
+          _controller.clear();
+          return;
+        }
+      } catch (e) {
+        // Un despacho que tira no se lleva lo escrito: se restaura y se avisa.
+        _controller.value = snapshot;
+        debugPrint('composer: el comando no se pudo despachar: $e');
+        _reportSendError();
         return;
+      } finally {
+        if (mounted) setState(() => _sending = false);
       }
     }
 
-    widget.onSend?.call(text, widget.attachments);
-    _controller.clear();
+    await _sendPrompt(text, widget.attachments, snapshot);
+  }
+
+  /// Manda el prompt por `onSend` y limpia el campo SÓLO si se admite.
+  ///
+  /// En fallo (excepción del handler, sincrónica o del `Future`) el texto se
+  /// restaura íntegro con su cursor: perder lo escrito por un error de red o
+  /// de lectura es perder datos, y el usuario reintenta sin reescribir.
+  Future<void> _sendPrompt(
+    String text,
+    List<ComposerAttachment> files,
+    TextEditingValue snapshot,
+  ) async {
+    final send = widget.onSend;
+    if (send == null) {
+      // Vista de sólo lectura: sin handler no hay POST; se conserva el
+      // comportamiento anterior (el campo se vacía) sin armar el guard.
+      _controller.clear();
+      return;
+    }
+    setState(() => _sending = true);
+    try {
+      // `dynamic` a propósito: el contrato es `void Function` por
+      // compatibilidad, pero el shell real devuelve el `Future` de `_enviar`
+      // (lee adjuntos + POST) y acá se lo espera para cubrir el vuelo real.
+      // Con un handler síncrono el `await` completa en el acto.
+      await (send as dynamic)(text, files);
+      if (!mounted) return;
+      _controller.clear();
+    } catch (e) {
+      if (!mounted) return;
+      _controller.value = snapshot;
+      debugPrint('composer: envío fallido, se restaura el texto: $e');
+      _reportSendError();
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  void _reportSendError() {
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(const SnackBar(content: Text('No se pudo enviar.')));
   }
 
   /// Enruta un comando a su destino. Devuelve `true` si alguien lo recibió.
@@ -534,17 +628,39 @@ class _ChatComposerState extends State<ChatComposer> {
         Positioned(
           top: -5,
           right: -5,
-          child: Material(
-            color: scheme.surfaceContainer,
-            clipBehavior: Clip.antiAlias,
-            shape: CircleBorder(side: BorderSide(color: scheme.outlineVariant)),
-            child: InkWell(
-              customBorder: const CircleBorder(),
-              onTap: () => widget.onRemoveAttachment?.call(attachment),
-              child: const SizedBox(
-                width: 16,
-                height: 16,
-                child: Center(child: AppIcon('x', size: 12)),
+          // Caja de 48 con nombre del archivo: el blanco de 16 px no se
+          // acertaba con el dedo y el lector no decía qué se quitaba.
+          child: Semantics(
+            button: true,
+            label: 'Quitar adjunto ${attachment.name}',
+            child: Tooltip(
+              message: 'Quitar adjunto ${attachment.name}',
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: () => widget.onRemoveAttachment?.call(attachment),
+                  child: SizedBox(
+                    width: 48,
+                    height: 48,
+                    child: Center(
+                      child: Container(
+                        width: 22,
+                        height: 22,
+                        decoration: BoxDecoration(
+                          color: scheme.surfaceContainer,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: scheme.outlineVariant,
+                          ),
+                        ),
+                        child: const Center(
+                          child: AppIcon('x', size: 12),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
@@ -576,7 +692,9 @@ class _ChatComposerState extends State<ChatComposer> {
                 tooltip: 'Adjuntar fotos (Ctrl+V pega imágenes)',
                 onPressed: widget.onAttach,
                 size: 20,
-                tapSize: 32,
+                // Glifo de 20 en caja de 48: el área táctil mínima accesible
+                // sin agrandar el icono.
+                tapSize: 48,
               ),
             ),
             Expanded(
@@ -626,7 +744,8 @@ class _ChatComposerState extends State<ChatComposer> {
                     ? Theme.of(context).colorScheme.primary
                     : _mutedStrong(context),
                 size: 20,
-                tapSize: 32,
+                // Glifo de 20 en caja de 48, igual que el de adjuntar.
+                tapSize: 48,
               ),
             ),
             _sendButton(scheme, hasText),
@@ -793,11 +912,12 @@ class _ChatComposerState extends State<ChatComposer> {
         // `.sendbtn.stop{color:#fff}`, también en oscuro.
         ? AppColors.lightOnPrimary
         : (_canSend ? scheme.onPrimary : scheme.onSurfaceVariant);
-    final etiqueta = encola
-        ? 'Enviar en cola'
-        : (detiene ? 'Detener' : 'Enviar');
+    final etiqueta = _sending
+        ? 'Enviando'
+        : (encola ? 'Enviar en cola' : (detiene ? 'Detener' : 'Enviar'));
     return Semantics(
       button: true,
+      enabled: !_sending,
       label: etiqueta,
       child: Tooltip(
         message: etiqueta,
@@ -807,10 +927,11 @@ class _ChatComposerState extends State<ChatComposer> {
           shape: const CircleBorder(),
           child: InkWell(
             customBorder: const CircleBorder(),
-            onTap: _submit,
+            // En vuelo no hay segundo toque: un solo POST por mensaje.
+            onTap: _sending ? null : _submit,
             child: SizedBox(
-              width: 32,
-              height: 32,
+              width: 48,
+              height: 48,
               child: Center(
                 child: AppIcon(
                   // El icono sigue al estado, no al turno: `stop` solo cuando

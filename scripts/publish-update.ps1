@@ -79,6 +79,12 @@ if (-not (Test-Path $apk)) { throw "No existe el APK en $apk" }
 $mb = [math]::Round((Get-Item $apk).Length / 1MB, 2)
 Write-Host "APK $version ($mb MB)"
 
+# La huella que la app verifica antes de ofrecer Instalar: un APK que no
+# coincide con el manifiesto no llega a `ready` (ver UpdateService). Se genera
+# acá porque el que publica es el único que tiene el archivo bueno.
+$sha256 = (Get-FileHash -Path $apk -Algorithm SHA256).Hash.ToLowerInvariant()
+Write-Host "SHA-256 $sha256"
+
 # El `url` del manifiesto tiene que ser el asset ya subido: por eso el
 # manifiesto se arma DESPUES del upload, no antes.
 $assets = @{
@@ -117,6 +123,7 @@ $manifest = [ordered]@{
   version      = $versionName
   versionCode  = $versionCode
   url          = $apkUrl
+  sha256       = $sha256
   notes        = $Notes
   published_at = (Get-Date).ToUniversalTime().ToString('o')
 }
@@ -157,6 +164,12 @@ foreach ($attempt in 1..5) {
 if (-not $seen) { throw "El manifiesto no responde 200 en $latest" }
 if ($seen.versionCode -ne $versionCode) {
   throw "El manifiesto publicado dice versionCode $($seen.versionCode) y esperábamos $versionCode"
+}
+if (-not $seen.sha256) {
+  throw "El manifiesto publicado no trae sha256 (la app lo exige antes de instalar)"
+}
+if ($seen.sha256.ToLowerInvariant() -ne $sha256) {
+  throw "El manifiesto publicado trae sha256 $($seen.sha256) y el APK local es $sha256"
 }
 
 Write-Host ''

@@ -1,4 +1,6 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:openher_mobile/ui/features/chat/composer.dart';
 import 'package:openher_mobile/ui/features/chat/composer_suggestions.dart';
 
 /// El menú de `/` y `@`: cuándo se abre, cuándo **no**, y qué se ofrece.
@@ -196,6 +198,54 @@ void main() {
       expect(cmd.runCommand, 'review');
       expect(accion.runCommand, isNull);
       expect(skill.runCommand, isNull);
+    });
+  });
+
+  group('el dictado inserta en el cursor, no reemplaza', () {
+    test('en el medio no borra ni lo de antes ni lo de después', () {
+      // Offset 5 en 'hola mundo' es justo tras el espacio: el dictado entra
+      // entre 'hola ' y 'mundo' y el cursor queda atrás.
+      final sale = ChatComposer.insertDictation(
+        const TextEditingValue(
+          text: 'hola mundo',
+          selection: TextSelection.collapsed(offset: 5),
+        ),
+        'X',
+      );
+      expect(sale.text, 'hola Xmundo');
+      expect(sale.selection.baseOffset, 6);
+    });
+
+    test('con campo vacío deja el cursor atrás', () {
+      final sale = ChatComposer.insertDictation(
+        const TextEditingValue(text: ''),
+        'buenas',
+      );
+      expect(sale.text, 'buenas');
+      expect(sale.selection.baseOffset, 6);
+    });
+
+    test('con rango seleccionado lo reemplaza, nada más', () {
+      final sale = ChatComposer.insertDictation(
+        const TextEditingValue(
+          text: 'borra esto ya',
+          selection: TextSelection(baseOffset: 6, extentOffset: 10),
+        ),
+        'ESO',
+      );
+      expect(sale.text, 'borra ESO ya');
+      expect(sale.selection.baseOffset, 9);
+    });
+
+    test('sin selección válida agrega al final', () {
+      final sale = ChatComposer.insertDictation(
+        const TextEditingValue(
+          text: 'nota',
+          selection: TextSelection.collapsed(offset: -1),
+        ),
+        ' final',
+      );
+      expect(sale.text, 'nota final');
     });
   });
 }

@@ -38,7 +38,13 @@ import 'squares_spinner.dart';
 import 'tool_card.dart';
 
 class TurnActivityBox extends StatefulWidget {
-  const TurnActivityBox({super.key, required this.activity, this.onOpenDiff});
+  const TurnActivityBox({
+    super.key,
+    required this.activity,
+    this.onOpenDiff,
+    this.onRetryTurn,
+    this.onStopTurn,
+  });
 
   /// Lo que hizo el turno: su razonamiento, sus tools y si sigue vivo. Un
   /// [TurnActivity] vacío no se pinta nunca (el agrupador ni siquiera lo
@@ -46,6 +52,14 @@ class TurnActivityBox extends StatefulWidget {
   final TurnActivity activity;
 
   final ValueChanged<AssistantTool>? onOpenDiff;
+
+  /// Reintentar el turno desde una tool que falló. `null` ⇒ sin acción de
+  /// reintento (la fila no se pinta). Lo cablea el shell en `chat_view`.
+  final VoidCallback? onRetryTurn;
+
+  /// Detener el turno desde una tool que falló. `null` ⇒ sin acción de
+  /// detenido. Lo cablea el shell en `chat_view`.
+  final VoidCallback? onStopTurn;
 
   /// Fila plegable. El test la apunta por key para no depender del texto.
   static const Key headKey = Key('activitybox-head');
@@ -74,6 +88,17 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
     // Un rebuild (un delta más, un poll) no la abre ni la cierra: si el
     // usuario la plegó, se queda plegada aunque el turno siga corriendo. Era
     // justo el otro motivo por el que las cajas se acumulaban.
+  }
+
+  void _toggle() => setState(() => _open = !_open);
+
+  /// Lo que anuncia el lector de pantalla sobre la fila plegable: el estado
+  /// del turno y cuántas tools trae, para no tener que abrirla para saberlo.
+  String get _headLabel {
+    final count = widget.activity.toolParts.length;
+    final tools = count == 1 ? '1 herramienta' : '$count herramientas';
+    final estado = widget.activity.working ? 'trabajando' : 'terminado';
+    return 'Actividad del turno, $estado, $tools';
   }
 
   @override
@@ -133,37 +158,51 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
           : AppColors.lightMutedStrong,
     );
 
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        key: TurnActivityBox.headKey,
-        onTap: () => setState(() => _open = !_open),
-        borderRadius: AppRadius.mdAll,
-        // `.acthead:hover{background:var(--surface-hover)}` (:276).
-        hoverColor: scheme.surfaceContainerHigh,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: AppSpacing.xs,
-            vertical: AppSpacing.xs,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  LayerGate(
-                    'chat.activitybox.chevron',
-                    child: AnimatedRotation(
-                      turns: _open ? 1 : 0,
-                      duration: const Duration(milliseconds: 180),
-                      child: AppIcon(
-                        _open ? 'chevron-down' : 'chevron-right',
-                        size: 16,
-                        color: scheme.onSurfaceVariant,
+    return Semantics(
+      button: true,
+      expanded: _open,
+      label: _headLabel,
+      // Un solo anuncio ("Actividad del turno, trabajando, 3 herramientas")
+      // en vez del rótulo más el resumen más las categorías por separado.
+      // El `onTap` va acá y en el `InkWell`: el gesto lo anima el segundo,
+      // la activación por lector al primero.
+      excludeSemantics: true,
+      onTap: _toggle,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          key: TurnActivityBox.headKey,
+          onTap: _toggle,
+          borderRadius: AppRadius.mdAll,
+          // `.acthead:hover{background:var(--surface-hover)}` (:276).
+          hoverColor: scheme.surfaceContainerHigh,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.xs,
+              vertical: AppSpacing.xs,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    LayerGate(
+                      'chat.activitybox.chevron',
+                      child: AnimatedRotation(
+                        turns: _open ? 1 : 0,
+                        // Sin animaciones el giro es instantáneo, no un giro
+                        // de 180 ms que el sistema pidió no ver.
+                        duration: MediaQuery.disableAnimationsOf(context)
+                            ? Duration.zero
+                            : const Duration(milliseconds: 180),
+                        child: AppIcon(
+                          _open ? 'chevron-down' : 'chevron-right',
+                          size: 16,
+                          color: scheme.onSurfaceVariant,
+                        ),
                       ),
                     ),
-                  ),
                   // Spinner chico del encabezado: 4 cuadrados de 4 px. Es el
                   // aviso de que el turno sigue vivo con la caja plegada, que
                   // es como se la ve casi siempre. Se apaga con el turno.
@@ -200,7 +239,7 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
                   ),
                   LayerGate(
                     'chat.activitybox.summary',
-                    child: _summary(theme, text),
+                    child: _summary(context, theme, text),
                   ),
                 ],
               ),
@@ -229,6 +268,7 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
           ),
         ),
       ),
+      ),
     );
   }
 
@@ -240,25 +280,35 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
   /// spinner de 12 px **con el "· pensando"** del prototipo (:974) si sigue
   /// trabajando. El texto no es adorno: dice que el turno vive, que el spinner
   /// solo puede insinuar.
-  Widget _summary(ThemeData theme, TextTheme text) {
+  Widget _summary(BuildContext context, ThemeData theme, TextTheme text) {
     final scheme = theme.colorScheme;
     final style = text.bodySmall?.copyWith(
       fontSize: 12,
       color: scheme.onSurfaceVariant,
     );
     if (widget.activity.working) {
+      // Sin animaciones no gira nada: el "· pensando" queda como texto
+      // estático con un glifo quieto, que es lo que dice que el turno vive.
+      final quiet = MediaQuery.disableAnimationsOf(context);
       return Row(
         mainAxisSize: MainAxisSize.min,
         // `.actsum{gap:6px}`.
         children: [
-          SizedBox(
-            width: 12,
-            height: 12,
-            child: CircularProgressIndicator(
-              strokeWidth: 1.5,
+          if (quiet)
+            AppIcon(
+              'more-horizontal',
+              size: 12,
               color: scheme.onSurfaceVariant,
+            )
+          else
+            SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(
+                strokeWidth: 1.5,
+                color: scheme.onSurfaceVariant,
+              ),
             ),
-          ),
           const SizedBox(width: 6),
           Text('· pensando', style: style),
         ],
@@ -311,6 +361,8 @@ class _TurnActivityBoxState extends State<TurnActivityBox> {
                     key: ValueKey('tool-${tool.id}'),
                     tool: tool,
                     onOpenDiff: widget.onOpenDiff,
+                    onRetryTurn: widget.onRetryTurn,
+                    onStopTurn: widget.onStopTurn,
                   ),
                 ),
             ],

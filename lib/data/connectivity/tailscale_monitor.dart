@@ -129,9 +129,20 @@ class TailscaleMonitor extends ChangeNotifier {
     _timer = Timer.periodic(_retryEvery, (_) => recheck());
   }
 
+  /// Frena el reintento periódico sin soltar la red.
+  ///
+  /// Lo llama quien pasa a background: el timer es el único que genera
+  /// requests solo, y en background no tiene que generar ninguno. No es
+  /// [dispose] (no suelta el listener ni cierra nada); [recheck] lo rearranca
+  /// cuando vuelve a hacer falta.
+  void stop() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
   @override
   void dispose() {
-    _timer?.cancel();
+    stop();
     network.removeListener(_onNetwork);
     super.dispose();
   }

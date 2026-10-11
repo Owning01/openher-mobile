@@ -19,6 +19,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:openher_mobile/domain/models/errors.dart';
 import 'package:openher_mobile/domain/models/message.dart';
 import 'package:openher_mobile/domain/models/tool.dart';
 import 'package:openher_mobile/domain/models/turn_activity.dart';
@@ -380,6 +381,214 @@ void main() {
       expect(find.text('Primer tramo'), findsOneWidget);
       expect(find.text('Segundo tramo'), findsOneWidget);
       expect(find.byKey(TurnActivityBox.headKey), findsOneWidget);
+    });
+  });
+
+  group('accesibilidad de la fila plegable', () {
+    Future<void> pumpCaja(
+      WidgetTester tester,
+      List<SessionMessage> mensajes,
+      String duena,
+    ) async {
+      final turns = buildTurnActivities(mensajes);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: SizedBox(
+              width: 400,
+              child: TurnActivityBox(activity: turns[duena]!),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('el encabezado anuncia estado y cantidad de tools', (
+      tester,
+    ) async {
+      await pumpCaja(tester, [
+        _user('u1', 'busca todo'),
+        _assistant('a1', content: [_shell('c1')]),
+        _assistant('a2', content: [_shell('c2')], complete: false),
+      ], 'a1');
+
+      expect(
+        find.bySemanticsLabel('Actividad del turno, trabajando, 2 herramientas'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('terminado anuncia terminado con singular', (tester) async {
+      await pumpCaja(tester, [
+        _user('u1', 'hola'),
+        _assistant('a1', content: [_shell('c1')]),
+      ], 'a1');
+
+      expect(
+        find.bySemanticsLabel('Actividad del turno, terminado, 1 herramienta'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('sin animaciones el resumen es texto estático', (tester) async {
+      final turns = buildTurnActivities([
+        _user('u1', 'hola'),
+        _assistant('a1', content: [_shell('c1')]),
+        _assistant('a2', content: [_shell('c2')], complete: false),
+      ]);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: MediaQuery(
+              data: const MediaQueryData(disableAnimations: true),
+              child: SizedBox(
+                width: 400,
+                child: TurnActivityBox(activity: turns['a1']!),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('· pensando'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    });
+  });
+
+  group('la tarjeta de tool', () {
+    AssistantTool errorTool() => AssistantTool(
+      id: 'cx',
+      name: 'shell',
+      executed: false,
+      state: ToolError(
+        statusName: 'error',
+        input: const <String, Object?>{'command': 'flutter test'},
+        error: const OcErrorInfo(message: 'salida uno'),
+      ),
+    );
+
+    Future<void> pumpCard(
+      WidgetTester tester,
+      AssistantTool tool, {
+      VoidCallback? onRetry,
+      VoidCallback? onStop,
+      ValueChanged<String>? onCopy,
+    }) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: SizedBox(
+              width: 400,
+              child: ToolCard(
+                tool: tool,
+                onCopy: onCopy,
+                onRetryTurn: onRetry,
+                onStopTurn: onStop,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('la fila anuncia nombre y estado', (tester) async {
+      await pumpCard(tester, errorTool());
+      expect(
+        find.bySemanticsLabel('Herramienta shell, error'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('el long-press copia la salida sin expandir', (tester) async {
+      final copiados = <String>[];
+      await pumpCard(tester, errorTool(), onCopy: copiados.add);
+
+      await tester.longPress(find.byKey(ToolCard.headKey));
+      await tester.pump();
+
+      expect(copiados, ['salida uno']);
+      expect(
+        find.byType(SelectableText),
+        findsNothing,
+        reason: 'copiar no expande la tarjeta',
+      );
+    });
+
+    testWidgets('en error hay Reintentar y Detener si hay callbacks', (
+      tester,
+    ) async {
+      var reintentos = 0;
+      var detenidos = 0;
+      await pumpCard(
+        tester,
+        errorTool(),
+        onRetry: () => reintentos++,
+        onStop: () => detenidos++,
+      );
+
+      await tester.tap(find.byKey(ToolCard.headKey));
+      await tester.pump();
+
+      await tester.tap(find.byKey(ToolCard.retryKey));
+      await tester.tap(find.byKey(ToolCard.stopKey));
+      await tester.pump();
+
+      expect(reintentos, 1);
+      expect(detenidos, 1);
+      expect(find.text('Copiar'), findsOneWidget);
+    });
+
+    testWidgets('sin callbacks no se prometen acciones', (tester) async {
+      await pumpCard(tester, errorTool());
+
+      await tester.tap(find.byKey(ToolCard.headKey));
+      await tester.pump();
+
+      expect(find.byKey(ToolCard.retryKey), findsNothing);
+      expect(find.byKey(ToolCard.stopKey), findsNothing);
+      // Copiar siempre está: no necesita a nadie más.
+      expect(find.text('Copiar'), findsOneWidget);
+    });
+
+    testWidgets('sin animaciones el spinner de corriendo es un punto', (
+      tester,
+    ) async {
+      final corriendo = AssistantTool(
+        id: 'cr',
+        name: 'shell',
+        executed: false,
+        state: const ToolRunning(
+          statusName: 'running',
+          input: <String, Object?>{'command': 'x'},
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: MediaQuery(
+              data: const MediaQueryData(disableAnimations: true),
+              child: SizedBox(
+                width: 400,
+                child: ToolCard(tool: corriendo),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(
+        find.bySemanticsLabel('Herramienta shell, ejecutando'),
+        findsOneWidget,
+      );
     });
   });
 }

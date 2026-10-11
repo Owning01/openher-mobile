@@ -24,10 +24,12 @@
 /// cambió, se devuelve el mismo subtree.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 // `markdown` es dependencia transitiva de flutter_markdown_plus (misma versión
 // que exponen sus firmas de MarkdownElementBuilder); no se declara en pubspec.
@@ -64,6 +66,9 @@ class MessageBubble extends StatelessWidget {
     this.onPendingSend,
     this.imageUrl,
     this.imageHeaders = const <String, String>{},
+    this.imagesEnabled = true,
+    this.onRetryTurn,
+    this.onStopTurn,
     this.onOpenPlan,
     this.onOpenLink,
   });
@@ -78,6 +83,23 @@ class MessageBubble extends StatelessWidget {
 
   /// El header Basic. Sin él el server contesta 401.
   final Map<String, String> imageHeaders;
+
+  /// Con `false` las imágenes no se bajan (modo de bajo consumo): en su lugar
+  /// va un placeholder que dice "tocar para cargar" y las muestra al tocarlo.
+  /// `true` es el comportamiento normal.
+  final bool imagesEnabled;
+
+  /// Reintenta el turno (card de error del assistant). `null` apaga el botón:
+  /// sin canal no se promete la acción.
+  final VoidCallback? onRetryTurn;
+
+  /// Detiene el turno (card de error del assistant). Idem.
+  final VoidCallback? onStopTurn;
+
+  /// Botones de la card de error, por id de mensaje.
+  static Key errorRetryKey(String messageId) => Key('error-retry-$messageId');
+  static Key errorCopyKey(String messageId) => Key('error-copy-$messageId');
+  static Key errorStopKey(String messageId) => Key('error-stop-$messageId');
 
   /// Abre un plan html-plan cuya ruta apareció en el texto (`Ver plan`).
   ///
@@ -252,7 +274,14 @@ class MessageBubble extends StatelessWidget {
     final activity = _turnActivityOf(assistant);
 
     if (activity != null) {
-      children.add(TurnActivityBox(activity: activity, onOpenDiff: onOpenDiff));
+      children.add(
+        TurnActivityBox(
+          activity: activity,
+          onOpenDiff: onOpenDiff,
+          onRetryTurn: onRetryTurn,
+          onStopTurn: onStopTurn,
+        ),
+      );
     }
 
     // Una pregunta pendiente tiene prioridad visual sobre el texto: es la
@@ -270,7 +299,7 @@ class MessageBubble extends StatelessWidget {
     // Canal A de §5: el turno murió. Va antes del texto porque es lo que hay
     // que leer primero; el texto parcial que quedó sigue debajo.
     final error = assistant.error;
-    if (error != null) children.add(_errorCard(context, error));
+    if (error != null) children.add(_errorCard(context, assistant.id, error));
 
     // El texto va con la capa que lo corresponde: mientras el turno escribe es
     // la línea de streaming (`.streamline`, texto plano), y recién al terminar
@@ -339,7 +368,13 @@ class MessageBubble extends StatelessWidget {
         // el texto llegando por deltas las rutas están a medias y saldrían
         // miniaturas de nombres truncados.
         if (urlOf != null && !streaming && paths.isNotEmpty)
-          MessageImages(paths: paths, urlOf: urlOf, headers: imageHeaders),
+          imagesEnabled
+              ? MessageImages(paths: paths, urlOf: urlOf, headers: imageHeaders)
+              : _ImagesPlaceholder(
+                  paths: paths,
+                  urlOf: urlOf,
+                  headers: imageHeaders,
+                ),
         if (onMenu != null) _menuButton(context),
       ],
     );
@@ -584,7 +619,9 @@ class MessageBubble extends StatelessWidget {
         tooltip: 'Acciones del mensaje',
         onPressed: onMenu,
         size: 16,
-        tapSize: 22,
+        // 48 px de área táctil: es el objetivo mínimo accesible y el `tooltip`
+        // ya es el label para TalkBack (ver `AppIconButton`).
+        tapSize: 48,
         color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
       ),
     );
@@ -602,13 +639,16 @@ class MessageBubble extends StatelessWidget {
   /// Detener del composer. Con el `danger` gris del chrome, el error del
   /// provider y el error de una tool se veían como dos cosas distintas y el
   /// Detener era el único botón de color de la pantalla.
-  Widget _errorCard(BuildContext context, OcErrorInfo error) {
+  Widget _errorCard(BuildContext context, String messageId, OcErrorInfo error) {
     final scheme = Theme.of(context).colorScheme;
     final brightness = Theme.of(context).brightness;
     final danger = AppColors.diffDelOf(brightness);
     final dangerSoft = brightness == Brightness.dark
         ? AppColors.diffDelSoftDark
         : AppColors.diffDelSoft;
+    final detail = error.name == null
+        ? error.message
+        : '${error.name}: ${error.message}';
     return LayerGate(
       'chat.msg.error',
       child: Container(
@@ -642,9 +682,7 @@ class MessageBubble extends StatelessWidget {
             ),
             const SizedBox(height: 3),
             SelectableText(
-              error.name == null
-                  ? error.message
-                  : '${error.name}: ${error.message}',
+              detail,
               style: TextStyle(
                 fontFamily: 'monospace',
                 fontSize: 11.5,
@@ -652,10 +690,45 @@ class MessageBubble extends StatelessWidget {
                 color: scheme.onSurface,
               ),
             ),
+            const SizedBox(height: 6),
+            // [Reintentar] manda el turno de nuevo, [Copiar] lleva el detalle
+            // al portapapeles y [Detener] corta el turno. Reintentar y Detener
+            // sólo si hay canal (los cablea `chat_view` al viewmodel).
+            Wrap(
+              spacing: AppSpacing.sm,
+              children: [
+                if (onRetryTurn != null)
+                  _GhostButton(
+                    key: errorRetryKey(messageId),
+                    label: 'Reintentar',
+                    onTap: onRetryTurn,
+                  ),
+                _GhostButton(
+                  key: errorCopyKey(messageId),
+                  label: 'Copiar',
+                  onTap: () => _copyError(context, detail),
+                ),
+                if (onStopTurn != null)
+                  _GhostButton(
+                    key: errorStopKey(messageId),
+                    label: 'Detener',
+                    onTap: onStopTurn,
+                  ),
+              ],
+            ),
           ],
         ),
       ),
     );
+  }
+
+  /// Copia el detalle del error y avisa. Sin el aviso no hay forma de saber si
+  /// funcionó.
+  void _copyError(BuildContext context, String text) {
+    unawaited(Clipboard.setData(ClipboardData(text: text)));
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(const SnackBar(content: Text('Error copiado')));
   }
 
   /// `.syspill`: píldora centrada delgada de 12 px.
@@ -943,6 +1016,48 @@ class _Thumb extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Placeholder de la tira de imágenes con el modo de bajo consumo.
+///
+/// No baja nada: dice cuántas imágenes nombra el mensaje y las muestra al
+/// tocarlo. Vive acá y no en la vista porque el estado ("ya las pidió") es
+/// local a la burbuja.
+class _ImagesPlaceholder extends StatefulWidget {
+  const _ImagesPlaceholder({
+    required this.paths,
+    required this.urlOf,
+    required this.headers,
+  });
+
+  final List<String> paths;
+  final Uri Function(String path) urlOf;
+  final Map<String, String> headers;
+
+  @override
+  State<_ImagesPlaceholder> createState() => _ImagesPlaceholderState();
+}
+
+class _ImagesPlaceholderState extends State<_ImagesPlaceholder> {
+  bool _cargar = false;
+
+  @override
+  Widget build(BuildContext context) {
+    if (_cargar) {
+      return MessageImages(
+        paths: widget.paths,
+        urlOf: widget.urlOf,
+        headers: widget.headers,
+      );
+    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: _GhostButton(
+        label: 'tocar para cargar (${widget.paths.length})',
+        onTap: () => setState(() => _cargar = true),
+      ),
     );
   }
 }
@@ -1581,6 +1696,10 @@ class _QuestionCardState extends State<QuestionCard> {
     return Semantics(
       button: true,
       selected: picked,
+      // TalkBack: la opción se anuncia con su rótulo y su detalle como pista.
+      // Sin esto las opciones eran botones sin nombre.
+      label: option.label,
+      hint: option.detail,
       child: Material(
         color: picked ? soft : scheme.surface,
         borderRadius: AppRadius.mdAll,
@@ -1772,6 +1891,28 @@ class _TypingDotsState extends State<TypingDots>
   @override
   Widget build(BuildContext context) {
     final color = Theme.of(context).colorScheme.onSurfaceVariant;
+    // Sin animaciones (accesibilidad): los tres puntos quietos. El turno sigue
+    // en curso, sólo no parpadea.
+    if (MediaQuery.disableAnimationsOf(context)) {
+      return SizedBox(
+        height: 18,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < 3; i++)
+              Container(
+                width: 6,
+                height: 6,
+                margin: const EdgeInsets.only(right: 5),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.6),
+                  shape: BoxShape.circle,
+                ),
+              ),
+          ],
+        ),
+      );
+    }
     return SizedBox(
       height: 18,
       child: Row(
@@ -1886,7 +2027,9 @@ class _PendingButton extends StatelessWidget {
       tooltip: tooltip,
       onPressed: onPressed,
       size: 16,
-      tapSize: 28,
+      // 48 px de área táctil, como el menú del mensaje: el `tooltip` ya es el
+      // label para TalkBack y el test verifica que no haya rótulo visible.
+      tapSize: 48,
       color: color,
     );
   }

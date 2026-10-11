@@ -35,12 +35,14 @@ class FileCrumb {
   String toString() => 'FileCrumb($label -> $path)';
 }
 
-/// Texto listo para pintar en la UI. Mismo criterio que `ConnectView`: la
-/// jerarquía sellada se desenvuelve (su `toString` es `'$runtimeType: $message'`)
-/// y lo que no es del dominio se muestra con su `toString`, que en Dart ya
-/// incluye el tipo.
-String describeFilesError(Object error) =>
-    error is OchError ? error.message : error.toString();
+/// Texto listo para pintar en la UI. Los errores del dominio ya vienen en
+/// español accionable ([OchError.message]); lo que no es del dominio (un
+/// `SocketException`, un timeout) no se vuelca crudo: puede traer rutas o
+/// URLs con secretos y además está en inglés técnico. Sale el genérico con
+/// Reintentar al lado.
+String describeFilesError(Object error) => error is OchError
+    ? error.message
+    : 'No se pudo cargar. Revisá la conexión y reintentá.';
 
 class FilesViewModel extends ChangeNotifier {
   /// El directorio de arranque es la raíz; para estar en otro lado se llama

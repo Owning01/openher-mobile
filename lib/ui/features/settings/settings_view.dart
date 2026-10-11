@@ -23,7 +23,8 @@ import '../../core/app_icon.dart';
 import '../../core/theme_variants.dart';
 import '../../core/tokens.dart';
 import '../../core/layer_gate.dart';
-import '../connect/connect_view.dart' show ServerProbe, describeProbeError;
+import '../connect/connect_view.dart'
+    show ConnectView, ServerProbe, describeProbeError;
 
 /// Fila de la lista de ajustes.
 ///
@@ -342,6 +343,9 @@ class SettingsView extends StatefulWidget {
   /// Fila `Tamaño de texto`.
   static const Key textScaleRowKey = Key('settings-row-textscale');
 
+  /// Fila `Editar servidor`.
+  static const Key editServerRowKey = Key('settings-row-edit-server');
+
   /// Fila de la capa [key].
   static Key layerRowKey(String key) => Key('settings-layer-$key');
 
@@ -368,6 +372,12 @@ class _SettingsViewState extends State<SettingsView> {
   bool _variantsOpen = false;
 
   bool _probing = false;
+
+  /// Resultado del último `Probar conexión`: `null` = todavía no se probó en
+  /// esta sesión. Es el "estado real": lo que el server contestó de verdad y
+  /// cuándo, no un rótulo estático.
+  bool? _lastProbeOk;
+  DateTime? _lastProbeAt;
 
   @override
   void initState() {
@@ -456,7 +466,8 @@ class _SettingsViewState extends State<SettingsView> {
   // ───────────────────────────── acciones ────────────────────────────────────
 
   /// `Probar conexión`: el probe de `/api/location` (API_CONTRACT §1.6). El
-  /// resultado va en un snackbar; no cambia nada guardado.
+  /// resultado va en un snackbar; no cambia nada guardado. Además queda en
+  /// [_lastProbeOk]/[_lastProbeAt], que es lo que pinta la fila Estado.
   Future<void> _probe() async {
     final config = widget.config;
     final probe = widget.onProbe;
@@ -466,16 +477,67 @@ class _SettingsViewState extends State<SettingsView> {
     try {
       await probe(config);
       message = 'Conexión OK con ${config.baseUrl}';
+      if (mounted) {
+        _lastProbeOk = true;
+        _lastProbeAt = DateTime.now();
+      }
     } catch (error) {
       message =
           'No se pudo conectar: '
           '${describeProbeError(error, secret: config.password)}';
+      if (mounted) {
+        _lastProbeOk = false;
+        _lastProbeAt = DateTime.now();
+      }
     }
     if (!mounted) return;
     setState(() => _probing = false);
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// El valor de la fila Estado: lo último que el server contestó de verdad.
+  /// Sin probe en esta sesión, el rótulo estático de siempre (el test lo
+  /// verifica).
+  String _estadoValue() {
+    final config = widget.config;
+    if (config == null) return 'Sin conectar';
+    final ok = _lastProbeOk;
+    final at = _lastProbeAt;
+    if (ok == null || at == null) return 'Conectado';
+    final hora =
+        '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+    return ok ? 'OK · $hora' : 'Falló · $hora';
+  }
+
+  /// Abre el formulario de conexión con la config actual para editar el
+  /// servidor. `Conectar` prueba antes de guardar, así que al volver lo
+  /// guardado ya está verificado; acá sólo se avisa.
+  ///
+  /// La config nueva la toma el shell al arrancar (lee de disco): Ajustes no
+  /// la propaga en vivo.
+  Future<void> _editServer() async {
+    final config = widget.config;
+    final probe = widget.onProbe;
+    if (config == null || probe == null || !mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ConnectView(
+          initialConfig: config,
+          onProbe: probe,
+          creds: widget.creds,
+          onConnected: (nueva) {
+            Navigator.of(context).pop();
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+              SnackBar(
+                content: Text('Servidor actualizado: ${nueva.baseUrl}'),
+              ),
+            );
+          },
+        ),
+      ),
+    );
   }
 
   Future<void> _setAnimations(bool value) async {
@@ -535,6 +597,9 @@ class _SettingsViewState extends State<SettingsView> {
     );
     if (confirmed != true) return;
     await widget.creds.clear();
+    // La caché en memoria también se descarta: sin esto una lectura `cached`
+    // posterior resucitaría la config borrada del disco.
+    widget.creds.remember(null);
     if (!mounted) return;
     widget.onLoggedOut?.call();
   }
@@ -622,7 +687,7 @@ class _SettingsViewState extends State<SettingsView> {
               SettingsRow(
                 key: const Key('settings-row-status'),
                 label: 'Estado',
-                value: config == null ? 'Sin conectar' : 'Conectado',
+                value: _estadoValue(),
                 // El verde del scope de diffs: el chrome es monocromo, pero el
                 // estado de la conexión es un dato, no cromo.
                 dotColor: config == null
@@ -630,9 +695,23 @@ class _SettingsViewState extends State<SettingsView> {
                     : AppColors.diffAddOf(Theme.of(context).brightness),
               ),
               SettingsRow(
+                key: SettingsView.editServerRowKey,
+                label: 'Editar servidor',
+                // Sin config o sin probe no hay nada que editar ni re-probar.
+                onTap: canProbe ? _editServer : null,
+              ),
+              SettingsRow(
                 key: SettingsView.probeRowKey,
                 label: 'Probar conexión',
-                onTap: canProbe ? _probe : null,
+                onTap: canProbe && !_probing ? _probe : null,
+                // Spinner mientras prueba: el probe es un request y tarda.
+                trailing: _probing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : null,
               ),
             ],
           ),

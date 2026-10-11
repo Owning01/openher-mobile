@@ -149,7 +149,18 @@ void main() {
       await vm.load().timeout(kBudget);
       sw.stop();
 
-      expect(vm.messages, hasLength(10000));
+      // **Adjudicado 2026-10-11.** La lista recorta a los últimos 300
+      // (`maxMessages`: 1000 markdowns + spans + imágenes = OOM en gama baja,
+      // medido en auditoría). La página gigante igual se ingiere sin colgar;
+      // lo que cambió es la premisa "retener todo".
+      //
+      // Ojo con el orden: este fixture viene ascendente (`msg_0` primero), al
+      // revés que el server (que pagina desc y el `_fetch` da vuelta). El
+      // recorte conserva la cola de lo ingerido, que acá es `msg_299..msg_0`;
+      // en producción la cola es lo más nuevo.
+      expect(vm.messages, hasLength(300));
+      expect(vm.messages.first.id, 'msg_299');
+      expect(vm.messages.last.id, 'msg_0');
       expect(sw.elapsed, lessThan(kBudget));
     });
   });

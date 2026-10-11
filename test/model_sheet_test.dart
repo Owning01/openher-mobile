@@ -10,6 +10,7 @@
 /// - que cerrar sin tocar devuelva `null` y no "el modelo de la sesión".
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -19,9 +20,11 @@ import 'package:http/testing.dart';
 import 'package:openher_mobile/core/network/api_client.dart';
 import 'package:openher_mobile/core/network/server_config.dart';
 import 'package:openher_mobile/data/repositories/catalog_repository.dart';
+import 'package:openher_mobile/domain/models/agent_catalog.dart';
 import 'package:openher_mobile/domain/models/message.dart' show ModelRef;
 import 'package:openher_mobile/ui/core/app_icon.dart';
 import 'package:openher_mobile/ui/core/theme.dart';
+import 'package:openher_mobile/ui/features/chat/agent_sheet.dart';
 import 'package:openher_mobile/ui/features/chat/model_sheet.dart';
 
 const ServerConfig kConfig = ServerConfig(
@@ -378,5 +381,177 @@ void main() {
       isNull,
       reason: 'ni la fila del último modelo ni sus niveles desbordan',
     );
+  });
+
+  group('foco y encabezados', () {
+    /// ¿El foco del teclado/lector está dentro de [dentro]?
+    bool focoDentro(WidgetTester tester, Finder dentro) {
+      final contexto = tester.binding.focusManager.primaryFocus?.context;
+      if (contexto == null) return false;
+      final objetivos = dentro.evaluate().toSet();
+      var hallado = false;
+      contexto.visitAncestorElements((e) {
+        if (objetivos.contains(e)) hallado = true;
+        return true;
+      });
+      return hallado;
+    }
+
+    testWidgets('el buscador recibe el foco al abrir', (tester) async {
+      await pumpSheet(tester, FakeServer(kSmallCatalog).repository());
+      expect(
+        focoDentro(tester, find.byKey(ModelSheet.searchKey)),
+        isTrue,
+        reason: 'la hoja se abre para buscar',
+      );
+    });
+
+    testWidgets('el título es encabezado para el lector', (tester) async {
+      await pumpSheet(tester, FakeServer(kSmallCatalog).repository());
+      expect(find.bySemanticsLabel('Modelo'), findsOneWidget);
+    });
+
+    testWidgets('en error el foco cae en Reintentar', (tester) async {
+      await pumpSheet(
+        tester,
+        FakeServer('{"message":"se rompió"}', status: 500).repository(),
+      );
+      expect(find.byKey(ModelSheet.errorKey), findsOneWidget);
+      final reintentar = find.ancestor(
+        of: find.text('Reintentar'),
+        matching: find.byType(TextButton),
+      );
+      expect(
+        focoDentro(tester, reintentar),
+        isTrue,
+        reason: 'la acción segura no pide un toque previo',
+      );
+    });
+
+    testWidgets('sin animaciones la carga es texto estático', (tester) async {
+      final puerta = Completer<http.Response>();
+      final repo = CatalogRepository(
+        ApiClient(
+          config: kConfig,
+          client: MockClient((_) => puerta.future),
+          backoff: (_) => Duration.zero,
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: MediaQuery(
+              data: const MediaQueryData(disableAnimations: true),
+              child: ModelSheet(
+                catalog: repo,
+                onClose: () {},
+                onPick: (_) {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Cargando…'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
+      // Se completa para no dejar timers del cliente colgados al cerrar.
+      puerta.complete(
+        http.Response(
+          '{"data":[]}',
+          200,
+          headers: {'content-type': 'application/json'},
+        ),
+      );
+      await tester.pumpAndSettle();
+    });
+  });
+
+  group('la hoja de agente comparte el contrato', () {
+    final catalogo = AgentCatalog(const [
+      AgentInfo(
+        id: 'build',
+        name: 'Build',
+        mode: AgentMode.primary,
+        description: 'El agente por defecto.',
+        hidden: false,
+      ),
+    ]);
+
+    Future<void> pumpAgentes(
+      WidgetTester tester, {
+      Future<AgentCatalog> Function()? load,
+    }) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: AgentSheet(
+              load: load ?? () async => catalogo,
+              current: null,
+              onClose: () {},
+              onPick: (_) {},
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    bool focoDentro(WidgetTester tester, Finder dentro) {
+      final contexto = tester.binding.focusManager.primaryFocus?.context;
+      if (contexto == null) return false;
+      final objetivos = dentro.evaluate().toSet();
+      var hallado = false;
+      contexto.visitAncestorElements((e) {
+        if (objetivos.contains(e)) hallado = true;
+        return true;
+      });
+      return hallado;
+    }
+
+    testWidgets('buscador con foco y título como encabezado', (tester) async {
+      await pumpAgentes(tester);
+      expect(
+        focoDentro(tester, find.byKey(AgentSheet.searchKey)),
+        isTrue,
+      );
+      expect(find.bySemanticsLabel('Agente'), findsOneWidget);
+    });
+
+    testWidgets('en error el foco cae en Reintentar', (tester) async {
+      await pumpAgentes(tester, load: () async => throw StateError('caído'));
+      expect(find.byKey(AgentSheet.errorKey), findsOneWidget);
+      final reintentar = find.ancestor(
+        of: find.text('Reintentar'),
+        matching: find.byType(TextButton),
+      );
+      expect(focoDentro(tester, reintentar), isTrue);
+    });
+
+    testWidgets('sin animaciones la carga es texto estático', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: MediaQuery(
+              data: const MediaQueryData(disableAnimations: true),
+              child: AgentSheet(
+                load: () => Completer<AgentCatalog>().future,
+                current: null,
+                onClose: () {},
+                onPick: (_) {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Cargando…'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    });
   });
 }

@@ -201,6 +201,29 @@ void main() {
       final b = CodeHighlighter.spanFor('void a() {}', 'dart', base);
       expect(identical(a, b), isTrue);
     });
+
+    test('la clave no retiene el código: lleva hash y largo', () {
+      const a = 'void funcionAlfa() { return 1; }';
+      const b = 'void funcionBeta() { return 2; }';
+      expect(b.length, a.length, reason: 'mismo largo, distinto texto');
+      CodeHighlighter.spanFor(a, 'dart', base);
+      CodeHighlighter.spanFor(b, 'dart', base);
+      expect(
+        CodeHighlighter.cacheSize,
+        2,
+        reason: 'mismo largo pero distinto bloque: no hay falso hit',
+      );
+      final resumen = CodeHighlighter.debugKeySummaries().join('|');
+      expect(resumen, isNot(contains(a)));
+      expect(resumen, isNot(contains(b)));
+      for (final s in CodeHighlighter.debugKeySummaries()) {
+        expect(
+          s,
+          matches(RegExp(r'_CacheKey\(hash: -?\d+, length: \d+')),
+          reason: 'el resumen lleva sólo hash y largo, nunca el bloque',
+        );
+      }
+    });
   });
 }
 

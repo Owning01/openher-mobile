@@ -21,6 +21,10 @@ import 'package:flutter/material.dart';
 /// recorre los 8 cuadrados en diagonal, como el "breathing" de los operadores.
 /// La onda va en bucle infinito pero con un salto: cuando pasa del último al
 /// primero el brillo cae a cero, así que el reinicio no se lee como un glitch.
+///
+/// Con `MediaQuery.disableAnimationsOf` (menos movimiento pedido en el
+/// sistema) no hay onda: la grilla se pinta quieta, con el primer cuadrado en
+/// acento y el resto en reposo, y sin ticker corriendo.
 class SquaresSpinner extends StatefulWidget {
   const SquaresSpinner({
     super.key,
@@ -66,7 +70,18 @@ class _SquaresSpinnerState extends State<SquaresSpinner>
   @override
   void initState() {
     super.initState();
-    _c.repeat();
+    // El `repeat` vive en `didChangeDependencies` y no acá: con menos
+    // movimiento pedido no hay ticker corriendo.
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      if (_c.isAnimating) _c.stop();
+    } else if (!_c.isAnimating) {
+      _c.repeat();
+    }
   }
 
   @override
@@ -89,35 +104,52 @@ class _SquaresSpinnerState extends State<SquaresSpinner>
     final columns = math.max(1, (widget.squares / 2).round());
     final rows = (widget.squares / columns).ceil();
 
+    // Sin animaciones no se anima nada: grilla quieta y sin `AnimatedBuilder`
+    // (el ticker sigue existiendo pero nada lo escucha). El `Semantics` de
+    // "Pensando" se conserva: el estado se anuncia igual, sólo que quieto.
+    if (MediaQuery.disableAnimationsOf(context)) {
+      return Semantics(
+        label: 'Pensando',
+        child: ExcludeSemantics(child: _grid(reposo, accent, columns, rows)),
+      );
+    }
+
     return Semantics(
       label: 'Pensando',
       child: ExcludeSemantics(
         child: AnimatedBuilder(
           animation: _c,
-          builder: (context, _) {
-            // `Column` de `Row`s, no un `Row` de `Row`s: en un `Row` las filas
-            // se separan con un `SizedBox` **horizontal** y la grilla quedaba
-            // en una tira de 8 en línea en vez de 4x2.
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                for (var r = 0; r < rows; r++) ...<Widget>[
-                  if (r > 0) SizedBox(height: widget.gap),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: <Widget>[
-                      for (var c = 0; c < columns; c++) ...<Widget>[
-                        if (c > 0) SizedBox(width: widget.gap),
-                        _square(reposo, accent, r * columns + c),
-                      ],
-                    ],
-                  ),
-                ],
-              ],
-            );
-          },
+          builder: (context, _) => _grid(reposo, accent, columns, rows),
         ),
       ),
+    );
+  }
+
+  /// La grilla de cuadrados, con el brillo que le toca en este cuadro.
+  ///
+  /// Fuera del `AnimatedBuilder` a propósito: el cuadro quieto (sin
+  /// animaciones) y el animado comparten la misma geometría, y el test de
+  /// "son 8 cuadrados" vale para los dos.
+  Widget _grid(Color reposo, Color accent, int columns, int rows) {
+    // `Column` de `Row`s, no un `Row` de `Row`s: en un `Row` las filas
+    // se separan con un `SizedBox` **horizontal** y la grilla quedaba
+    // en una tira de 8 en línea en vez de 4x2.
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        for (var r = 0; r < rows; r++) ...<Widget>[
+          if (r > 0) SizedBox(height: widget.gap),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              for (var c = 0; c < columns; c++) ...<Widget>[
+                if (c > 0) SizedBox(width: widget.gap),
+                _square(reposo, accent, r * columns + c),
+              ],
+            ],
+          ),
+        ],
+      ],
     );
   }
 

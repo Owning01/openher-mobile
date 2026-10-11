@@ -283,9 +283,13 @@ void main() {
 
       expect(uri.path, '/api/event');
       expect(uri.path, isNot(contains('/session/')));
+      // ADJUDICADO 2026-10-11: la auth del stream es el header Basic solo
+      // (medido: da 200 en `/api/event` sin query). El `?auth_token=` exponía
+      // la credencial en la URL sin necesidad y ya no se manda.
       expect(
-        uri.queryParameters[ServerConfig.authTokenParam],
-        kConfig.authTokenQuery,
+        uri.queryParameters.containsKey(ServerConfig.authTokenParam),
+        isFalse,
+        reason: 'el stream no lleva credencial en el query',
       );
       expect(
         uri.queryParameters[ServerConfig.locationParam],
@@ -349,7 +353,10 @@ void main() {
       final keys = uri.queryParameters.keys.map((k) => k.toLowerCase());
 
       expect(keys, isNot(contains('sessionid')));
-      expect(keys, containsAll(<String>['auth_token', 'location[directory]']));
+      // ADJUDICADO 2026-10-11: `auth_token` tampoco va en el query (la auth es
+      // el header Basic). El único query declarado del stream es el location.
+      expect(keys, isNot(contains('auth_token')));
+      expect(keys, contains(ServerConfig.locationParam));
     });
 
     test('sin auth no inventa el param', () {
@@ -361,6 +368,43 @@ void main() {
         uri.queryParameters.containsKey(ServerConfig.authTokenParam),
         isFalse,
       );
+    });
+
+    test('el stream NO lleva auth_token en el query', () {
+      // MEDIDO: el header Basic solo da 200 en `/api/event`. El query con la
+      // credencial exponía `base64(user:pass)` en la URL sin necesidad.
+      // Si este test cae, el query volvió a llevar el token: romperlo es
+      // peor que un 401, porque la password queda en logs e historial.
+      final uri = newClient().streamUri();
+
+      expect(
+        uri.queryParameters.containsKey(ServerConfig.authTokenParam),
+        isFalse,
+      );
+      expect(uri.toString(), isNot(contains(kConfig.authTokenQuery!)));
+    });
+
+    test('el request del stream manda Authorization: Basic', () async {
+      // La contracara del anterior: sin token en el query, la auth tiene que
+      // ir en el header o el stream da 401.
+      String? seen;
+      final mock = MockClient((request) async {
+        seen = request.headers['authorization'];
+        return http.Response('', 500);
+      });
+      final sse = SseClient(
+        config: kConfig,
+        sessionId: 'ses_1',
+        client: mock,
+        maxAttempts: 1,
+        baseBackoff: Duration.zero,
+        maxBackoff: Duration.zero,
+      );
+      addTearDown(sse.dispose);
+      sse.connect();
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      expect(seen, kConfig.basicAuthHeader);
     });
 
     test('la URL del log sale redactada', () {

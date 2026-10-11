@@ -63,7 +63,7 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 | D7 | Deps directos: `http`, `flutter_secure_storage`, `speech_to_text`, `flutter_svg`, `shared_preferences`, `flutter_markdown_plus`, `highlight`, `connectivity_plus`, `image_picker`, `video_player`, `pdfrx`, `html`, `url_launcher`, `share_plus` (hoja Descargar). De test: `image_picker_platform_interface` y `plugin_platform_interface`, para fchear la plataforma del Clip |
 | D8 | Los 3 canales de error visibles (el escritorio se come `session.error`) |
 | D9 | Modo de bajo consumo **automático** sólo con red celular; el usuario puede desactivarlo a mano |
-| D10 | Autoupdate contra el manifiesto de la release, sin diálogos ni bloqueos. Un fallo del **chequeo** no se muestra; un fallo de **descarga** sí, con botón de **Volver a descargar** (`UpdateState.canRetry` = `failed && info != null && error != null`). Una descarga que no termina **borra el archivo a medias**: si no, pasa el piso de 2 MB de `_alreadyDownloaded` y el instalador recibe un APK truncado |
+| D10 | Autoupdate contra el manifiesto de la release, sin diálogos ni bloqueos. Un fallo del **chequeo** no se muestra; un fallo de **descarga** sí, con botón de **Volver a descargar** (`UpdateState.canRetry` = `failed && info != null && error != null`). Una descarga que no termina **borra el archivo a medias**: si no, pasa el piso de 2 MB de `_alreadyDownloaded` y el instalador recibe un APK truncado. El manifiesto trae `sha256` del APK (lo genera `publish-update.ps1`) y el cliente lo verifica antes de `ready`, exige `https://` y muestra fingerprint; la descarga se puede cancelar y borra viejos con `discardApks` |
 | D11 | El visor de archivos decide **por extensión**, no por el botón que se apretó: `domain/models/file_type.dart` + `ui/features/files/file_preview.dart` |
 | D12 | El Clip abre el selector **multiple** (`pickMultiImage`): las fotos se acumulan en `_pending`, se ven en la tira del composer y se manda **una sola** lista. El shell es el unico que pasa `attachments` y `onRemoveAttachment`; `onSend` no las vuelve a mezclar |
 | D13 | Todo mensaje con texto es **seleccionable** (el del usuario con `SelectableText`, el markdown con `selectable: true`, el bloque de código con `SelectableText.rich`) y trae un botón `more-horizontal` con **Copiar mensaje** y, en los del usuario, **Deshacer y editar**. Deshacer = `revert/stage` + `revert/commit` y **devuelve el texto al input** vía `ChatComposer.controller`, que el shell crea y libera |
@@ -110,7 +110,7 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 - **Deltas:** se enrutan por `assistantMessageID` del evento, no "al último mensaje".
 - **Preguntas:** no hay endpoint listable (`/api/question/request` → 404). Se responde por
   `POST /api/session/{id}/question/{requestID}/reply`, con fallback a prompt.
-- **Stream:** nunca mandar `?sessionID=` (400, query no declarada) ni `?after=` (no existe).
+- **Stream:** nunca mandar `?sessionID=` (400, query no declarada) ni `?after=` (no existe) ni `?auth_token=` (solo header Basic, medido 200 sin query).
 - **Modelos y agentes:** `GET /api/model` (102 modelos) y `GET /api/agent` (26 crudos, 20
   elegibles). Los **niveles de pensamiento son las `variants`** del modelo, no un campo aparte.
   Un agente **no** trae modelo.

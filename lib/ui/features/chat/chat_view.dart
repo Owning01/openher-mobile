@@ -34,6 +34,7 @@ import 'composer_suggestions.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../../data/repositories/catalog_repository.dart';
+import '../../../core/network/sse_client.dart';
 import '../../../domain/models/agent_catalog.dart';
 import '../../../domain/models/errors.dart';
 import '../../../domain/models/message.dart';
@@ -243,6 +244,10 @@ class _ChatViewState extends State<ChatView> {
     // hay stream ni timers (bateria).
     _vm.setVisible(false);
     _vm.removeListener(_onVm);
+    // El debounce de búsqueda de archivos es un Timer vivo: sin esto sigue
+    // colgado después del dispose y su callback toca un viewmodel muerto.
+    _fileDebounce?.cancel();
+    _fileDebounce = null;
     _scroll
       ..removeListener(_onScroll)
       ..dispose();
@@ -298,6 +303,15 @@ class _ChatViewState extends State<ChatView> {
         // Capa chat.appbar: apagar el toggle saca la barra entera.
         LayerGate('chat.appbar', child: _appBar()),
         if (_vm.error case final String message) _errorBanner(message),
+        // La sesión se borró en el server: banner propio con salida, no un
+        // error reintentable más.
+        if (_vm.sessionGone) _goneBanner(),
+        // El stream avisa su estado: sin socket en vivo el chat igual se
+        // actualiza por sondeo, y eso se dice en vez de dejarlo adivinar.
+        if (_vm.streamState == StreamState.polling)
+          _streamBanner('Actualizando por sondeo…'),
+        if (_vm.streamState == StreamState.reconnecting)
+          _streamBanner('Reconectando…'),
         // Capa chat.header.progress: apagada por diseño (se puede
         // prender desde Ajustes). Indica que hay un turno en curso.
         LayerGate(
@@ -477,6 +491,74 @@ class _ChatViewState extends State<ChatView> {
 
   // ──────────────────────────── mensajes ────────────────────────────
 
+  /// La sesión ya no existe en el server: se dice y se ofrece la salida. El
+  /// composer queda deshabilitado (ver `_composer`).
+  Widget _goneBanner() {
+    final scheme = Theme.of(context).colorScheme;
+    final danger = AppColors.dangerOf(Theme.of(context).brightness);
+    return Material(
+      color: scheme.surfaceContainer,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          AppSpacing.md,
+          AppSpacing.sm,
+          AppSpacing.sm,
+          AppSpacing.sm,
+        ),
+        child: Row(
+          children: [
+            AppIcon('alert-triangle', size: 16, color: danger),
+            const SizedBox(width: 6),
+            const Expanded(
+              child: Text(
+                'La sesión se eliminó en el servidor.',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12),
+              ),
+            ),
+            TextButton(
+              onPressed: widget.onBack,
+              child: const Text('Volver a la lista'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Estado del stream en vivo: una línea que avisa, no un error.
+  Widget _streamBanner(String message) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surfaceContainerLow,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.md,
+          vertical: 4,
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 1.5),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              message,
+              style: TextStyle(
+                fontSize: 11.5,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _messages() {
     final messages = _vm.messages;
     // Los ítems fijos van **arriba** de la lista y no son un `header`: es un
@@ -583,8 +665,15 @@ class _ChatViewState extends State<ChatView> {
                 return _vm.api.config.fileUrl(nombre, directory: carpeta);
               },
               imageHeaders: _vm.api.config.binaryHeaders,
+              // Con datos móviles las imágenes no se bajan solas: la burbuja
+              // muestra "tocar para cargar" (ver `MessageBubble.imagesEnabled`).
+              imagesEnabled: _vm.policy.imagesEnabled,
+              // La card de error del assistant: Reintentar manda el turno de
+              // nuevo y Detener lo corta (ver `ChatViewModel.retryTurn`).
+              onRetryTurn: _vm.retryTurn,
+              onStopTurn: _vm.abort,
               onPendingEdit: _onPendingEdit,
-              onPendingDiscard: _vm.discardPending,
+              onPendingDiscard: _onPendingDiscard,
               onPendingSend: _vm.confirmSend,
               // Ruta a un plan en el texto: se baja y se abre nativo.
               onOpenPlan: _openPlan,
@@ -843,7 +932,8 @@ class _ChatViewState extends State<ChatView> {
       'chat.composer',
       child: ChatComposer(
         working: _vm.working,
-        canSend: true,
+        // Con la sesión borrada no se manda nada: el server ya contestó 404.
+        canSend: !_vm.sessionGone,
         modelLabel: _modelLabel,
         agentLabel: _agentLabel,
         // Con `window` para que aparezca el porcentaje: "102.9k contexto · 51%"
@@ -1211,11 +1301,40 @@ class _ChatViewState extends State<ChatView> {
   /// Con él, el mensaje desaparece del chat y sus palabras vuelven al input,
   /// listas para corregirse y volver a mandarse — que es lo que se espera de
   /// un "deshacer" en cualquier parte.
+  ///
+  /// Si el deshacer alcanza a más de un mensaje, se confirma: tirar varios
+  /// mensajes con un toque no tiene vuelta fácil. Con uno solo no se pregunta
+  /// (el texto vuelve al composer igual).
   Future<void> _revertTo(String? messageId, {String? restore}) async {
     try {
       if (messageId == null) {
         _vm.reportError('No hay ningun mensaje al que volver.');
         return;
+      }
+      final n = _countFrom(messageId);
+      if (n > 1 && mounted) {
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (dialog) => AlertDialog(
+            title: const Text('Deshacer'),
+            content: Text(
+              restore == null || restore.trim().isEmpty
+                  ? 'Se deshacen $n mensajes.'
+                  : 'Se deshacen $n mensajes y el texto vuelve al composer.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialog).pop(false),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(dialog).pop(true),
+                child: const Text('Deshacer'),
+              ),
+            ],
+          ),
+        );
+        if (ok != true || !mounted) return;
       }
       await _vm.api.stageRevert(
         _vm.sessionId,
@@ -1231,12 +1350,70 @@ class _ChatViewState extends State<ChatView> {
     }
   }
 
+  /// Cuántos mensajes caen si se deshace hasta [messageId] (del ancla al final).
+  int _countFrom(String messageId) {
+    final messages = _vm.messages;
+    final at = messages.indexWhere((m) => m.id == messageId);
+    if (at < 0) return 1;
+    return messages.length - at;
+  }
+
   /// Pone texto en el input, con el cursor al final.
   ///
   /// **No** pide el foco a proposito: en un telefono eso abre el teclado encima
   /// del chat justo cuando el usuario quiere mirar lo que quedo. El texto esta
   /// a la vista, se toca el input si lo quiere editar, y el teclado no tapa nada.
+  ///
+  /// Si el input ya tiene un borrador distinto, se pregunta: pisarlo en
+  /// silencio pierde lo que el usuario estaba escribiendo.
   void _prefillComposer(String text) {
+    if (!mounted) return;
+    final actual = _composerController.text;
+    if (actual.trim().isNotEmpty && actual != text) {
+      unawaited(_prefillConBorrador(text, actual));
+      return;
+    }
+    _setComposer(text);
+  }
+
+  /// El input ya tiene texto y llega otro: Reemplazar lo pisa, Agregar lo suma
+  /// abajo, Cancelar deja el borrador como está.
+  Future<void> _prefillConBorrador(String nuevo, String actual) async {
+    final op = await showDialog<String>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('Hay un borrador'),
+        content: const Text(
+          'El composer ya tiene texto. ¿Qué hacer con lo deshecho?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialog).pop('cancelar'),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialog).pop('agregar'),
+            child: const Text('Agregar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialog).pop('reemplazar'),
+            child: const Text('Reemplazar'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    switch (op) {
+      case 'reemplazar':
+        _setComposer(nuevo);
+      case 'agregar':
+        _setComposer('$actual\n$nuevo');
+      default:
+        break;
+    }
+  }
+
+  void _setComposer(String text) {
     if (!mounted) return;
     _composerController.value = TextEditingValue(
       text: text,
@@ -1272,6 +1449,23 @@ class _ChatViewState extends State<ChatView> {
     final text = _vm.takePendingText(localId);
     if (text == null) return;
     _prefillComposer(text);
+  }
+
+  /// Descarta un pendiente con Deshacer 5 s: si fue un toque de más, el mensaje
+  /// vuelve a su lugar (ver `ChatViewModel.restorePending`).
+  void _onPendingDiscard(String localId) {
+    _vm.discardPending(localId);
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(
+        content: const Text('Mensaje descartado'),
+        duration: const Duration(seconds: 5),
+        action: SnackBarAction(
+          label: 'Deshacer',
+          onPressed: _vm.restorePending,
+        ),
+      ),
+    );
   }
 
   Future<void> _openMessageMenu(SessionMessage message) async {
@@ -1991,12 +2185,16 @@ class _ThinkingRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // Sin animaciones (accesibilidad): el rótulo quieto, sin la grilla.
+    final quieto = MediaQuery.disableAnimationsOf(context);
     return Padding(
       padding: const EdgeInsets.only(top: AppSpacing.xs, bottom: AppSpacing.md),
       child: Row(
         children: <Widget>[
-          const SquaresSpinner(),
-          const SizedBox(width: AppSpacing.md),
+          if (!quieto) ...[
+            const SquaresSpinner(),
+            const SizedBox(width: AppSpacing.md),
+          ],
           Text(
             'Pensando',
             style: theme.textTheme.labelSmall?.copyWith(

@@ -83,7 +83,28 @@ class _PlanViewState extends State<PlanView> {
     final pending = _answers.unanswered(asks, _seenAsks);
     return Scaffold(
       appBar: AppBar(
-        title: Text(_doc.title.isEmpty ? 'Plan' : _doc.title),
+        // El título es el nombre del archivo (lo que el usuario reconoce de
+        // Archivos/chat); el título del documento va debajo cuando difiere.
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              widget.fileName.isEmpty ? 'Plan' : widget.fileName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            if (_doc.title.isNotEmpty && _doc.title != widget.fileName)
+              Text(
+                _doc.title,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+          ],
+        ),
         actions: [
           if (pending > 0)
             Padding(
@@ -269,10 +290,7 @@ class _PlanViewState extends State<PlanView> {
                 Row(
                   children: [
                     TextButton(
-                      onPressed: () {
-                        _answers.reset();
-                        Navigator.of(sheet).pop();
-                      },
+                      onPressed: () => _confirmReset(sheet),
                       child: Text(
                         _strings.reset,
                         style: TextStyle(
@@ -302,6 +320,39 @@ class _PlanViewState extends State<PlanView> {
         ),
       ),
     );
+  }
+
+  /// Borrar todo pide confirmación: es destructivo (decisiones, ediciones,
+  /// tachados y comentarios) y un toque sin querer no puede vaciar el plan.
+  Future<void> _confirmReset(BuildContext sheet) async {
+    final ok = await showDialog<bool>(
+      context: sheet,
+      builder: (dialog) => AlertDialog(
+        title: Text(_strings.es ? 'Borrar respuestas' : 'Clear answers'),
+        content: Text(
+          _strings.es
+              ? 'Se borran decisiones, ediciones, tachados y comentarios. No se puede deshacer.'
+              : 'Decisions, edits, strikes and comments are deleted. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialog).pop(false),
+            child: Text(_strings.es ? 'Cancelar' : 'Cancel'),
+          ),
+          TextButton(
+            key: const ValueKey('plan-reset-confirm'),
+            onPressed: () => Navigator.of(dialog).pop(true),
+            child: Text(
+              _strings.es ? 'Borrar todo' : 'Clear all',
+              style: TextStyle(color: PlanPalette.of(sheet).red),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    _answers.reset();
+    if (sheet.mounted) Navigator.of(sheet).pop();
   }
 
   Widget _decisionLine(

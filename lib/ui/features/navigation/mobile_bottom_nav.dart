@@ -93,7 +93,10 @@ class _NavItem extends StatelessWidget {
       button: true,
       label: tab.label,
       child: InkWell(
-        onTap: enabled ? onTap : null,
+        // Siempre se puede tocar: con el Chat deshabilitado (sin sesión) el
+        // shell redirige a Sesiones y avisa, en vez de un botón muerto.
+        // `enabled` sólo cambia lo visual.
+        onTap: onTap,
         // El chrome es monocromo: sin splash de tinte.
         splashFactory: NoSplash.splashFactory,
         child: Stack(

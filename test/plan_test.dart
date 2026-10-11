@@ -253,6 +253,25 @@ void main() {
   });
 
   group('respuestas', () {
+    test('reset borra decisiones, ediciones, tachados y comentarios', () {
+      final doc = parsePlan(kPlan);
+      final answers = PlanAnswers(planKey: 'reset-test');
+      addTearDown(answers.dispose);
+      final ask = PlanAnswers.allAsksOf(doc).single.ask;
+      answers.applyDefaults(ask);
+      answers.setValues(ask.id, ask.controls.single, ['500']);
+      answers.setComment('claim:1', 'revisar tope');
+      answers.toggleStrike('calls:3');
+      answers.setEdit('aviso', 'nuevo texto');
+      expect(answers.buildResponse(doc, {'tope'}), contains('revisar tope'));
+
+      answers.reset();
+
+      expect(answers.picked, isEmpty);
+      expect(answers.strikes, isEmpty);
+      expect(answers.edits, isEmpty);
+      expect(answers.comments, isEmpty);
+    });
     test('defaults, elección y markdown con el formato de la skill', () {
       final doc = parsePlan(kPlan);
       final answers = PlanAnswers(planKey: 'test');
@@ -491,6 +510,73 @@ void main() {
     });
   });
 
+  group('DraftView: el controller vive en el State', () {
+    testWidgets('no pierde foco ni texto ante un rebuild externo', (
+      tester,
+    ) async {
+      // El bug: el controller se creaba en el `build`, así que cada rebuild
+      // del padre (el `answers` notifica en cada tecla) cerraba el teclado y
+      // tiraba lo escrito. El controller vive en initState/dispose.
+      final answers = PlanAnswers(planKey: 'draft-guard');
+      addTearDown(answers.dispose);
+      var seed = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setSt) => Column(
+                children: [
+                  TextButton(
+                    onPressed: () => setSt(() => seed++),
+                    child: Text('rebuild $seed'),
+                  ),
+                  DraftView(
+                    draft: const DraftExhibit(
+                      id: 'aviso',
+                      label: 'Aviso',
+                      text: 'Línea uno.',
+                    ),
+                    answers: answers,
+                    strings: const PlanStrings(true),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final field = find.byKey(const ValueKey('plan-draft-aviso'));
+      await tester.tap(field);
+      await tester.pump();
+      expect(
+        tester.testTextInput.isVisible,
+        isTrue,
+        reason: 'el teclado abrió',
+      );
+      await tester.enterText(field, 'texto editado');
+      await tester.pump();
+
+      // Rebuild externo con el teclado abierto y texto a medio escribir.
+      await tester.tap(find.textContaining('rebuild'));
+      await tester.pump();
+
+      expect(
+        tester.testTextInput.isVisible,
+        isTrue,
+        reason: 'el foco no se pierde ante un rebuild externo',
+      );
+      expect(
+        find.text('texto editado'),
+        findsOneWidget,
+        reason: 'el texto no se pierde ante un rebuild externo',
+      );
+      expect(answers.edits['aviso'], 'texto editado');
+    });
+  });
+
   group('PlanView widget', () {    Future<void> pumpPlan(WidgetTester tester) async {
       await tester.pumpWidget(
         MaterialApp(
@@ -530,6 +616,46 @@ void main() {
       expect(find.textContaining('# Re: Plan de prueba'), findsOneWidget);
       expect(find.text('Copiar respuesta'), findsOneWidget);
       expect(find.text('Borrar todo'), findsOneWidget);
+    });
+
+    testWidgets('el título es el fileName y el badge dice N sin abrir', (
+      tester,
+    ) async {
+      await pumpPlan(tester);
+
+      // El fileName es lo que el usuario reconoce (viene de Archivos/chat);
+      // el título del documento va debajo.
+      expect(find.text('plan-test'), findsOneWidget);
+      expect(find.text('Plan de prueba'), findsOneWidget);
+      // Una decisión sin abrir: el badge lo dice.
+      expect(find.text('1 sin abrir'), findsOneWidget);
+    });
+
+    testWidgets('Borrar todo pide confirmación y sólo borra al confirmar', (
+      tester,
+    ) async {
+      await pumpPlan(tester);
+      await tester.tap(find.text('Responder'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      await tester.tap(find.text('Borrar todo'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Borrar respuestas'), findsOneWidget);
+
+      // Cancelar: la hoja sigue abierta y no se borró nada.
+      await tester.tap(find.text('Cancelar'));
+      await tester.pumpAndSettle();
+      expect(find.text('Tu respuesta'), findsOneWidget);
+
+      // Confirmar: se borra y la hoja se cierra.
+      await tester.tap(find.text('Borrar todo'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.byKey(const ValueKey('plan-reset-confirm')));
+      await tester.pumpAndSettle();
+      expect(find.text('Tu respuesta'), findsNothing);
     });
 
     testWidgets('en oscuro con el plan real la hoja sale completa', (

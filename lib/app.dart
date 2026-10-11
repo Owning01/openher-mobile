@@ -119,6 +119,14 @@ class _OpenHerMobileAppState extends State<OpenHerMobileApp> {
             AppThemeMode.light => ThemeMode.light,
             AppThemeMode.dark => ThemeMode.dark,
           },
+          // El tamaño de texto de Ajustes se aplica a toda la app. `builder`
+          // envuelve cada ruta, así que vale también para diálogos y hojas.
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              textScaler: TextScaler.linear(prefs.textScaleValue),
+            ),
+            child: child ?? const SizedBox.shrink(),
+          ),
           home: switch (snap.connectionState) {
             ConnectionState.none ||
             ConnectionState.waiting ||
@@ -267,6 +275,26 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     // Volver a primer plano es el momento natural para re-chequear: es cuando
     // el usuario puede haberse bajado la versión nueva.
     if (state == AppLifecycleState.resumed) _checkForUpdate();
+    // Fuera de primer plano no se sondea Tailscale: el retry periódico es
+    // requests que nadie mira. Al volver, el próximo cambio de red o el timer
+    // lo reacomoda solo.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _tailscale.stop();
+    }
+  }
+
+  /// Presión de memoria: se suelta lo que se puede reconstruir. Las imágenes
+  /// del chat se vuelven a bajar; además la caché de imágenes se recorta a 100
+  /// para no volver al mismo pico.
+  ///
+  /// El resaltado de código (`CodeHighlighter`) lo vacía su propio dueño: su
+  /// `clearCache` es `@visibleForTesting` y desde acá no se puede llamar.
+  @override
+  void didHaveMemoryPressure() {
+    PaintingBinding.instance.imageCache
+      ..clear()
+      ..maximumSize = 100;
   }
 
   /// Chequea y, si hay versión nueva y **no estamos con datos móviles**, la
@@ -384,9 +412,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         canBack: () => _nav.canHandleBack,
                         streamFactory: widget.chatStreamFactory,
                         policy: _policy,
-                        // La política forma parte de la identidad del chat:
-                        // al cambiar de red se reconstruye con el consumo nuevo.
-                        key: ValueKey('chat-${_nav.chatSessionId}-$_lowData'),
+                        // La política NO forma parte de la identidad: con datos
+                        // móviles el chat actualiza su consumo en vivo (ver
+                        // `ChatViewModel.updatePolicy`) sin perder scroll ni
+                        // re-suscribir el stream.
+                        key: ValueKey('chat-${_nav.chatSessionId}'),
                       ),
                       _FilesTab(config: widget.config),
                       SettingsView(
@@ -413,6 +443,19 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               current: _nav.tab,
               chatEnabled: _nav.chatSessionId != null,
               onSelect: (tab) {
+                // Chat sin sesión: no es un destino, es un atajo a la lista.
+                // Se dice en vez de dejar un botón que no hace nada.
+                if (tab == MobileTab.chat && _nav.chatSessionId == null) {
+                  _nav.select(MobileTab.sessions);
+                  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'Elegí una sesión de la lista para abrir el chat.',
+                      ),
+                    ),
+                  );
+                  return;
+                }
                 // Desde el header del chat, `select` hace de "atrás".
                 if (tab == _nav.tab && tab == MobileTab.chat) {
                   _nav.leaveChat();
@@ -455,7 +498,25 @@ class _SessionsTabState extends State<_SessionsTab> {
     // su `initState`; acá está el corte por visibilidad, que es el que importa
     // en un `IndexedStack` donde `dispose` no se llama al cambiar de pestaña.
     if (widget.visible) _vm.startPolling();
+    // El directorio actual del server, para el estado vacío: es un solo
+    // `GET /api/location` por apertura del shell, el mismo endpoint del probe.
+    unawaited(_loadCwd());
   }
+
+  /// Resuelve el cwd del server. Si falla no se muestra nada: es un dato
+  /// informativo, no un error.
+  Future<void> _loadCwd() async {
+    try {
+      final map = await ApiClient(config: widget.config).location();
+      final dir = map['directory'];
+      if (!mounted || dir is! String || dir.isEmpty) return;
+      setState(() => _cwd = dir);
+    } on Object {
+      // Sin cwd no hay línea de directorio, y está bien.
+    }
+  }
+
+  String? _cwd;
 
   @override
   void didUpdateWidget(covariant _SessionsTab old) {
@@ -569,6 +630,10 @@ class _SessionsTabState extends State<_SessionsTab> {
     viewmodel: _vm,
     onOpen: widget.onOpen,
     onAction: _onSessionAction,
+    // La contraseña nunca llega a la pantalla: sólo a `redactSecret`, para
+    // tacharla de los errores crudos que trae el server.
+    secret: widget.config.password,
+    currentDirectory: _cwd,
   );
 }
 
@@ -627,17 +692,39 @@ class _ChatTab extends StatefulWidget {
   State<_ChatTab> createState() => _ChatTabState();
 }
 
-class _ChatTabState extends State<_ChatTab> {
+class _ChatTabState extends State<_ChatTab> with WidgetsBindingObserver {
   ChatViewModel? _vm;
+
+  /// La app está en primer plano. El visible efectivo es pestaña Y app: con la
+  /// app en fondo no hay socket ni timers aunque el chat esté al frente.
+  bool _appActive = true;
+
+  bool get _effectiveVisible => widget.visible && _appActive;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _openFor(widget.sessionId);
     // Sin sesión no hay viewmodel que pausar: el `IndexedStack` construye los
     // 4 destinos aunque no estén al frente, así que esto también evita que el
     // stream arranque solo por existir.
-    _vm?.setVisible(widget.visible);
+    _vm?.setVisible(_effectiveVisible);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Fondo: se pausa el stream del chat (batería). Primer plano: se reanuda
+    // y se refresca, que es cuando el turno pudo haber avanzado sin nosotros.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _appActive = false;
+      _vm?.setVisible(false);
+    } else if (state == AppLifecycleState.resumed) {
+      _appActive = true;
+      _vm?.setVisible(_effectiveVisible);
+      if (_effectiveVisible) unawaited(_vm?.refresh());
+    }
   }
 
   @override
@@ -648,7 +735,13 @@ class _ChatTabState extends State<_ChatTab> {
     // `didUpdateWidget`: `didChangeDependencies` corre UNA vez por `State`, así
     // que desde ahí el socket y el poll de 2 s seguían vivos con el chat
     // fuera de pantalla y la regla de batería de `chat_viewmodel` no aplicaba.
-    if (oldWidget.visible != widget.visible) _vm?.setVisible(widget.visible);
+    if (oldWidget.visible != widget.visible) {
+      _vm?.setVisible(_effectiveVisible);
+    }
+    // La política cambia con la red sin reconstruir: se propaga en vivo.
+    if (!identical(oldWidget.policy, widget.policy)) {
+      _vm?.updatePolicy(widget.policy);
+    }
   }
 
   /// Abre (o cierra) el chat de una sesión.
@@ -672,6 +765,7 @@ class _ChatTabState extends State<_ChatTab> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _vm?.dispose();
     super.dispose();
   }

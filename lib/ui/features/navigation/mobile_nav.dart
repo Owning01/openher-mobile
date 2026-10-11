@@ -64,6 +64,9 @@ class MobileNav extends ChangeNotifier {
       return;
     }
     if (_tab == next) return;
+    // Sin repetidos en la pila: A→B→A apilaba A dos veces y el atrás recorría
+    // destinos duplicados en vez de volver.
+    _stack.remove(next);
     _tab = next;
     _stack.add(next);
     if (_stack.length > 16) _stack.removeAt(0);
@@ -76,6 +79,8 @@ class MobileNav extends ChangeNotifier {
     chatSession = session;
     chatSessionId = session.id;
     _tab = MobileTab.chat;
+    // Sin repetidos: reabrir el mismo chat no apila otro Chat encima.
+    _stack.remove(MobileTab.chat);
     _stack.add(MobileTab.chat);
     if (_stack.length > 16) _stack.removeAt(0);
     notifyListeners();

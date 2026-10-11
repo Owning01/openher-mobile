@@ -751,18 +751,37 @@ class ApiClient {
   }
 
   /// Saca el mensaje de error que manda el server (`{"message": …}` / `{"_tag": …}`).
-  static String _errorMessage(String body) {
+  ///
+  /// El cuerpo lo escribe el server, no esta app: puede traer la URL con
+  /// `?auth_token=` u otra credencial, y este texto termina en [ApiError.detail]
+  /// (UI y logs). Por eso sale por [sanitizeForDisplay] antes de usarse.
+  String _errorMessage(String body) {
     final decoded = _tryDecode(body);
+    final String raw;
     if (decoded is Map) {
       final message = decoded['message'];
-      if (message is String && message.isNotEmpty) return message;
+      if (message is String && message.isNotEmpty) {
+        raw = message;
+        return _redacted(raw);
+      }
       final tag = decoded['_tag'];
-      if (tag is String && tag.isNotEmpty) return tag;
+      if (tag is String && tag.isNotEmpty) {
+        raw = tag;
+        return _redacted(raw);
+      }
     }
-    return body.isEmpty
+    raw = body.isEmpty
         ? 'sin cuerpo'
         : (body.length <= 120 ? body : '${body.substring(0, 120)}…');
+    return _redacted(raw);
   }
+
+  String _redacted(String text) => sanitizeForDisplay(
+    text,
+    password: config.password,
+    username: config.username,
+    authToken: config.authTokenQuery,
+  );
 
   Map<String, String?> _withLocation(
     Map<String, String?> query,

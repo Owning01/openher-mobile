@@ -1132,3 +1132,18 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
 - Hoja Respond reescrita (SafeArea + scroll simple): salía vacía y con los
   botones bajo la barra del sistema. Regresión con el plan real empaquetado en
   tema oscuro. Skill: planes en español por defecto.
+
+## 2026-10-11 — Auditorías Nielsen/a11y/seguridad/rendimiento: fase 1 (altas)
+
+- 3 builders en paralelo con archivos exclusivos (chat-A, chat-B/sesiones/shell,
+  archivos/plan/core). Todo lo alto: targets 48, anti doble-envío, borrador que
+  no se pierde, dictado que inserta, Semantics, animaciones con gate, caché por
+  hash, undo de pendiente, revert con confirm, watchdog 120s, banner de stream,
+  sesión borrada, cap 300 (con fix propio: `loadEarlier` no recorta lo pedido),
+  SSE sin token ni `after` (medido 200 solo-header), cleartext solo en
+  domain-config, clear que olvida caché, sanitize central, descargas con
+  confirmación/progreso/cancelación, update con sha256 + cancel + installDenied,
+  FLAG_SECURE, DraftView sin perder foco, plan reset con confirm.
+- Adjudicados: a02 (recorte a 300, premisa "retener todo" cambiada), stream URL
+  (sin `after`/`auth_token`, medido), contrato viejo que fijaban.
+- Suite 1020 verdes, analyze en cero. Sin commitear: pendiente OK del dueño.

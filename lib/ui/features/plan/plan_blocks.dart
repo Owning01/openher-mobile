@@ -26,7 +26,7 @@ class PlanStrings {
   String get copied => es ? 'Copiada: pegala en el chat' : 'Copied: paste it back in chat';
   String get reset => es ? 'Borrar todo' : 'Reset';
   String get decisions => es ? 'Decisiones' : 'Decisions';
-  String get toAnswer => es ? 'por responder' : 'to answer';
+  String get toAnswer => es ? 'sin abrir' : 'unopened';
   String get comment => es ? 'Comentar' : 'Comment';
   String get save => es ? 'Guardar' : 'Save';
   String get close => es ? 'Cerrar' : 'Close';
@@ -1184,10 +1184,34 @@ class DraftView extends StatefulWidget {
 }
 
 class _DraftViewState extends State<DraftView> {
+  /// El controller vive en el State, no en el `build`: crearlo en el build
+  /// pierde el foco y el texto en cada rebuild (el `answers` notifica en cada
+  /// tecla y el padre repinta).
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.answers.edits[widget.draft.id] ?? widget.draft.text,
+  );
+
+  @override
+  void didUpdateWidget(covariant DraftView old) {
+    super.didUpdateWidget(old);
+    // Sólo se resincroniza si cambió el borrador (otro plan u otro bloque):
+    // pisar el texto en cada rebuild es el bug que se sacó de acá.
+    if (old.draft.id != widget.draft.id ||
+        old.draft.text != widget.draft.text) {
+      _controller.text =
+          widget.answers.edits[widget.draft.id] ?? widget.draft.text;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final edited = widget.answers.edits[widget.draft.id];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
@@ -1209,7 +1233,8 @@ class _DraftViewState extends State<DraftView> {
             borderRadius: AppRadius.mdAll,
           ),
           child: TextField(
-            controller: TextEditingController(text: edited ?? widget.draft.text),
+            key: ValueKey('plan-draft-${widget.draft.id}'),
+            controller: _controller,
             maxLines: null,
             minLines: 3,
             onChanged: (v) => widget.answers.setEdit(widget.draft.id, v),

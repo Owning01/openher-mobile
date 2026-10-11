@@ -1,26 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   El server opencode se sirve por HTTP plano (no TLS) en LAN/Tailscale/loopback.
-  Android 9+ bloquea el cleartext por defecto, así que hay que habilitarlo de
-  forma explícita. Se limita a redes privadas + loopback: la app NO habla con
-  servidores HTTP públicos.
+  Android 9+ bloquea el cleartext por defecto.
 
-  - 127.0.0.1 / localhost: el emulador o un túnel local.
-  - 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16: LAN privada.
-  - 100.64.0.0/10: el rango de Tailscale (CGNAT), que es el caso de uso real.
-  - *.local: mDNS para el server anunciado en la red.
+  Regla: el base-config lo PROHIBE y sólo el domain-config lo permite, y sólo
+  para lo privado: loopback, LAN y Tailscale. Un host público por HTTP queda
+  bloqueado por el base-config.
+
+  Límite conocido de Android: <domain> sólo acepta hosts/IPs literales, no
+  CIDR. Los rangos 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 y 100.64.0.0/10 no
+  se pueden declarar como tales: se cubren con el alias del emulador
+  (10.0.2.2), el sufijo MagicDNS de Tailscale (*.ts.net, que resuelve a
+  100.64.0.0/10) y mDNS (*.openher.local). Una IP de LAN no listada cae al
+  base-config (false) y no conecta: es el comportamiento querido, no un bug.
 -->
 <network-security-config>
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">127.0.0.1</domain>
         <domain includeSubdomains="false">localhost</domain>
+        <!-- 10.0.0.0/8: el alias del emulador hacia el loopback del host. -->
         <domain includeSubdomains="false">10.0.2.2</domain>
+        <!-- 100.64.0.0/10 (CGNAT de Tailscale): se cubre por nombre MagicDNS.
+             172.16.0.0/12 y 192.168.0.0/16 no tienen sufijo DNS propio: los
+             alcanza *.openher.local (mDNS) o una IP listada acá. -->
+        <domain includeSubdomains="true">ts.net</domain>
         <domain includeSubdomains="true">openher.local</domain>
-        <!-- Tailscale sirve por hostname *.ts.net: se cubre con el rango de
-             IP abajo y con cleartext global restringido a redes privadas. -->
     </domain-config>
 
-    <base-config cleartextTrafficPermitted="true">
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system"/>
         </trust-anchors>

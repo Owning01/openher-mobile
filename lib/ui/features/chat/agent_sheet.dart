@@ -147,7 +147,11 @@ class _AgentSheetState extends State<AgentSheet> {
     mainAxisSize: MainAxisSize.min,
     children: [
       _head(),
-      _search(Theme.of(context).colorScheme),
+      // En error el buscador se esconde: no hay nada que filtrar, y con el
+      // campo visible su `autofocus` (que montó primero) le gana al de
+      // Reintentar —un `autofocus` se ignora si otro nodo ya tiene el foco—.
+      // Sin buscador, el foco cae en la acción segura.
+      if (_error == null) _search(Theme.of(context).colorScheme),
       Flexible(child: _body()),
     ],
   );
@@ -161,8 +165,16 @@ class _AgentSheetState extends State<AgentSheet> {
     ),
     child: Row(
       children: [
+        // Encabezado para el lector de pantalla: es el título del diálogo,
+        // no un texto más de la lista.
         Expanded(
-          child: Text('Agente', style: Theme.of(context).textTheme.titleLarge),
+          child: Semantics(
+            header: true,
+            child: Text(
+              'Agente',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+          ),
         ),
         AppIconButton(
           icon: 'x',
@@ -179,6 +191,8 @@ class _AgentSheetState extends State<AgentSheet> {
     child: TextField(
       key: AgentSheet.searchKey,
       controller: _query,
+      // La hoja se abre para buscar: el foco cae acá sin un toque previo.
+      autofocus: true,
       onChanged: (value) => setState(() => _filter = value.trim()),
       decoration: InputDecoration(
         hintText: 'Buscar agente…',
@@ -189,6 +203,17 @@ class _AgentSheetState extends State<AgentSheet> {
 
   Widget _body() {
     if (_loading) {
+      // Sin animaciones no gira nada: el estado se dice con texto estático.
+      if (MediaQuery.disableAnimationsOf(context)) {
+        return Padding(
+          padding: const EdgeInsets.all(AppSpacing.xl),
+          child: SizedBox(
+            key: AgentSheet.loadingKey,
+            height: 96,
+            child: const Center(child: Text('Cargando…')),
+          ),
+        );
+      }
       return const Padding(
         padding: EdgeInsets.all(AppSpacing.xl),
         child: SizedBox(
@@ -264,7 +289,11 @@ class _AgentSheetState extends State<AgentSheet> {
           style: Theme.of(context).textTheme.labelSmall,
         ),
         const SizedBox(height: AppSpacing.sm),
+        // La acción segura del estado de error: el foco cae acá (se monta
+        // después del buscador y toma precedencia) para que reintentar no
+        // pida un toque previo.
         TextButton.icon(
+          autofocus: true,
           onPressed: _load,
           icon: AppIcon('refresh', size: 14),
           label: const Text('Reintentar'),

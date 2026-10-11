@@ -14,6 +14,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:openher_mobile/core/network/server_config.dart';
 import 'package:openher_mobile/core/storage/creds_store.dart';
+import 'package:openher_mobile/domain/models/errors.dart';
 
 const String kPassword = 'P4ssw0rd-de-prueba-#1';
 
@@ -288,5 +289,73 @@ void main() {
         expect(const ServerConfig(username: '').toString(), contains('(none)'));
       },
     );
+
+    test('clear() borra el disco Y la caché en memoria', () async {
+      // El guard: sin limpiar `_cached`, un `load()` posterior devuelve la
+      // config vieja sin tocar el disco y el "cerrar sesión" miente.
+      final backend = InMemorySecureStore();
+      final store = CredsStore(store: backend);
+      await store.write(withSecret());
+      expect(await store.load(), isNotNull);
+
+      await store.clear();
+
+      expect(store.cached, isNull, reason: 'la caché no puede sobrevivir');
+      expect(await store.read(), isNull, reason: 'el disco quedó borrado');
+      expect(await store.load(), isNull, reason: 'load no resucita nada');
+    });
+
+    test('clear() sin nada guardado no tira', () async {
+      final store = CredsStore(store: InMemorySecureStore());
+      await expectLater(store.clear(), completes);
+      expect(store.cached, isNull);
+    });
+  });
+
+  group('A07.5 sanitizeForDisplay', () {
+    test('redacta el valor de ?auth_token= sin conocerlo', () {
+      final token = withSecret().authTokenQuery!;
+      final dirty =
+          'GET /api/event?auth_token=$token&location=x falló (SocketException)';
+      final clean = sanitizeForDisplay(dirty);
+
+      expect(clean, contains('auth_token=REDACTED'));
+      expect(clean, isNot(contains(token)));
+      expect(clean, contains('SocketException'), reason: 'el resto sigue');
+    });
+
+    test('redacta &auth_token= y el header Basic sin valores', () {
+      const dirty =
+          'url?a=1&auth_token=QUJDMTIz&b=2 con Authorization: Basic QUJDMTIz';
+      final clean = sanitizeForDisplay(dirty);
+
+      expect(clean, contains('auth_token=REDACTED'));
+      expect(clean, contains('Basic REDACTED'));
+      expect(clean, isNot(contains('QUJDMTIz')));
+    });
+
+    test('con valores borra password, usuario y base64(user:pass)', () {
+      final config = withSecret();
+      final b64 = base64Encode(utf8.encode('opencode:$kPassword'));
+      final dirty =
+          'falló "$kPassword" para opencode con $b64 y token ${config.authTokenQuery}';
+      final clean = sanitizeForDisplay(
+        dirty,
+        password: config.password,
+        username: config.username,
+        authToken: config.authTokenQuery,
+      );
+
+      expect(clean, isNot(contains(kPassword)));
+      expect(clean, isNot(contains('opencode')));
+      expect(clean, isNot(contains(b64)));
+      expect(clean, isNot(contains(config.authTokenQuery!)));
+    });
+
+    test('sin secretos no toca nada', () {
+      expect(sanitizeForDisplay(''), isEmpty);
+      expect(sanitizeForDisplay('No se pudo conectar.'), 'No se pudo conectar.');
+      expect(sanitizeForDisplay('hola', password: ''), 'hola');
+    });
   });
 }

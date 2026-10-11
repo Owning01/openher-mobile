@@ -28,6 +28,7 @@
 library;
 
 import 'dart:async';
+import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -38,6 +39,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/network/server_config.dart';
 import '../../../data/repositories/file_repository.dart';
+import '../../../domain/models/errors.dart';
 import '../../../domain/models/file_type.dart';
 import '../../core/app_icon.dart';
 import '../../core/layer_gate.dart';
@@ -55,6 +57,7 @@ class FilesView extends StatefulWidget {
     required this.config,
     required this.onAddToChat,
     this.viewModel,
+    this.onCellular = false,
   });
 
   /// Server conectado. Se usa para armar el [FileRepository] propio.
@@ -62,6 +65,10 @@ class FilesView extends StatefulWidget {
 
   /// "Añadir al chat": la app pone la ruta en el composer de la sesión.
   final ValueChanged<String> onAddToChat;
+
+  /// `true` con datos móviles: la confirmación de descarga avisa que consume
+  /// el plan. Sólo se muestra si se sabe; `false` no afirma nada sobre Wi-Fi.
+  final bool onCellular;
 
   /// Viewmodel ya hecho. Si viene, esta vista **no lo pide suelta ni lo
   /// descarta**: lo usa tal cual (tests, y navegación que quiera conservar el
@@ -114,6 +121,11 @@ class _FilesViewState extends State<FilesView> {
   Timer? _debounce;
   bool _searching = false;
 
+  /// Scroll horizontal del breadcrumb: tras cada navegación se lleva al final,
+  /// que es donde está el directorio actual (el principio ya se vio).
+  final ScrollController _crumbs = ScrollController();
+  int _crumbCount = 0;
+
   @override
   void initState() {
     super.initState();
@@ -137,6 +149,7 @@ class _FilesViewState extends State<FilesView> {
   void _bind() {
     _debounce?.cancel();
     if (_bound) {
+      _model.removeListener(_onModelChanged);
       if (_ownsModel) _model.dispose();
       _bound = false;
     }
@@ -145,13 +158,31 @@ class _FilesViewState extends State<FilesView> {
         FilesViewModel(repository: FileRepository(config: widget.config));
     _ownsModel = widget.viewModel == null;
     _bound = true;
+    _crumbCount = _model.crumbs.length;
+    _model.addListener(_onModelChanged);
     if (_ownsModel) unawaited(_model.load(FileRepository.rootPath));
+  }
+
+  /// El breadcrumb scrollea al final cuando cambia de directorio: tras entrar
+  /// a una carpeta profunda, el principio ya se vio y lo que importa es la
+  /// cola. Sólo ante un cambio de migas, no ante cada notify (loading, etc.).
+  void _onModelChanged() {
+    if (!mounted) return;
+    final n = _model.crumbs.length;
+    if (n == _crumbCount) return;
+    _crumbCount = n;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_crumbs.hasClients) return;
+      _crumbs.jumpTo(_crumbs.position.maxScrollExtent);
+    });
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
     _search.dispose();
+    _crumbs.dispose();
+    _model.removeListener(_onModelChanged);
     // Sólo se descarta lo que esta vista construyó: un viewmodel inyectado es
     // del caller.
     if (_ownsModel) _model.dispose();
@@ -243,8 +274,12 @@ class _FilesViewState extends State<FilesView> {
         // Se abre en el navegador del sistema, no en un WebView embebido: asi
         // el CSS y el JS son de verdad y el usuario ve la URL de la que viene.
         // La password viaja en el query porque el server no emite cookie, asi
-        // que la app no la copia a ningun lado (ver `browserFileUrl`).
+        // que la app no la copia a ningun lado (ver `browserFileUrl`) y por
+        // eso se confirma con la URL redactada y el aviso escrito.
         final url = widget.config.browserFileUrl(node.path);
+        if (!mounted) return;
+        final abrir = await _confirmarAbrirEnNavegador(url);
+        if (abrir != true || !mounted) return;
         final opened = await _openExternally(url);
         if (!mounted) return;
         _toast(
@@ -293,15 +328,113 @@ class _FilesViewState extends State<FilesView> {
     }
   }
 
+  /// Confirma antes de abrir en el navegador del sistema.
+  ///
+  /// La URL lleva `?auth_token=` (el navegador no puede mandar el header Basic
+  /// y el server no emite cookie): queda en el historial y, si se copia, se
+  /// manda la password del server. Por eso se muestra redactada y con el aviso
+  /// escrito, y por eso "Copiar ruta" copia el path pelado.
+  Future<bool?> _confirmarAbrirEnNavegador(Uri url) {
+    final redactada = ServerConfig.redactAuthToken(url).toString();
+    return showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('Abrir en el navegador'),
+        content: Text(
+          'Se abre fuera de la app, en:\n$redactada\n\n'
+          'Esa dirección lleva la contraseña del servidor y puede quedar '
+          'en el historial del navegador. No la copies ni la compartas.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialog).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            key: const Key('files-browser-confirm'),
+            onPressed: () => Navigator.of(dialog).pop(true),
+            child: const Text('Abrir'),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Baja el archivo y abre el compartir del sistema.
   ///
   /// Misma resolución de ruta que "Abrir": en un disco se pide el nombre
   /// relativo a `location[directory]` (la ruta absoluta entera da 500).
   /// El archivo se escribe en el temporal del sistema con su nombre real y se
   /// comparte desde ahí: `share_plus` necesita un path en disco, no bytes.
+  ///
+  /// Se confirma SIEMPRE (tipo y nombre, más el aviso de datos móviles cuando
+  /// se sabe que hay cellular): una descarga baja bytes sin preguntar y en un
+  /// teléfono eso es plata. El progreso es indeterminado (los bytes llegan de
+  /// una) y Cancelar abandona y borra el parcial.
   Future<void> _downloadFile(FileNode node) async {
+    final type = FileType.of(node.name);
     final messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(const SnackBar(content: Text('Descargando…')));
+    final confirmado = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('Descargar archivo'),
+        content: Text(
+          '${node.name}\n${type.label}'
+          '${widget.onCellular ? '\n\nEstás con datos móviles: la descarga consume tu plan.' : ''}'
+          '\n\nSe guarda temporal y se abre para compartir o guardar donde quieras.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialog).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            key: const Key('files-download-confirm'),
+            onPressed: () => Navigator.of(dialog).pop(true),
+            child: const Text('Descargar'),
+          ),
+        ],
+      ),
+    );
+    if (confirmado != true || !mounted) return;
+
+    // El progreso es indeterminado: `downloadBytes` devuelve los bytes de una
+    // y no hay porcentaje. Cancelar abandona (se ignora el resultado) y borra
+    // el parcial si ya se escribió.
+    var cancelado = false;
+    if (mounted) {
+      unawaited(
+        showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (progreso) => AlertDialog(
+            title: Text('Descargando ${node.name}'),
+            content: const Row(
+              children: [
+                CircularProgressIndicator(strokeWidth: 2),
+                SizedBox(width: 16),
+                Expanded(child: Text('Descargando…')),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  cancelado = true;
+                  Navigator.of(progreso).pop();
+                },
+                child: const Text('Cancelar'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    void cerrarProgreso() {
+      if (cancelado) return;
+      final nav = Navigator.maybeOf(context);
+      if (mounted) nav?.pop();
+    }
+
     final Uint8List bytes;
     try {
       bytes = await _model.repository.downloadBytes(
@@ -309,8 +442,18 @@ class _FilesViewState extends State<FilesView> {
         directory: _enDisco ? _model.path : null,
       );
     } on Object catch (e) {
+      cerrarProgreso();
+      _logRedacted('descarga de ${node.path}: $e');
       if (!mounted) return;
-      messenger.showSnackBar(SnackBar(content: Text('No se pudo descargar: $e')));
+      _errorToast(
+        messenger,
+        'No se pudo descargar el archivo. Revisá la conexión.',
+        onRetry: () => _downloadFile(node),
+      );
+      return;
+    }
+    if (cancelado || !mounted) {
+      if (mounted) _toast('Descarga cancelada');
       return;
     }
     // Solo el basename al temporal: un `../` en el nombre no puede salir de
@@ -322,13 +465,23 @@ class _FilesViewState extends State<FilesView> {
     try {
       await file.writeAsBytes(bytes, flush: true);
     } on Object catch (e) {
+      cerrarProgreso();
+      _logRedacted('guardado de $safeName: $e');
       if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(content: Text('No se pudo guardar el archivo: $e')),
+      _errorToast(
+        messenger,
+        'No se pudo guardar el archivo. Revisá el espacio libre.',
+        onRetry: () => _downloadFile(node),
       );
       return;
     }
+    if (cancelado) {
+      await _borrarSilencioso(file);
+      if (mounted) _toast('Descarga cancelada');
+      return;
+    }
     if (!mounted) return;
+    cerrarProgreso();
     messenger.hideCurrentSnackBar();
     try {
       await SharePlus.instance.share(
@@ -336,9 +489,49 @@ class _FilesViewState extends State<FilesView> {
       );
     } on Object catch (e) {
       if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(content: Text('No se pudo compartir: $e')),
+      _logRedacted('compartir $safeName: $e');
+      _errorToast(
+        messenger,
+        'No se pudo compartir el archivo.',
+        onRetry: () => _downloadFile(node),
       );
+    }
+  }
+
+  /// Error de descarga en español accionable, con Reintentar. El detalle crudo
+  /// (que puede traer la URL con el token) no va al toast: va al log
+  /// redactado ([_logRedacted]).
+  void _errorToast(
+    ScaffoldMessengerState messenger,
+    String message, {
+    required VoidCallback onRetry,
+  }) {
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        action: SnackBarAction(label: 'Reintentar', onPressed: onRetry),
+      ),
+    );
+  }
+
+  /// Log con secretos redactados (password, base64(user:pass), auth_token).
+  void _logRedacted(String message) {
+    developer.log(
+      sanitizeForDisplay(
+        message,
+        password: widget.config.password,
+        username: widget.config.username,
+        authToken: widget.config.authTokenQuery,
+      ),
+      name: 'openher.files',
+    );
+  }
+
+  Future<void> _borrarSilencioso(File file) async {
+    try {
+      if (file.existsSync()) await file.delete();
+    } on FileSystemException {
+      // Limpieza best-effort: el temporal del sistema lo reclama solo.
     }
   }
 
@@ -488,6 +681,7 @@ class _FilesViewState extends State<FilesView> {
         ),
         child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
+          controller: _crumbs,
           child: Row(
             children: <Widget>[
               for (var i = 0; i < crumbs.length; i++) ...<Widget>[
@@ -552,10 +746,39 @@ class _FilesViewState extends State<FilesView> {
         // Con pocos elementos la lista no scrollea y no se podría tirar hacia
         // abajo; `AlwaysScrollableScrollPhysics` deja el gesto disponible.
         physics: const AlwaysScrollableScrollPhysics(),
-        itemCount: _model.nodes.length,
+        itemCount: _model.nodes.length + (_model.query.isEmpty ? 0 : 1),
         separatorBuilder: (context, index) =>
             Divider(height: 1, color: Theme.of(context).dividerColor),
-        itemBuilder: (context, index) => _row(_model.nodes[index]),
+        itemBuilder: (context, index) {
+          // El chip va primero: dice qué se está buscando y permite salir.
+          if (_model.query.isNotEmpty && index == 0) return _searchingChip();
+          final node = _model.nodes[_model.query.isEmpty ? index : index - 1];
+          return _row(node);
+        },
+      ),
+    );
+  }
+
+  /// Chip "Buscando en": visible mientras hay una búsqueda activa. Dice dónde
+  /// se busca y sale de la búsqueda al borrarse.
+  Widget _searchingChip() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.md,
+        AppSpacing.sm,
+        AppSpacing.sm,
+        0,
+      ),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Chip(
+          key: const Key('files-searching'),
+          label: Text(
+            'Buscando en ${_model.path.isEmpty ? 'todo' : _model.path}: ${_model.query}',
+          ),
+          deleteIcon: const Icon(Icons.close, size: 16),
+          onDeleted: _closeSearch,
+        ),
       ),
     );
   }
@@ -756,65 +979,92 @@ class _FilesViewState extends State<FilesView> {
   /// [message] cuando el vacío **no** es "no hay nada": no hay discos,
   /// o una carpeta que no se pudo leer. Decirlo distinto es lo que
   /// separa un estado vacío de un error disfrazado.
+  ///
+  /// Con `RefreshIndicator` para que el pull-to-refresh funcione también acá:
+  /// un vacío sin gesto de actualizar es un callejón sin salida.
   Widget _emptyState({String? message}) {
     final theme = Theme.of(context);
-    return Center(
-      key: FilesView.emptyKey,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Opacity(
-            opacity: 0.7,
-            child: AppIcon(
-              'folder',
-              size: 48,
-              color: theme.colorScheme.onSurfaceVariant,
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        child: SizedBox(
+          height: MediaQuery.of(context).size.height * 0.6,
+          child: Center(
+            key: FilesView.emptyKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Opacity(
+                  opacity: 0.7,
+                  child: AppIcon(
+                    'folder',
+                    size: 48,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                if (message != null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.lg,
+                      vertical: 0,
+                    ),
+                    child: Text(
+                      message,
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                Text(
+                  _model.query.isEmpty
+                      ? 'Esta carpeta está vacía.'
+                      : 'Sin resultados para la búsqueda.',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: AppSpacing.sm),
-          if (message != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: AppSpacing.lg,
-                vertical: 0,
-              ),
-              child: Text(
-                message,
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodySmall,
-              ),
-            ),
-          Text(
-            _model.query.isEmpty
-                ? 'Esta carpeta está vacía.'
-                : 'Sin resultados para la búsqueda.',
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
 
+  /// Error de carga en español accionable, con Reintentar y pull-to-refresh.
+  /// El mensaje ya viene mapeado del viewmodel (errores del dominio en
+  /// español); el detalle crudo con secretos no llega acá.
   Widget _errorState(String message) {
     final theme = Theme.of(context);
-    return Center(
-      key: FilesView.errorKey,
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.xl),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodyMedium,
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        child: SizedBox(
+          height: MediaQuery.of(context).size.height * 0.6,
+          child: Center(
+            key: FilesView.errorKey,
+            child: Padding(
+              padding: const EdgeInsets.all(AppSpacing.xl),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Text(
+                    message,
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodyMedium,
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                  TextButton(
+                    onPressed: _refresh,
+                    child: const Text('Reintentar'),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: AppSpacing.sm),
-            TextButton(onPressed: _refresh, child: const Text('Reintentar')),
-          ],
+          ),
         ),
       ),
     );

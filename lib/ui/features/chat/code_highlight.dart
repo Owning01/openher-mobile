@@ -22,8 +22,9 @@
 /// `highlight.parse` con autodetecciÃ³n es lo mÃ¡s caro del primer paint: una
 /// pantalla de chat puede tener 30 bloques, y el resultado se vuelve a pedir en
 /// cada rebuild, scroll y delta de streaming. El [TextSpan] es inmutable, asÃ­ que
-/// compartir la instancia es seguro. El LRU estÃ¡ acotado porque la clave retiene
-/// el cÃ³digo entero.
+/// compartir la instancia es seguro. El LRU estÃ¡ acotado y la clave guarda
+/// sÃ³lo el hash FNV-1a de 64 bits mÃ¡s el largo del cÃ³digo, nunca el String
+/// entero: 200 entradas reteniendo 8 KB cada una serÃ­an 1.6 MB en claves.
 library;
 
 import 'dart:collection';
@@ -40,7 +41,8 @@ class CodeHighlighter {
   /// Entradas mÃ¡ximas del cachÃ© (LRU por re-inserciÃ³n).
   static const int _kMaxEntries = 200;
 
-  /// Bloques mÃ¡s grandes no se cachean: la clave retendrÃ­a el cÃ³digo entero.
+  /// Bloques mÃ¡s grandes no se cachean: retener el hash de un bloque
+  /// enorme no compensa el costo de calcularlo en cada rebuild.
   static const int _kMaxCachedChars = 8000;
 
   /// Por encima de esto ni se intenta: un `highlight.parse` de 60 KB de JSON es
@@ -61,6 +63,12 @@ class CodeHighlighter {
   @visibleForTesting
   static void clearCache() => _cache.clear();
 
+  /// Resumen de las claves vivas, para verificar en tests que ninguna retiene
+  /// el cÃ³digo (el resumen lleva sÃ³lo hash y largo).
+  @visibleForTesting
+  static Iterable<String> debugKeySummaries() =>
+      _cache.keys.map((key) => key.toString());
+
   /// El span del bloque. Si algo falla (lenguaje desconocido, parseo vacÃ­o),
   /// devuelve el texto plano: **nunca** una excepciÃ³n.
   ///
@@ -76,7 +84,13 @@ class CodeHighlighter {
       return TextSpan(text: code, style: base);
     }
     if (code.length <= _kMaxCachedChars) {
-      final key = _CacheKey(code, language ?? '', dark, base);
+      final key = _CacheKey(
+        _hashCode(code),
+        code.length,
+        language ?? '',
+        dark,
+        base,
+      );
       final hit = _cache.remove(key);
       if (hit != null) {
         // Re-inserta: marca como reciente (LRU).
@@ -167,13 +181,25 @@ class CodeHighlighter {
   };
 }
 
-/// El cachÃ© depende de estos cuatro: el mismo cÃ³digo con otra fuente, otro tema u
+/// El cachÃ© depende de estos cinco: el mismo cÃ³digo con otra fuente, otro tema u
 /// otro brillo da un span distinto.
+///
+/// La identidad del cÃ³digo es su hash FNV-1a de 64 bits mÃ¡s su largo, no el
+/// `String`: la clave no retiene el bloque (ver el doc del cachÃ© arriba).
+/// Una colisiÃ³n servirÃ­a el span de otro bloque; con 64 bits y 200 entradas
+/// la probabilidad es despreciable frente al 1.6 MB que costaba retenerlos.
 @immutable
 class _CacheKey {
-  const _CacheKey(this.code, this.language, this.dark, this.base);
+  const _CacheKey(
+    this.codeHash,
+    this.codeLength,
+    this.language,
+    this.dark,
+    this.base,
+  );
 
-  final String code;
+  final int codeHash;
+  final int codeLength;
   final String language;
   final bool dark;
   final TextStyle base;
@@ -181,11 +207,32 @@ class _CacheKey {
   @override
   bool operator ==(Object other) =>
       other is _CacheKey &&
-      other.code == code &&
+      other.codeHash == codeHash &&
+      other.codeLength == codeLength &&
       other.language == language &&
       other.dark == dark &&
       other.base == base;
 
   @override
-  int get hashCode => Object.hash(code, language, dark, base);
+  int get hashCode => Object.hash(codeHash, codeLength, language, dark, base);
+
+  /// Sin el cÃ³digo a propÃ³sito: ni el resumen de depurado lo retiene.
+  @override
+  String toString() =>
+      '_CacheKey(hash: $codeHash, length: $codeLength, '
+      'lang: $language, dark: $dark)';
+}
+
+/// FNV-1a de 64 bits sobre las unidades UTF-16.
+///
+/// `String.hashCode` es de 32 bits y varÃ­a entre arranques de la VM: para una
+/// clave de cachÃ© que distingue bloques de hasta 8 KB se usan 64 bits
+/// estables, calculados acÃ¡ y sin dependencias.
+int _hashCode(String code) {
+  var hash = 0xcbf29ce484222325;
+  for (var i = 0; i < code.length; i++) {
+    hash ^= code.codeUnitAt(i);
+    hash = (hash * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF;
+  }
+  return hash;
 }
