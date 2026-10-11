@@ -58,7 +58,7 @@ una capa declarada no tiene `LayerGate`, o si una apagada no lo tiene.
 | D2 | Credenciales por UI → `flutter_secure_storage`; `service.json` **no** existe en opencode2 |
 | D3 | Stream **global** `/api/event` (el por sesión da 404), filtrado por sesión en el cliente, con dedupe por `id` de evento |
 | D4 | POST del prompt y después escuchar; el POST no devuelve el turno |
-| D5 | Bottom nav de 4 destinos + hojas inferiores |
+| D5 | Bottom nav de 4 destinos + hojas inferiores. En ancho >= 900 (`isDesktopWidth`) va rail + master-detail (sesiones 380 + chat, ambos visibles); la rama móvil no cambió |
 | D6 | Tokens y **variantes de tema** reusados del escritorio (espejo de `tokens.css`) |
 | D7 | Deps directos: `http`, `flutter_secure_storage`, `speech_to_text`, `flutter_svg`, `shared_preferences`, `flutter_markdown_plus`, `highlight`, `connectivity_plus`, `image_picker`, `video_player`, `pdfrx`, `html`, `url_launcher`, `share_plus` (hoja Descargar). De test: `image_picker_platform_interface` y `plugin_platform_interface`, para fchear la plataforma del Clip |
 | D8 | Los 3 canales de error visibles (el escritorio se come `session.error`) |

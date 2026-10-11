@@ -22,6 +22,7 @@ import 'ui/features/chat/chat_view.dart';
 import 'ui/features/chat/chat_viewmodel.dart';
 import 'ui/features/connect/connect_view.dart';
 import 'ui/features/files/files_view.dart';
+import 'ui/features/navigation/desktop_rail.dart';
 import 'ui/features/navigation/mobile_bottom_nav.dart';
 import 'ui/features/navigation/mobile_nav.dart';
 import 'ui/features/sessions/sessions_view.dart';
@@ -345,130 +346,180 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     return ListenableBuilder(
       listenable: _nav,
       builder: (context, _) {
-        return Scaffold(
-          body: SafeArea(
-            bottom: false,
-            child: Column(
-              children: [
-                // Autoupdate: banda no bloqueante, se oculta sola.
-                if (!_updateDismissed)
-                  ListenableBuilder(
-                    listenable: _updates,
-                    builder: (context, _) => UpdateBanner(
-                      state: _updates.state,
-                      onDownload: _updates.download,
-                      onInstall: _updates.install,
-                      onDismiss: () => setState(() => _updateDismissed = true),
-                    ),
-                  ),
-                // Sólo aparece con datos móviles: explica por qué la app se
-                // Aviso de Tailscale: solo cuando el server no responde y el
-                // sistema no ve VPN. Si hay VPN, el problema es el server y
-                // esta banda seria mentirosa.
-                ListenableBuilder(
-                  listenable: _tailscale,
-                  builder: (context, _) {
-                    final notice = _tailscale.notice;
-                    if (notice == null) return const SizedBox.shrink();
-                    return TailscaleBanner(
-                      message: notice,
-                      onRetry: _tailscale.recheck,
-                      onOpenTailscale: () async {
-                        final ok = await TailscaleBanner.openTailscale();
-                        if (!ok || !mounted) return;
-                        // Se re-chequea despues de abrir: si el usuario lo
-                        // prende ahi, la banda se va sola al primer probe.
-                        await _tailscale.recheck();
-                      },
-                    );
-                  },
-                ),
-                // recorta, en vez de que el usuario adivine que anda lento.
-                LowDataBanner(
-                  onCellular: _lowData,
-                  onDisable: () => setState(() => _lowDataOverride = true),
-                ),
-                Expanded(
-                  child: IndexedStack(
-                    index: _nav.tab.index,
-                    children: [
-                      _SessionsTab(
-                        config: widget.config,
-                        onOpen: _nav.openSession,
-                        // El `IndexedStack` mantiene las cuatro pestañas
-                        // montadas, así que sin esto el poll de
-                        // `/api/session/active` seguía corriendo con el chat al
-                        // frente: 62 bytes cada 5 s que nadie mira (medido:
-                        // ~45 KB/h). El chat ya frenaba el suyo con `setVisible`;
-                        // acá faltaba el mismo corte.
-                        visible: _nav.tab == MobileTab.sessions,
-                      ),
-                      _ChatTab(
-                        sessionInfo: _nav.chatSession,
-                        sessionId: _nav.chatSessionId ?? '',
-                        config: widget.config,
-                        visible: _nav.tab == MobileTab.chat,
-                        onBack: _nav.handleBack,
-                        canBack: () => _nav.canHandleBack,
-                        streamFactory: widget.chatStreamFactory,
-                        policy: _policy,
-                        // La política NO forma parte de la identidad: con datos
-                        // móviles el chat actualiza su consumo en vivo (ver
-                        // `ChatViewModel.updatePolicy`) sin perder scroll ni
-                        // re-suscribir el stream.
-                        key: ValueKey('chat-${_nav.chatSessionId}'),
-                      ),
-                      _FilesTab(config: widget.config),
-                      SettingsView(
-                        config: widget.config,
-                        prefs: widget.prefs,
-                        creds: widget.creds,
-                        onProbe: widget.onProbe,
-                        onThemeVariant: widget.onThemeVariant,
-                        onLoggedOut: widget.onLoggedOut,
-                        // Las 94 claves de la spec aprobada salen del catálogo
-                        // que ya está cargado; el toggle persiste vía PrefsStore.
-                        loadLayerSpec: _loadLayerSpec,
-                        onLayerToggle: _onLayerToggle,
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          bottomNavigationBar: SafeArea(
-            top: false,
-            child: MobileBottomNav(
-              current: _nav.tab,
-              chatEnabled: _nav.chatSessionId != null,
-              onSelect: (tab) {
-                // Chat sin sesión: no es un destino, es un atajo a la lista.
-                // Se dice en vez de dejar un botón que no hace nada.
-                if (tab == MobileTab.chat && _nav.chatSessionId == null) {
-                  _nav.select(MobileTab.sessions);
-                  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Elegí una sesión de la lista para abrir el chat.',
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            // Desktop: rail + master-detail. Móvil: tal cual estaba.
+            final desktop = isDesktopWidth(constraints.maxWidth);
+            final inSplit =
+                desktop &&
+                (_nav.tab == MobileTab.sessions ||
+                    _nav.tab == MobileTab.chat);
+            return Scaffold(
+              body: SafeArea(
+                bottom: false,
+                child: desktop
+                    ? Row(
+                        children: [
+                          _rail(context),
+                          const VerticalDivider(width: 1),
+                          Expanded(
+                            child: _body(desktop: true, inSplit: inSplit),
+                          ),
+                        ],
+                      )
+                    : _body(desktop: false, inSplit: false),
+              ),
+              bottomNavigationBar: desktop
+                  ? null
+                  : SafeArea(
+                      top: false,
+                      child: MobileBottomNav(
+                        current: _nav.tab,
+                        chatEnabled: _nav.chatSessionId != null,
+                        onSelect: (tab) => _onSelectTab(context, tab),
                       ),
                     ),
-                  );
-                  return;
-                }
-                // Desde el header del chat, `select` hace de "atrás".
-                if (tab == _nav.tab && tab == MobileTab.chat) {
-                  _nav.leaveChat();
-                } else {
-                  _nav.select(tab);
-                }
-              },
-            ),
-          ),
+            );
+          },
         );
       },
     );
   }
+
+  /// El rail desktop reusa la misma selección que el bottom-nav móvil.
+  Widget _rail(BuildContext context) => DesktopRail(
+    current: _nav.tab,
+    chatEnabled: _nav.chatSessionId != null,
+    onSelect: (tab) => _onSelectTab(context, tab),
+  );
+
+  void _onSelectTab(BuildContext context, MobileTab tab) {
+    // Chat sin sesión: no es un destino, es un atajo a la lista.
+    // Se dice en vez de dejar un botón que no hace nada.
+    if (tab == MobileTab.chat && _nav.chatSessionId == null) {
+      _nav.select(MobileTab.sessions);
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(
+          content: Text('Elegí una sesión de la lista para abrir el chat.'),
+        ),
+      );
+      return;
+    }
+    // Desde el header del chat, `select` hace de "atrás".
+    if (tab == _nav.tab && tab == MobileTab.chat) {
+      _nav.leaveChat();
+    } else {
+      _nav.select(tab);
+    }
+  }
+
+  /// Contenido: bandas + pestañas. En desktop y con sesiones/chat al frente
+  /// es master-detail (lista 380 + chat); el resto usa el mismo `IndexedStack`
+  /// de móvil para no perder estados.
+  ///
+  /// Cruzar el borde split↔archivos/ajustes remontan sesiones/chat (sus VMs
+  /// nacen con la posición en el árbol): dentro del split no se pierde nada.
+  Widget _body({required bool desktop, required bool inSplit}) {
+    final sessionsTab = _SessionsTab(
+      config: widget.config,
+      onOpen: _nav.openSession,
+      // El `IndexedStack` mantiene las cuatro pestañas
+      // montadas, así que sin esto el poll de
+      // `/api/session/active` seguía corriendo con el chat al
+      // frente: 62 bytes cada 5 s que nadie mira (medido:
+      // ~45 KB/h). El chat ya frenaba el suyo con `setVisible`;
+      // acá faltaba el mismo corte.
+      visible: inSplit || (!desktop && _nav.tab == MobileTab.sessions),
+    );
+    final chatTab = _ChatTab(
+      sessionInfo: _nav.chatSession,
+      sessionId: _nav.chatSessionId ?? '',
+      config: widget.config,
+      visible: inSplit || (!desktop && _nav.tab == MobileTab.chat),
+      onBack: _nav.handleBack,
+      canBack: () => _nav.canHandleBack,
+      streamFactory: widget.chatStreamFactory,
+      policy: _policy,
+      // La política NO forma parte de la identidad: con datos
+      // móviles el chat actualiza su consumo en vivo (ver
+      // `ChatViewModel.updatePolicy`) sin perder scroll ni
+      // re-suscribir el stream.
+      key: ValueKey('chat-${_nav.chatSessionId}'),
+    );
+    final filesTab = _FilesTab(config: widget.config);
+    final settingsView = SettingsView(
+      config: widget.config,
+      prefs: widget.prefs,
+      creds: widget.creds,
+      onProbe: widget.onProbe,
+      onThemeVariant: widget.onThemeVariant,
+      onLoggedOut: widget.onLoggedOut,
+      // Las 94 claves de la spec aprobada salen del catálogo
+      // que ya está cargado; el toggle persiste vía PrefsStore.
+      loadLayerSpec: _loadLayerSpec,
+      onLayerToggle: _onLayerToggle,
+    );
+    return Column(
+      children: [
+        // Autoupdate: banda no bloqueante, se oculta sola.
+        if (!_updateDismissed)
+          ListenableBuilder(
+            listenable: _updates,
+            builder: (context, _) => UpdateBanner(
+              state: _updates.state,
+              onDownload: _updates.download,
+              onInstall: _updates.install,
+              onDismiss: () => setState(() => _updateDismissed = true),
+            ),
+          ),
+        // Sólo aparece con datos móviles: explica por qué la app se
+        // Aviso de Tailscale: solo cuando el server no responde y el
+        // sistema no ve VPN. Si hay VPN, el problema es el server y
+        // esta banda seria mentirosa.
+        ListenableBuilder(
+          listenable: _tailscale,
+          builder: (context, _) {
+            final notice = _tailscale.notice;
+            if (notice == null) return const SizedBox.shrink();
+            return TailscaleBanner(
+              message: notice,
+              onRetry: _tailscale.recheck,
+              onOpenTailscale: () async {
+                final ok = await TailscaleBanner.openTailscale();
+                if (!ok || !mounted) return;
+                // Se re-chequea despues de abrir: si el usuario lo
+                // prende ahi, la banda se va sola al primer probe.
+                await _tailscale.recheck();
+              },
+            );
+          },
+        ),
+        // recorta, en vez de que el usuario adivine que anda lento.
+        LowDataBanner(
+          onCellular: _lowData,
+          onDisable: () => setState(() => _lowDataOverride = true),
+        ),
+        Expanded(
+          child: inSplit
+              ? Row(
+                  children: [
+                    SizedBox(
+                      width: kDesktopMasterWidth,
+                      child: sessionsTab,
+                    ),
+                    const VerticalDivider(width: 1),
+                    Expanded(child: chatTab),
+                  ],
+                )
+              : IndexedStack(
+                  index: _nav.tab.index,
+                  children: [sessionsTab, chatTab, filesTab, settingsView],
+                ),
+        ),
+      ],
+    );
+  }
+
 }
 
 class _SessionsTab extends StatefulWidget {

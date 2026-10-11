@@ -1147,3 +1147,13 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
 - Adjudicados: a02 (recorte a 300, premisa "retener todo" cambiada), stream URL
   (sin `after`/`auth_token`, medido), contrato viejo que fijaban.
 - Suite 1020 verdes, analyze en cero. Sin commitear: pendiente OK del dueño.
+
+## 2026-10-11 — Vista desktop sin tocar la móvil
+
+- `lib/ui/features/navigation/desktop_rail.dart` + branch en `AppShell` por
+  ancho (`isDesktopWidth`: 900 px). Desktop: rail + master-detail
+  (sesiones 380 + chat, ambos visibles); archivos/ajustes a ancho completo.
+  Móvil: rama idéntica a la anterior.
+- Cruzar split↔archivos/ajustes remontan sesiones/chat (documentado en `_body`).
+  Sin sesión, el detalle muestra `Sin sesión abierta` (sin pedir al server).
+- Tests: breakpoint + rail (3). Suite 1023 verdes, analyze en cero.
