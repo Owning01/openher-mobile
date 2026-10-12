@@ -1,84 +1,106 @@
 # OpenHer Mobile
 
-Cliente **Android** delgado, en Flutter, que habla **directo con el server de
-opencode** (dialecto v2, prefijo `/api`). No depende de OpenHer ni de
-`openher-desktop.exe`: no usa `:4848` (shell) ni `:4849` (PTY).
-
 <p align="center">
-  <img src="prototype/mobile.html" alt="" width="1" height="1" style="display:none">
+  <img src="assets/demo.webp" alt="OpenHer Mobile App Demo" width="340">
 </p>
 
-## Qué hay adentro
+<p align="center">
+  <strong>Cliente Android nativo y ultra-ligero para OpenCode</strong><br>
+  <em>Tus sesiones, agentes, terminales y código en tu teléfono</em>
+</p>
 
-| Carpeta | Qué es |
-|---|---|
-| `docs/API_CONTRACT.md` | El contrato de la API **medido** contra el server real: auth, envoltorias, mensajes, tools, errores, SSE y una lista de *drift* (lo que no existe y no hay que llamar). |
-| `docs/SUPER_PLAN.md` | El plan maestro: decisiones, arquitectura, contrato de performance, fases M0–M10, riesgos. |
-| `docs/PROJECT_MAP.md` | Estado actual del proyecto (el índice). |
-| `docs/PROJECT_MEMORY.md` | Bitácora: qué pasó y por qué. |
-| `spec/layers.json` | La **config de diseño aprobada**: 94 capas de UI, 90 activas. |
-| `prototype/mobile.html` | Maqueta navegable (un solo archivo, sin recursos externos) con los toggles de capas. |
-| `assets/spec/layers.json` | La misma spec, empaquetada para que la app la lea en runtime. |
-| `assets/icons/` | 39 iconos SVG (Lucide 1.5px) extraídos del prototipo. Cero emojis. |
+<p align="center">
+  <a href="https://github.com/Owning01/openher-mobile/releases/latest">
+    <img src="https://img.shields.io/badge/Descargar%20APK-Última%20Versión-success?style=for-the-badge&logo=android" alt="Descargar APK">
+  </a>
+</p>
 
-## Las 4 pantallas
+<p align="center">
+  <img src="https://img.shields.io/badge/Estado-Beta%20Activa-orange?style=flat-square" alt="Estado Beta">
+  <img src="https://img.shields.io/badge/Plataforma-Android-blue?style=flat-square&logo=android" alt="Plataforma Android">
+  <img src="https://img.shields.io/badge/API-OpenCode%20v2%20REST%20%2B%20SSE-success?style=flat-square" alt="API OpenCode v2">
+</p>
 
-`Sesiones` · `Chat` · `Archivos` · `Ajustes`, con bottom-nav de 4 destinos.
+---
 
-## Capas: el diseño es un contrato verificable
+> [!WARNING]
+> ### 🚧 Estado del Proyecto: Versión Beta en Desarrollo
+> **OpenHer Mobile se encuentra actualmente en fase Beta.** La aplicación recibe actualizaciones e incrementos continuos. Si experimentas algún comportamiento inesperado o quieres sugerir nuevas funciones, las contribuciones y reportes son bienvenidos.
 
-`spec/layers.json` sale del prototipo. Las 4 capas apagadas **no se construyen**:
+---
 
-- `chat.appbar.subtitle` — sin subtítulo de modelo en el app bar
-- `chat.composer.counter` — sin contador de caracteres
-- `chat.composer.tsl` — sin chip TSL (traducir ES→EN)
-- `chat.header.progress` — sin barra de progreso del turno
+## 📱 ¿Qué es OpenHer Mobile?
 
-`test/layer_contract_test.dart` falla si una capa activa no tiene archivo o si
-se implementa una apagada. Además, dentro de la app, `LayerGate` apaga y enciende
-cualquier capa en runtime desde **Ajustes → Capas de la UI**, y el cambio se
-persiste.
+**OpenHer Mobile** es una aplicación diseñada específicamente para llevar el flujo de trabajo de **OpenCode** a tu bolsillo:
 
-## Conectar
+* **Conexión directa:** Habla en forma nativa con el servidor de OpenCode (dialecto v2 bajo `/api/*`) sin intermediarios ni proxies pesados.
+* **Streaming en tiempo real:** Flujo reactivo vía SSE (Server-Sent Events) para visualizar las respuestas del asistente, estados de ejecución y herramientas (*tools*) a medida que operan.
+* **Ergonomía móvil:** Navegación por gestos, pestañas inferiores accesibles con una mano, tema oscuro adaptado y rendimiento optimizado para bajo consumo de batería y datos móviles.
+* **Credenciales seguras:** La autenticación se guarda localmente y cifrada con el almacén seguro de Android (`flutter_secure_storage`).
 
-`service.json` **no existe en opencode2** (es una convención de OpenHer) y en
-Android no hay disco del PC, así que la app pide las credenciales en la primera
-pantalla y las guarda cifradas (`flutter_secure_storage`):
+---
 
-- Host `127.0.0.1` · Puerto `4098` · Usuario `opencode` · Contraseña: la del
-  `opencode serve`.
+## 📸 Vistas Principales
 
-El probe de versión es `GET /api/location`. **No** `/api/health` (da 404 en el
-build medido) ni `/global/health` (devuelve el catch-all del SPA).
+| 💬 Sesiones | ⚡ Chat & Streaming | 📁 Archivos | ⚙️ Ajustes |
+|:---:|:---:|:---:|:---:|
+| <img src="assets/screenshots/01_sessions.png" width="180" alt="Sesiones"> | <img src="assets/screenshots/02_chat.png" width="180" alt="Chat"> | <img src="assets/screenshots/03_files.png" width="180" alt="Archivos"> | <img src="assets/screenshots/04_settings.png" width="180" alt="Ajustes"> |
+| Historial, estados activos y filtros | Ejecución de turnos, código y tools | Explorador de archivos del proyecto | Configuración de servidor y temas |
 
-## Comandos
+---
 
-```powershell
-flutter pub get
-flutter test
-flutter analyze
-flutter run -d <android>
-.\tools\build-apk.ps1          # APK release
+## 🌐 Cómo Conectar la App al Servidor OpenCode
+
+Al abrir la aplicación por primera vez verás la pantalla de conexión. Para vincularla con tu computadora necesitas los datos con los que corre `opencode serve`.
+
+### 1. Datos de conexión requeridos
+* **Host / IP:** La dirección IP de tu máquina en la red local o tu IP de Tailscale (ver diagrama abajo).
+* **Puerto:** Por defecto `4098` (o el puerto configurado en `opencode serve`).
+* **Usuario:** Por defecto `opencode`.
+* **Contraseña:** La contraseña configurada en tu servidor (variable `OPENCODE_SERVER_PASSWORD`).
+
+---
+
+### 2. Escenarios de Red: Local vs Fuera de Casa (Tailscale)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       ESCENARIO A: MISMA RED WI-FI                          │
+│                                                                             │
+│    [ Computadora con OpenCode ] ◄────── Wi-Fi Local ──────► [ Celular ]     │
+│             192.168.1.50                                      Host:         │
+│             Puerto: 4098                                  192.168.1.50      │
+│                                                            Puerto: 4098     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   ESCENARIO B: REDES DISTINTAS (TAILSCALE)                  │
+│                                                                             │
+│  [ Computadora en Casa / Oficina ]                      [ Celular en 4G/5G  │
+│         Tailscale VPN                                   o en otra Wi-Fi ]   │
+│         100.85.120.45:4098                                Tailscale VPN     │
+│                 ▲                                               ▲           │
+│                 └─────────── Túnel Seguro Mesh (VPN) ───────────┘           │
+│                                                                             │
+│                         En la app móvil ingresas:                           │
+│                          Host: 100.85.120.45                                │
+│                          Puerto: 4098                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Decisiones que no se re-discuten
+#### 💡 ¿Estás fuera de casa o usando datos móviles?
+Si tu teléfono no está conectado a la misma red Wi-Fi que tu computadora:
+1. Instala **[Tailscale](https://tailscale.com/)** tanto en tu computadora como en tu celular Android.
+2. Inicia sesión con la misma cuenta en ambos dispositivos.
+3. Copia la dirección **IP de Tailscale de tu PC** (suele comenzar en `100.x.y.z`).
+4. En **OpenHer Mobile**, escribe esa IP en el campo **Host** y conecta. ¡Listo! Tendrás acceso cifrado punto a punto desde cualquier lugar del mundo sin abrir puertos en tu router.
 
-| # | Decisión |
-|---|---|
-| D1 | Sólo dialecto v2. Si el probe no da v2, aviso explícito (no modo dual). |
-| D2 | Credenciales por UI → secure storage. Nunca se lee `service.json`. |
-| D3 | Stream global `/api/event` + filtro por sesión en el cliente. El stream por sesión da 404 medido. |
-| D4 | El POST del prompt no devuelve el turno: se manda y se escucha el stream. |
-| D5 | Bottom-nav de 4 destinos + hojas inferiores. Se elimina activity-bar, grid de paneles y splits. |
-| D6 | Tokens de diseño reusados del cliente de escritorio (espejo de `tokens.css`). |
-| D7 | Cero dependencias nuevas salvo `http`, `flutter_secure_storage`, `speech_to_text`, `flutter_svg`, `shared_preferences`. |
-| D8 | Los 3 canales de error visibles (el cliente de escritorio se come `session.error`). |
+---
 
-## Trampas del server (medidas, no supuestas)
+## 📦 Descarga e Instalación
 
-- Todo path desconocido devuelve **HTML 200** (catch-all del SPA).
-- El heartbeat v2 es un **comentario SSE** (`: heartbeat`), no un evento.
-- Los mensajes v2 traen `content[]` embebido, no `parts[]`.
-- `tool.state.completed` usa `content[]`, no `output: String`.
-- No mandes `?sessionID=` al stream: es un query no declarado y da **400**.
-- `assistant.error` trae `type` (p.ej. `provider.auth`), no `name`.
+El archivo instalable (APK) más reciente para Android está disponible directamente en GitHub:
+
+👉 **[Descargar último APK de OpenHer Mobile (Releases)](https://github.com/Owning01/openher-mobile/releases/latest)**
+
+*(Descarga `app-release.apk` en tu dispositivo Android e instálalo permitiendo la instalación de orígenes desconocidos si tu navegador lo solicita).*
