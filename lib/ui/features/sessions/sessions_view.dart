@@ -13,6 +13,7 @@
 /// volvería a pintar y el usuario perdería la fila sin avisar).
 library;
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/storage/creds_store.dart' show redactSecret;
@@ -31,6 +32,7 @@ class SessionsView extends StatefulWidget {
     required this.onAction,
     this.secret = '',
     this.currentDirectory,
+    this.onOpenDirectory,
   });
 
   final SessionsViewModel viewmodel;
@@ -57,6 +59,10 @@ class SessionsView extends StatefulWidget {
   /// (todavía no se preguntó) y no se muestra nada.
   final String? currentDirectory;
 
+  /// Abrir otra carpeta/proyecto. `null` = sin botón (móvil). Con botón, el
+  /// shell cambia el `directory` del viewmodel y persiste la preferencia.
+  final ValueChanged<String>? onOpenDirectory;
+
   // Claves de los widgets que los tests apuntan directo, para no depender de un
   // texto que puede repetirse en pantalla.
 
@@ -65,6 +71,9 @@ class SessionsView extends StatefulWidget {
 
   /// Botón `+` del app bar.
   static const Key addButtonKey = Key('sessions-appbar-add');
+
+  /// Botón de carpeta del app bar (solo desktop).
+  static const Key directoryButtonKey = Key('sessions-appbar-directory');
 
   /// Campo de texto del buscador.
   static const Key searchFieldKey = Key('sessions-search-field');
@@ -215,6 +224,82 @@ class _SessionsViewState extends State<SessionsView>
     }
   }
 
+  /// Abrir otra carpeta/proyecto (solo desktop).
+  ///
+  /// Escribir la ruta o elegirla con Examinar. Vacío = volver a la carpeta
+  /// del server. En móvil no hay selector de carpetas (`getDirectoryPath`
+  /// devuelve null): ahí vale escribirla a mano.
+  Future<void> _openDirectoryDialog() async {
+    final send = widget.onOpenDirectory;
+    if (send == null) return;
+    final controller = TextEditingController(
+      text: widget.currentDirectory ?? '',
+    );
+    try {
+      final path = await showDialog<String>(
+        context: context,
+        builder: (dialog) => AlertDialog(
+          title: const Text('Abrir proyecto o carpeta'),
+          content: StatefulBuilder(
+            builder: (dialogContext, setDialog) => Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                TextField(
+                  controller: controller,
+                  decoration: const InputDecoration(
+                    hintText: r'C:\proyectos\mi-app',
+                    labelText: 'Carpeta en el server',
+                  ),
+                  onSubmitted: (_) =>
+                      Navigator.of(dialog).pop(controller.text.trim()),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    try {
+                      final picked = await getDirectoryPath(
+                        confirmButtonText: 'Abrir',
+                      );
+                      if (picked != null && picked.isNotEmpty) {
+                        controller.text = picked;
+                        setDialog(() {});
+                      }
+                    } on Object catch (e) {
+                      debugPrint('sessions: sin selector de carpetas: $e');
+                    }
+                  },
+                  icon: const AppIcon('folder', size: 16),
+                  label: const Text('Examinar…'),
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                const Text(
+                  'Vacío = la carpeta del server.',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialog).pop(),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.of(dialog).pop(controller.text.trim()),
+              child: const Text('Abrir'),
+            ),
+          ],
+        ),
+      );
+      if (path == null || !mounted) return;
+      send(path);
+    } finally {
+      controller.dispose();
+    }
+  }
+
   /// Swipe a la izquierda: **eliminar**.
   ///
   /// Antes reportaba `archive`, que el server no expone, así que el gesto no
@@ -274,6 +359,16 @@ class _SessionsViewState extends State<SessionsView>
           child: AppBar(
             title: const Text('Sesiones'),
             actions: [
+              if (widget.onOpenDirectory != null)
+                LayerGate(
+                  'sessions.appbar',
+                  child: AppIconButton(
+                    key: SessionsView.directoryButtonKey,
+                    icon: 'folder',
+                    tooltip: 'Abrir proyecto o carpeta',
+                    onPressed: _openDirectoryDialog,
+                  ),
+                ),
               LayerGate(
                 // La capa del **app bar** y no una propia: la spec aprobada tiene
                 // 94 claves fijadas por un test, y `isOn` devuelve `false` para

@@ -34,6 +34,7 @@ import 'package:openher_mobile/ui/features/chat/chat_view.dart';
 import 'package:openher_mobile/ui/features/chat/chat_viewmodel.dart';
 import 'package:openher_mobile/ui/features/chat/composer.dart';
 import 'package:openher_mobile/ui/features/chat/message_bubble.dart';
+import 'package:openher_mobile/ui/features/chat/squares_spinner.dart';
 import 'package:openher_mobile/ui/features/chat/tool_card.dart';
 import 'package:openher_mobile/ui/features/chat/turn_activity.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
@@ -535,6 +536,7 @@ void main() {
     await pumpChat(tester, vm);
 
     expect(find.text('Usa el server local.'), findsOneWidget);
+    // La burbuja propia va a la izquierda (pedido del usuario 2026-10-11).
     final bubble = tester.widget<Align>(
       find
           .ancestor(
@@ -543,7 +545,7 @@ void main() {
           )
           .first,
     );
-    expect(bubble.alignment, Alignment.centerRight);
+    expect(bubble.alignment, Alignment.centerLeft);
   });
 
   testWidgets('el boton de enviar es Detener cuando working', (tester) async {
@@ -608,7 +610,9 @@ void main() {
     expect(find.text('Disena las vistas mobile'), findsOneWidget);
     expect(find.text('deepseek-v4.1-flash'), findsOneWidget);
     expect(find.text('build'), findsOneWidget);
-    expect(find.text(r'14.2k contexto · $0.38'), findsOneWidget);
+    // Cinco términos como opencode: 14.200 + 300 = 14.5k (antes 14.2k con la
+    // fórmula vieja de tres que ignoraba el output).
+    expect(find.text(r'14.5k contexto · $0.38'), findsOneWidget);
   });
 
   testWidgets('un assistant con error del proveedor pinta la caja de error', (
@@ -804,6 +808,23 @@ void main() {
     await pumpChat(tester, vm);
 
     expect(find.byType(TypingDots), findsOneWidget);
+  });
+
+  testWidgets('pensando: un solo spinner, no dos', (tester) async {
+    // Con el turno vivo y el assistant todavía sin texto, los puntos iban en
+    // la burbuja abierta Y la grilla al pie de la lista a la vez: dos
+    // spinners animados para el mismo "pensando".
+    final vm = await loadedVm([
+      userJson('msg_u1', 'hola'),
+      assistantJson(id: 'msg_a1', complete: false),
+    ]);
+    addTearDown(vm.dispose);
+    await pumpChat(tester, vm);
+
+    final spinners =
+        find.byType(TypingDots).evaluate().length +
+        find.byType(SquaresSpinner).evaluate().length;
+    expect(spinners, 1);
   });
 
   testWidgets('el aviso de compactacion es una pila centrada', (tester) async {
@@ -1807,9 +1828,13 @@ void main() {
       expect(seleccionable('el segundo'), findsNothing);
     });
 
-    testWidgets('enviar manda el POST y la burbuja deja de estar en cola', (
+    testWidgets('con turno vivo, enviar NO manda: queda en cola', (
       tester,
     ) async {
+      // Adjudicado 2026-10-11: confirmar a mitad de turno volvía del server
+      // como `steer` y desviaba el turno en curso. La cola frena antes del
+      // POST también acá (`ChatViewModel.confirmSend`): el pendiente queda en
+      // cola hasta que el turno termine.
       final vm = await colaVm(turnoVivo());
       addTearDown(vm.dispose);
       await pumpChat(tester, vm);
@@ -1819,10 +1844,64 @@ void main() {
       await tester.tap(find.byKey(MessageBubble.pendingButtonKey(id, 'send')));
       await tester.pump();
 
-      final enviados = prompts();
+      expect(
+        prompts(),
+        isEmpty,
+        reason: 'con el turno vivo no hay POST: sería steer y desviaría',
+      );
+      expect(vm.pendings, hasLength(1), reason: 'sigue en cola');
+    });
+
+    testWidgets('terminado el turno, enviar manda el POST', (tester) async {
+      // El positivo del anterior: cuando el turno termina, el Enviar del
+      // pendiente sí manda y la burbuja deja de estar en cola.
+      var terminado = false;
+      final vivos = turnoVivo();
+      final fin = <Map<String, Object?>>[
+        userJson('msg_u1', 'el primero'),
+        assistantJson(id: 'msg_a1', content: [
+          {'type': 'text', 'text': 'Listo.'},
+        ]),
+      ];
+      final peticiones = <http.Request>[];
+      final vm = ChatViewModel(
+        ApiClient(
+          config: kConfig,
+          client: MockClient((req) async {
+            peticiones.add(req);
+            return http.Response(
+              jsonEncode({'data': terminado ? fin : vivos}),
+              200,
+              headers: const {'content-type': 'application/json'},
+            );
+          }),
+        ),
+        sessionId: kSessionId,
+        sessionInfo: kSession,
+        streamFactory: (config, directory) => SilentSource(),
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+      await pumpChat(tester, vm);
+      await mandar(tester, 'el segundo');
+      expect(vm.working, isTrue);
+
+      terminado = true;
+      await vm.refresh();
+      // El refresh notifica y la vista reconstruye: sin este pump el árbol
+      // todavía tiene el Enviar deshabilitado del turno vivo.
+      await tester.pump();
+      expect(vm.working, isFalse);
+      expect(vm.pendings, hasLength(1));
+
+      final id = vm.pendings.single.id;
+      await tester.tap(find.byKey(MessageBubble.pendingButtonKey(id, 'send')));
+      await tester.pump();
+
+      final enviados = peticiones
+          .where((r) => r.url.path.endsWith('/prompt'))
+          .toList();
       expect(enviados, hasLength(1), reason: 'confirmar sí manda');
-      // Lo que se manda es **el texto del pendiente**, no un placeholder: si se
-      // mandara otra cosa, el POST pasaría y el usuario perdería su mensaje.
       expect(
         enviados.single.body,
         contains('el segundo'),

@@ -47,7 +47,9 @@ void main() {
       const p = DataPolicy.normal();
       expect(p.streamingEnabled, isTrue);
       expect(p.imagesEnabled, isTrue);
-      expect(p.pageSize, 30);
+      // 100 desde 2026-10-11 (pedido: muchos más mensajes cargados): el
+      // `lessThan` de arriba sigue valiendo porque lowData quedó en 8.
+      expect(p.pageSize, 100);
       expect(p.pollInterval, const Duration(seconds: 2));
     });
   });

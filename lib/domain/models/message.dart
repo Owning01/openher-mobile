@@ -102,19 +102,14 @@ final class TokenUsage {
 
   /// **El contexto de este turno**: lo que el modelo tenía cargado.
   ///
-  /// Es `input + cache.read + reasoning`, y no [total] por dos razones medidas
-  /// contra el server real:
-  ///
-  /// - `cache.read` es el prefijo que el modelo **releyó del cache**, y es
-  ///   la mayor parte de la ventana en una sesión larga (medido: `input=1.450`
-  ///   contra `cache.read=101.376` en el mismo turno). Sin él, el contador dice
-  ///   1,5k donde hay 102k.
-  /// - `cache.write` queda **fuera**: lo que este turno escribe en el cache es
-  ///   lo que el *siguiente* va a leer como `cache.read`. Contarlo ahora cuenta
-  ///   el mismo prefijo dos veces.
-  ///
-  /// `output` tampoco entra: es lo que se generó, no lo que está cargado.
-  int get context => input + cacheRead + reasoning;
+  /// Es la suma de los cinco (`input + output + reasoning + cache.read +
+  /// cache.write`), que es exactamente lo que calcula opencode para su propia
+  /// barra de contexto (`tokenTotal` en
+  /// `packages/app/src/components/session/session-context-metrics.ts`, usado
+  /// también en `session/overflow.ts` y verificado por su test: 300 + 100 +
+  /// 50 + 25 + 25 = 500). El porcentaje de la ventana sale de este total
+  /// contra `model.limit.context`.
+  int get context => input + output + reasoning + cacheRead + cacheWrite;
 }
 
 /// Mensaje del usuario. `files` son adjuntos (`PromptFileAttachment`).

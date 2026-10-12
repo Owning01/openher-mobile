@@ -183,10 +183,11 @@ void main() {
 
         await vm.load();
 
-        // `limit=30` y `order=desc`: la primera página trae los ÚLTIMOS
+        // `limit=100` y `order=desc`: la primera página trae los ÚLTIMOS
         // mensajes y el viewmodel los da vuelta para dejar la lista en orden
-        // cronológico. El cursor `previous` es el de "Cargar 30 anteriores".
-        expect(requests.single.queryParameters['limit'], '30');
+        // cronológico. El cursor `previous` es el de "Cargar N anteriores".
+        // (100 desde 2026-10-11: pedido de muchos más mensajes cargados.)
+        expect(requests.single.queryParameters['limit'], '100');
         expect(requests.single.queryParameters['order'], 'desc');
         expect(requests.single.path, '/api/session/$kSessionId/message');
 
@@ -200,11 +201,10 @@ void main() {
         expect(vm.working, isFalse);
         expect(vm.error, isNull);
         // El contexto sale de los tokens del assistant (no hay SessionInfo).
-        // Es `input + cache.read + reasoning` = 14.200 + 9.000 + 0, **no**
-        // `input + output + reasoning` = 14.500: el `output` es lo que se
-        // generó, no lo que está cargado en la ventana. Ver
-        // `TokenUsage.context` y el motivo medido en `context_measure_test.dart`.
-        expect(vm.contextTokens, 14200 + 9000);
+        // Son los cinco términos como opencode = 14.200 + 300 + 0 + 9.000 + 0,
+        // **no** el acumulado de la sesión. Ver `TokenUsage.context` y el
+        // motivo medido en `context_measure_test.dart`.
+        expect(vm.contextTokens, 14200 + 300 + 9000);
         expect(vm.serverCost, closeTo(0.011, 1e-9));
       },
     );
@@ -228,7 +228,7 @@ void main() {
     );
 
     test(
-      'el cursor "next" del server enciende "Cargar 30 anteriores"',
+      'el cursor "next" del server enciende "Cargar N anteriores"',
       () async {
         var call = 0;
         final vm = buildVm(
@@ -1488,10 +1488,10 @@ void main() {
       });
       await pumpEventQueue();
       expect(vm.serverCost, 0.42);
-      // El contexto del turno en vuelo es `input + cache.read + reasoning`:
-      // 1.000 + 8.000 + 50. Antes sumaba `output` y daba 9.200, y el mismo
-      // rótulo mezclaba dos fórmulas según el SSE estuviera conectado o no.
-      expect(vm.contextTokens, 1000 + 8000 + 50);
+      // El contexto del turno en vuelo son los cinco términos como opencode:
+      // 1.000 + 200 + 50 + 8.000 + 0. El vivo y el de mensajes usan la misma
+      // fórmula para que el rótulo no cambie según el SSE esté conectado o no.
+      expect(vm.contextTokens, 1000 + 200 + 50 + 8000);
     });
 
     test('session.renamed muestra el titulo que pone el server', () async {

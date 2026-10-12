@@ -358,8 +358,9 @@ class ChatViewModel extends ChangeNotifier {
 
   /// Tope de mensajes en memoria. Las sesiones largas crecen sin techo y cada
   /// rebuild recorre la lista entera; lo viejo se recorta (ya está en el
-  /// server y vuelve con "Cargar anteriores").
-  static const int maxMessages = 300;
+  /// server y vuelve con "Cargar anteriores"). 1000 para que en desktop se
+  /// pueda scrollear largo sin recortes (pedido 2026-10-11).
+  static const int maxMessages = 1000;
 
   /// ese caso la vista no lo vuelve a prender al montar: la intencion del
   int _localSeq = 0;
@@ -442,33 +443,26 @@ class ChatViewModel extends ChangeNotifier {
 
   /// **Contexto en tokens**: lo que el modelo tiene cargado ahora mismo.
   ///
-  /// Antes esto se llamaba `serverTokens` y devolvía la **suma acumulada de
-  /// tokens de toda la sesión**, etiquetada como "contexto". Medido contra el
-  /// server real sobre una sesión larga: la app mostraba **15.538.680** donde
-  /// el contexto real era **102.924**, o sea **151×** inflado.
-  ///
-  /// La causa: `session.tokens` es un **contador acumulado** (input, output y
-  /// `cache.read` de *todos* los turnos, sumados), no una foto de la ventana.
-  /// Sólo crece, y en una sesión larga crece sin techo.
-  ///
-  /// El contexto de verdad es el prompt del **último** turno del assistant:
-  /// `input + cache.read + reasoning`. Ver [TokenUsage.context] para por qué
-  /// `cache.write` y `output` quedan fuera.
+  /// Es el total del **último** assistant con tokens (los cinco términos,
+  /// igual que el `tokenTotal` de opencode en `session-context-metrics.ts`),
+  /// contra el que se calcula el porcentaje de la ventana. No es
+  /// `session.tokens`: ese es un contador acumulado de toda la sesión que sólo
+  /// crece (medido: mostraba 15.538.680 donde el contexto real era ~103k).
   ///
   /// Pasa primero por el valor del SSE ([_liveTokens]) porque durante un turno
-  /// en vuelo el mensaje del assistant todavía no cerró y no tiene tokens: sin
-  /// eso el contador quedaría congelado en el turno anterior justo cuando más
-  /// se lo mira. Las dos fuentes usan la misma fórmula, así que el número sólo
-  /// salta si el server accounta distinto el prompt, no porque la app mezclara
-  /// dos definiciones (que es lo que pasaba antes: el vivo sumaba `output` y el
-  /// de respaldo no leía `cache` en absoluto).
+  /// en vuelo el mensaje del assistant todavía no cerró y no tiene tokens.
+  /// Las dos fuentes usan la misma fórmula de cinco términos.
   int get contextTokens => _liveTokens ?? _contextFromMessages;
 
-  /// El contexto del último assistant que cerró. Sin ninguno, `0`.
+  /// El contexto del último assistant que trae tokens. Sin ninguno, `0`.
+  ///
+  /// Se saltean los assistants en cero, igual que opencode
+  /// (`lastAssistantWithTokens` ignora `tokenTotal <= 0`): un assistant vacío
+  /// no define la ventana, el anterior sí.
   int get _contextFromMessages {
     for (var i = _messages.length - 1; i >= 0; i--) {
       if (_messages[i] case final AssistantMessage a) {
-        return a.tokens.context;
+        if (a.tokens.context > 0) return a.tokens.context;
       }
     }
     return 0;
@@ -1167,16 +1161,21 @@ class ChatViewModel extends ChangeNotifier {
     return true;
   }
 
-  /// Manda un pendiente que el usuario confirmó.
+  /// Manda un pendiente que el usuario confirmó, si el turno ya terminó.
   ///
-  /// Recibe el `delivery: steer` del server como una aceptación normal: acá el
-  /// server guardó el mensaje y lo procesa. Si el POST falla, el mensaje no se
-  /// borra: pasa a `notDelivered` con su reintento, como cualquier otro.
+  /// Con el turno en curso no hay POST (sería `steer` y desviaría el turno):
+  /// el pendiente queda en cola. Sin turno en curso va el POST; si falla, el
+  /// mensaje no se borra: pasa a `notDelivered` con su reintento.
   Future<void> confirmSend(String localId) async {
     final at = _indexOfUser(localId);
     if (at < 0) return;
     final m = _messages[at];
     if (m is! UserMessage || !m.pendingSend) return;
+    // Con el turno en curso NO se POSTea: el server lo acepta como `steer`
+    // y redirige el turno que está corriendo (medido). La cola frena antes
+    // del POST también acá, no sólo en `send`: el pendiente queda en cola
+    // hasta que el turno termine.
+    if (working) return;
 
     _messages[at] = m.copyWith(pendingSend: false);
     _awaitingAssistant = true;
@@ -1411,23 +1410,19 @@ class ChatViewModel extends ChangeNotifier {
     if (cost is num) _liveCost = cost.toDouble();
     final tokens = asMap(data['tokens']);
     if (tokens != null) {
-      // Contexto del turno **en vuelo**: `input + cache.read + reasoning`, la
-      // misma fórmula que [TokenUsage.context].
-      //
-      // Antes sumaba `output` y saltaba `reasoning`. El `output` no es
-      // contexto: es lo que se está generando, así que contaminaba el número
-      // mientras el turno corría, y el `reasoning` faltando hacía que una
-      // sesión con mucho razonamiento mostrara menos de lo que tenía.
-      //
-      // Y antes de esto el valor vivo y el de respaldo significaban cosas
-      // **distintas** (`input + output + cache.read` en vivo contra el
-      // acumulado de la sesión sin cache), así que el mismo rótulo cambiaba de
-      // número según el SSE estuviera conectado o no. Ahora los dos caminos
-      // usan la misma definición.
+      // Contexto del turno **en vuelo**: los cinco términos, la misma fórmula
+      // que [TokenUsage.context] y que el `tokenTotal` de opencode
+      // (`session-context-metrics.ts`). Las dos fuentes (vivo y mensajes)
+      // usan la misma definición para que el rótulo no cambie de número
+      // según el SSE esté conectado o no.
       final input = asNum(tokens['input']) ?? 0;
+      final output = asNum(tokens['output']) ?? 0;
       final reasoning = asNum(tokens['reasoning']) ?? 0;
-      final cacheRead = asNum(asMap(tokens['cache'])?['read']) ?? 0;
-      _liveTokens = (input + cacheRead + reasoning).toInt();
+      final cache = asMap(tokens['cache']);
+      final cacheRead = asNum(cache?['read']) ?? 0;
+      final cacheWrite = asNum(cache?['write']) ?? 0;
+      _liveTokens = (input + output + reasoning + cacheRead + cacheWrite)
+          .toInt();
     }
     // Mismo valor, mismo número: un evento de uso que no cambia nada no
     // rebuilda el chat.
@@ -1944,6 +1939,10 @@ class ChatViewModel extends ChangeNotifier {
       final confirmed =
           message.id.startsWith('local_') &&
           message is UserMessage &&
+          // Un pendiente NUNCA se POSTeó: un texto igual en el server no
+          // puede ser su eco, es otro mensaje viejo ("dale", "seguí"). Sin
+          // esta excepción cada refresh borraba lo encolado en silencio.
+          !message.pendingSend &&
           serverTexts.contains(message.text);
       if (confirmed) continue;
       merged.add(message);

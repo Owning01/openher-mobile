@@ -178,14 +178,15 @@ void main() {
           hasLength(1),
           reason: 'la burbuja del usuario es el único `primary` de la pantalla',
         );
-        // `.bubble` (:246-250): pegada a la derecha y con la esquina inferior
-        // derecha cerrada a 4, que es lo que la hace "la última".
+        // `.bubble`: pegada a la izquierda y con la esquina inferior
+        // izquierda cerrada a 4 (pedido del usuario 2026-10-11: el mensaje
+        // propio arranca a la izquierda, no a la derecha).
         final align = tester.widget<Align>(
           find
               .ancestor(of: find.text('hola'), matching: find.byType(Align))
               .first,
         );
-        expect(align.alignment, Alignment.centerRight);
+        expect(align.alignment, Alignment.centerLeft);
         final bubble = tester.getSize(
           find
               .ancestor(of: find.text('hola'), matching: find.byType(Container))

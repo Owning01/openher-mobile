@@ -125,7 +125,10 @@ class DataPolicy {
   const DataPolicy.normal()
     : onCellular = false,
       pollInterval = const Duration(seconds: 2),
-      pageSize = 30,
+      // 100, y no 30: en desktop hay pantalla y red de sobra, y pedir de a 30
+      // obligaba a 3-4 toques para ver la conversación (pedido 2026-10-11:
+      // muchos más mensajes cargados). El server admite `limit` 1..200.
+      pageSize = 100,
       streamingEnabled = true,
       imagesEnabled = true;
 

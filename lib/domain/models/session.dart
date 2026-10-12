@@ -137,5 +137,15 @@ final class SessionInfo {
       ? location.directory
       : (legacyDirectory ?? '');
 
+  /// `location[directory]` para el chat, o `null` si la sesión no trae.
+  ///
+  /// Sin esto las imágenes que nombra el agente (un basename suelto)
+  /// resolvían contra la raíz y daban 404 aunque el archivo existiera en la
+  /// carpeta de la sesión: el `_ChatTab` nunca pasaba `directory` al VM.
+  String? get chatDirectory {
+    final d = directory;
+    return d.isEmpty ? null : d;
+  }
+
   int get updatedAtMs => time.updatedMs;
 }

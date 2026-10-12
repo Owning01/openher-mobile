@@ -1157,3 +1157,49 @@ Bitácora append-only. Una entrada por trabajo sustantivo.
 - Cruzar split↔archivos/ajustes remontan sesiones/chat (documentado en `_body`).
   Sin sesión, el detalle muestra `Sin sesión abierta` (sin pedir al server).
 - Tests: breakpoint + rail (3). Suite 1023 verdes, analyze en cero.
+
+
+## 2026-10-11 — Desktop: pegar, 1000px, sidebar, cola, contexto exacto, globo a la izquierda
+
+- Cola: el pendiente se evaporaba en el refresh si el server tenia ese texto (dedup por texto ahora ignora \pendingSend\); confirmar a mitad de turno desviaba via steer (ahora frena + boton deshabilitado con turno vivo). Tests \queue_test.dart\ en rojo antes, verde despues.
+- Contexto con la formula exacta de opencode (\	okenTotal\ en \session-context-metrics.ts\: cinco terminos; su test da 500). Vivo y mensajes usan la misma; ultimo assistant con tokens>0. Tests adjudicados con razon.
+- Globo propio a la izquierda (radio espejado, texto/menu/adjuntos a start). Tests de alineacion adjudicados.
+- Desktop: Ctrl+V pega imagen (\pasteboard\ 0.5.0 a temporal; provider \.provider\ en manifest), Enter manda / Shift+Enter salta, chat acotado a 1000 px centrado, master redimensionable 240-600 + ocultable (boton/Ctrl+B/doble toque, persiste en prefs).
+- Pagina 30->100, tope 300->1000, etiqueta de cargar dinamica, separador de mensajes 12->8. Suite 1036 verde, analyze en cero.
+
+
+## 2026-10-11 — Doble spinner, split propio, logo desktop, acceso directo
+
+- Pensando mostraba 2 spinners (puntos en burbuja abierta + grilla al pie). La fila se suprime si la burbuja ya muestra los puntos (misma condicion). Test en rojo antes, verde despues.
+- Buenas practicas: split desktop extraido a \lib/ui/features/navigation/desktop_split.dart\ (widget puro + consts + clamp; estado y prefs quedan en el shell). Tests \desktop_split_test.dart\ (5).
+- Desktop: icono desde \ic_launcher.png\ (ico 16-256) + titulo nativo \OpenHer\. En escritorio solo acceso directo al exe del build (nada de carpeta copiada).
+
+
+## 2026-10-11 — Pestanas de chats + a11y desktop
+
+- Pestanas estilo Chrome arriba del detalle (desktop): una por sesion abierta, sin duplicados (abrir dos veces activa), tope 12, cierre con X o Ctrl+W (activa la vecina), cada una conserva VM/scroll y solo la activa tiene stream. Movil: abrir reemplaza (single).
+- A11y: divisor ajustable por lector (Semantics +/-, valor en px), dialogo de atajos (Ctrl+/ y ? del rail), Esc cierra sugerencias. Alto contraste y live-regions quedan como backlog.
+
+
+## 2026-10-11 — Imagenes visibles, tabs en la barra de titulo, F11
+
+- Links: confirmacion restaurada (pedido).
+- Imagenes del agente en 404: el VM nunca recibia directory (siempre null). Ahora \SessionInfo.chatDirectory\ -> \_ChatTab._openFor\.
+- Fotos propias: thumbnail real (data URI) + visor unico con zoom (\showImageViewer\, InteractiveViewer) para propias y del agente.
+- Desktop: caption nativa oculta (botones y resize nativos intactos), tira de pestanas en la barra de titulo + zona de arrastre, F11 fullscreen, inicio maximizado, titulo OpenHer.
+
+
+## 2026-10-11 — Header redundante fuera, un solo tres-puntos, abrir carpeta
+
+- Desktop sin app bar de chat (el titulo lo da la pestana); unico tres-puntos en el composer (acciones de sesion); tres-puntos del mensaje con hover-reveal en desktop.
+- Boton carpeta en Sesiones (solo desktop): dialogo con ruta + Examinar (file_selector), persiste en lastDirectory, VM recarga por directory.
+
+
+
+## 2026-10-12 — Desktop: la banda de autoupdate ya no aparece en Windows
+
+- Sintoma: en el build de Windows la banda quedaba fija en "No se pudo descargar OpenHer 1.21.0 sin carpeta de descargas" + "Volver a descargar", imposible de resolver desde la app.
+- Causa: `_checkForUpdate` corria igual que en Android; el manifiesto superaba al versionCode local del desktop y el auto-download usaba `updatesDir` (canal nativo Android) que en Windows devuelve null.
+- Fix: `_updatesSupported` (= `!kIsWeb && Platform.isAndroid`) en `app.dart`; corta el chequeo (initState + lifecycle) y el montaje de la banda. En el telefono nada cambia.
+- Evidencia: `flutter analyze lib/app.dart` = No issues; build nuevo (data/app.so 12:18) y captura de la ventana sin banda, con el resto del layout intacto.
+- Trampa: `openher_mobile.exe` NO cambia de mtime en builds que solo tocan Dart; lo que se regenera es `build/windows/x64/runner/Release/data/app.so`. Mirar la fecha del exe es un falso negativo.

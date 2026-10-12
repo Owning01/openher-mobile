@@ -469,22 +469,28 @@ una sesión larga. **No** usarlo para el contador de contexto.
   de una lista vacía legítima (200 + `data: []`), que se pinta como "sin
   coincidencias".
 
-### 8.3 El contexto: `session.tokens` NO es el contexto (medido 2026-09-29)
+### 8.3 El contexto: el total del último assistant (medido 2026-09-29, fórmula exacta 2026-10-11)
 
 `session.tokens` es un **contador acumulado** de toda la vida de la sesión:
-`input`, `output` y `cache.read` de *todos* los turnos, sumados. Sólo crece.
+`sólo crece.
 
-El contexto de verdad es el prompt del **último** turno del assistant:
+El contexto que muestra **opencode para su propia barra** es el total del
+**último** assistant con tokens, sumando los cinco términos
+(`tokenTotal` en `packages/app/src/components/session/session-context-metrics.ts`,
+usado también en `session/overflow.ts`; su test: 300+100+50+25+25 = 500):
 
 ```
 contexto = assistant.tokens.input
-         + assistant.tokens.cache.read
+         + assistant.tokens.output
          + assistant.tokens.reasoning
+         + assistant.tokens.cache.read
+         + assistant.tokens.cache.write
 ```
 
-`cache.write` queda fuera (lo relee el próximo turno como `cache.read`: sumarlo
-cuenta el mismo prefijo dos veces) y `output` también (es lo generado, no lo
-cargado).
+Y el porcentaje es ese total contra `model.limit.context`
+(`usage = round(total / limit * 100)`). La app usa exactamente esa fórmula,
+en el vivo del SSE y en los mensajes, para que el número coincida con el de
+opencode para la misma sesión.
 
 Medido sobre `ses_f685c4cfdffe7Bp2IL`: `session.tokens` daba `input=19.892.436`
 y el contexto real era **195.089** — el número viejo era **115×** inflado.

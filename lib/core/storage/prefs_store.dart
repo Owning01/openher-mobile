@@ -248,6 +248,8 @@ class PrefsStore {
   static const String defaultModelKey = 'openher.default_model';
   static const String lastDirectoryKey = 'openher.last_directory';
   static const String layersKey = 'openher.layers';
+  static const String sidebarWidthKey = 'openher.sidebar_width';
+  static const String sidebarVisibleKey = 'openher.sidebar_visible';
 
   /// Defaults de modelo/agente mientras no haya selector (M7).
   static const String defaultAgentValue = 'build';
@@ -286,6 +288,16 @@ class PrefsStore {
       _prefs.getString(defaultModelKey) ?? defaultModelValue;
 
   String get lastDirectory => _prefs.getString(lastDirectoryKey) ?? '';
+
+  /// Ancho del master (lista de sesiones) en el split desktop, acotado.
+  /// Default 380: el fijo que había antes de poder redimensionarse. El rango
+  /// vive en `desktop_split.dart`; acá se repite el clamp para no mezclar
+  /// capas (storage no importa UI).
+  double get sidebarWidth =>
+      (_prefs.getDouble(sidebarWidthKey) ?? 380.0).clamp(240.0, 600.0);
+
+  /// Master visible en el split desktop. Default visible.
+  bool get sidebarVisible => _prefs.getBool(sidebarVisibleKey) ?? true;
 
   /// Overrides de capas guardados. **No** incluye las claves que nunca se
   /// tocaron: ésas siguen el default de la spec (ver [layerEnabled]).
@@ -357,6 +369,12 @@ class PrefsStore {
 
   Future<void> setLastDirectory(String value) =>
       _prefs.setString(lastDirectoryKey, value);
+
+  Future<void> setSidebarWidth(double value) =>
+      _prefs.setDouble(sidebarWidthKey, value.clamp(240.0, 600.0));
+
+  Future<void> setSidebarVisible(bool value) =>
+      _prefs.setBool(sidebarVisibleKey, value);
 
   /// Override de una capa. Es lo que escribe un switch de Ajustes.
   Future<void> setLayer(String key, bool value) async {

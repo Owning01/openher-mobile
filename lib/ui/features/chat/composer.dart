@@ -20,6 +20,7 @@
 /// aunque el viewmodel tenga los datos.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -78,6 +79,8 @@ class ChatComposer extends StatefulWidget {
     this.onStop,
     this.onAttach,
     this.onDictate,
+    this.onPasteRequest,
+    this.onMoreActions,
     this.onRemoveAttachment,
     this.onPickModel,
     this.onPickAgent,
@@ -112,6 +115,15 @@ class ChatComposer extends StatefulWidget {
   final VoidCallback? onStop;
   final VoidCallback? onAttach;
   final VoidCallback? onDictate;
+
+  /// Pegar imagen del portapapeles (Ctrl+V en desktop).
+  ///
+  /// `true` = se adjuntó una imagen y el evento queda absorbido; `false` = no
+  /// había imagen y el composer pega el texto del portapapeles él mismo. Sin
+  /// este callback, Ctrl+V lo resuelve el TextField (sólo texto) y la imagen
+  /// se perdía en silencio aunque el tooltip la promete.
+  final Future<bool> Function()? onPasteRequest;
+
   final ValueChanged<ComposerAttachment>? onRemoveAttachment;
   final VoidCallback? onPickModel;
 
@@ -119,6 +131,12 @@ class ChatComposer extends StatefulWidget {
   /// usaba onPickModel y terminaba en la hoja de modelo, asi que no
   /// habia forma de elegir un agente.
   final VoidCallback? onPickAgent;
+
+  /// El único ⋯ de la pantalla de chat en desktop: abre las acciones de la
+  /// sesión (compactar, deshacer, exportar…). En móvil es `null` porque ese
+  /// ⋯ ya vive en el app bar; en pantallas anchas el app bar no se pinta y
+  /// este es su reemplazo.
+  final VoidCallback? onMoreActions;
 
   /// Los ítems del menú de `/` y `@`, ya filtrados por lo escrito.
   ///
@@ -261,6 +279,78 @@ class _ChatComposerState extends State<ChatComposer> {
   final SpeechToText _speech = SpeechToText();
   bool _speechReady = false;
   bool _dictating = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Teclado físico (desktop): Enter manda, Shift+Enter salta de línea, y
+    // Ctrl+V pega imagen si hay. Al teclado blando del móvil esto no le llega
+    // (va por el input connection, no por eventos crudos), así que no cambia.
+    _focus.onKeyEvent = _onKey;
+  }
+
+  /// Teclas del composer con teclado físico.
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    // Esc cierra el menú de sugerencias (/ y @): con teclado no había salida
+    // salvo seguir escribiendo.
+    if (event.logicalKey == LogicalKeyboardKey.escape && _menuOpen) {
+      setState(() {
+        _trigger = null;
+        _highlight = 0;
+      });
+      widget.onTrigger?.call(null);
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.enter &&
+        !HardwareKeyboard.instance.isShiftPressed) {
+      unawaited(_submit());
+      return KeyEventResult.handled;
+    }
+    if (HardwareKeyboard.instance.isControlPressed &&
+        !HardwareKeyboard.instance.isShiftPressed &&
+        event.logicalKey == LogicalKeyboardKey.keyV &&
+        widget.onPasteRequest != null) {
+      // Se absorbe siempre: si hay imagen la adjunta el callback, y si no el
+      // texto lo pega [_paste] a mano (el TextField ya no lo ve).
+      unawaited(_paste());
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  /// Ctrl+V: imagen del callback si hay, si no el texto del portapapeles.
+  Future<void> _paste() async {
+    try {
+      final paste = widget.onPasteRequest;
+      if (paste != null && await paste()) return;
+      if (!mounted) return;
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      final text = data?.text;
+      if (text == null || text.isEmpty || !mounted) return;
+      final value = _controller.value;
+      final start = (value.selection.isValid
+              ? value.selection.start
+              : value.text.length)
+          .clamp(0, value.text.length);
+      final end = (value.selection.isValid
+              ? value.selection.end
+              : value.text.length)
+          .clamp(0, value.text.length);
+      final from = start <= end ? start : end;
+      final to = start <= end ? end : start;
+      final next =
+          '${value.text.substring(0, from)}$text${value.text.substring(to)}';
+      _controller.value = TextEditingValue(
+        text: next,
+        selection: TextSelection.collapsed(offset: from + text.length),
+      );
+      _onTextChanged();
+    } on Object {
+      // Portapapeles ilegible (sin plugin en tests, permiso negado): pegar
+      // no puede reventar el composer; simplemente no pega nada.
+    }
+  }
 
   @override
   void dispose() {
@@ -999,6 +1089,18 @@ class _ChatComposerState extends State<ChatComposer> {
                   ),
                 ),
               ),
+              // El único ⋯ en pantallas anchas (el app bar no se pinta ahí):
+              // las acciones de la sesión. En móvil no existe (`null`) porque
+              // ese ⋯ ya está en el app bar.
+              if (widget.onMoreActions != null)
+                AppIconButton(
+                  icon: 'more-horizontal',
+                  tooltip: 'Más acciones',
+                  onPressed: widget.onMoreActions,
+                  size: 16,
+                  tapSize: 28,
+                  color: scheme.onSurfaceVariant,
+                ),
             ],
           ),
         ),

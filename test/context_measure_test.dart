@@ -17,7 +17,7 @@ import 'package:openher_mobile/ui/features/chat/chat_viewmodel.dart';
 /// acumulado** de toda la vida de la sesión, y la etiqueta decía "contexto".
 ///
 /// Medido contra el server real sobre una sesión larga: la app pintaba
-/// **15.538.680** donde el contexto real era **102.924** — **151×** inflado.
+/// **15.329.521** donde el contexto real era **102.984** — **149×** inflado.
 /// Los números de abajo son los reales de esa sesión, para que el test no mida
 /// una invención.
 const kRealSession = <String, Object?>{
@@ -103,7 +103,13 @@ void main() {
   );
 
   group('TokenUsage.context', () {
-    test('es input + cacheRead + reasoning', () {
+    // Fórmula exacta de opencode (`tokenTotal` en
+    // `packages/app/src/components/session/session-context-metrics.ts`,
+    // verificada por su propio test: 300+100+50+25+25 = 500): los cinco
+    // términos. La fórmula vieja de tres (`input + cache.read + reasoning`)
+    // era invención nuestra y dejaba el número por debajo del que muestra
+    // opencode para la misma sesión.
+    test('es la suma de los cinco, como opencode', () {
       const t = TokenUsage(
         input: 1450,
         output: 60,
@@ -111,26 +117,26 @@ void main() {
         cacheRead: 101376,
         cacheWrite: 500,
       );
-      expect(t.context, 1450 + 101376 + 98);
+      expect(t.context, 1450 + 60 + 98 + 101376 + 500);
     });
 
-    test('cacheWrite NO cuenta: lo relee el proximo turno', () {
-      // Lo que este turno escribe en el cache es lo que el siguiente lee como
-      // `cache.read`. Contarlo ahora cuenta el mismo prefijo dos veces.
+    test('cacheWrite cuenta: opencode lo suma en su barra', () {
       const a = TokenUsage(input: 100, cacheRead: 5000, cacheWrite: 2000);
       const b = TokenUsage(input: 100, cacheRead: 5000, cacheWrite: 0);
-      expect(a.context, b.context);
+      expect(a.context, 7100);
+      expect(b.context, 5100);
     });
 
-    test('output NO cuenta: es lo generado, no lo cargado', () {
+    test('output cuenta: opencode lo suma en su barra', () {
       const corto = TokenUsage(input: 100, cacheRead: 5000, output: 10);
       const largo = TokenUsage(input: 100, cacheRead: 5000, output: 9999);
-      expect(corto.context, largo.context);
+      expect(corto.context, 5110);
+      expect(largo.context, 15099);
     });
 
-    test('sin cache es solo input + reasoning', () {
-      const t = TokenUsage(input: 800, reasoning: 200);
-      expect(t.context, 1000);
+    test('sin cache es input + output + reasoning', () {
+      const t = TokenUsage(input: 800, output: 100, reasoning: 200);
+      expect(t.context, 1100);
     });
 
     test('los tres en cero dan cero, no null', () {
@@ -146,7 +152,8 @@ void main() {
         ),
       ]);
 
-      final real = 1450 + 101376 + 98;
+      // Cinco términos como opencode: 1450 + 60 + 98 + 101376 + 0.
+      final real = 1450 + 60 + 98 + 101376;
       expect(v.contextTokens, real);
       expect(
         v.contextTokens,
@@ -175,8 +182,15 @@ void main() {
         ),
       ]);
 
-      expect(v.contextTokens, 1450 + 101376 + 98);
-      expect(v.contextTokens, isNot(10 + 1450 + 98 + 101376));
+      // msg_2 no trae `output`: 1450 + 0 + 98 + 101376 + 0.
+      expect(v.contextTokens, 1450 + 98 + 101376);
+      expect(
+        v.contextTokens,
+        // msg_1 suma 10 + 5: la trampa es sumar los turnos en vez de
+        // fotografiar el último.
+        isNot(10 + 5 + 1450 + 98 + 101376),
+        reason: 'el contexto es el último turno, no la suma',
+      );
     });
 
     test('sin assistant da 0, NO el acumulado de la sesion', () async {
@@ -194,8 +208,8 @@ void main() {
 
     test('con la sesion larga el mensaje gana al acumulado', () async {
       // El caso del bug reportado, con las dos fuentes disponibles y en
-      // conflicto. `sessionInfo` dice 15.538.680; el último assistant dice
-      // 102.924. Gana el assistant.
+      // conflicto. `sessionInfo` dice 15.329.521; el último assistant dice
+      // 102.984. Gana el assistant.
       final v = await vm(
         [
           assistantWith(
@@ -204,8 +218,10 @@ void main() {
         ],
         info: bigSession(),
       );
+      // `sessionInfo` dice 15.329.521; el último assistant dice
+      // 102.984 (cinco términos). Gana el assistant.
       expect(v.sessionInfo!.tokens.total, greaterThan(15000000));
-      expect(v.contextTokens, 102924);
+      expect(v.contextTokens, 102984);
     });
   });
 

@@ -1,6 +1,10 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'data/connectivity/tailscale_monitor.dart';
 import 'data/connectivity/network_monitor.dart';
@@ -23,6 +27,8 @@ import 'ui/features/chat/chat_viewmodel.dart';
 import 'ui/features/connect/connect_view.dart';
 import 'ui/features/files/files_view.dart';
 import 'ui/features/navigation/desktop_rail.dart';
+import 'ui/features/navigation/desktop_split.dart';
+import 'ui/features/chat/chat_tabs.dart';
 import 'ui/features/navigation/mobile_bottom_nav.dart';
 import 'ui/features/navigation/mobile_nav.dart';
 import 'ui/features/sessions/sessions_view.dart';
@@ -221,7 +227,8 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
+class _AppShellState extends State<AppShell>
+    with WidgetsBindingObserver, WindowListener {
   late final MobileNav _nav = widget.nav ?? MobileNav();
 
   /// Detector de red. Decide la política de consumo: **sólo** con datos
@@ -259,16 +266,83 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   late final UpdateService _updates = widget.updates ?? UpdateService();
   bool _updateDismissed = false;
 
+  /// El autoupdate baja e instala un **APK**: sólo existe en Android. En
+  /// desktop no hay `FileProvider` ni instalador, así que el chequeo se
+  /// saltea entero; si no, la banda queda pegada en "No se pudo descargar
+  /// OpenHer … · sin carpeta de descargas" con un "Volver a descargar" que
+  /// nunca va a poder terminar (medido en el build de Windows, 2026-10-12).
+  static bool get _updatesSupported => !kIsWeb && Platform.isAndroid;
+
+  /// Ancho del master en el split desktop (redimensionable) y si se ve.
+  /// Persisten en prefs; el clamp vive en el getter de prefs.
+  late double _masterWidth = widget.prefs.sidebarWidth;
+  late bool _sidebarVisible = widget.prefs.sidebarVisible;
+
+  /// Carpeta abierta en el master. `null` = la del server. Persiste en prefs
+  /// (`lastDirectory`) para reabrir donde se estaba.
+  late String? _dir = widget.prefs.lastDirectory.isEmpty
+      ? null
+      : widget.prefs.lastDirectory;
+
+  void _onDirectoryChanged(String path) {
+    final next = path.isEmpty ? null : path;
+    if (next == _dir) return;
+    setState(() => _dir = next);
+    unawaited(widget.prefs.setLastDirectory(path));
+  }
+
+  void _toggleSidebar() {
+    setState(() => _sidebarVisible = !_sidebarVisible);
+    unawaited(widget.prefs.setSidebarVisible(_sidebarVisible));
+  }
+
+  /// Ctrl+W: cierra la pestaña de chat activa (la vecina más reciente pasa
+  /// al frente, como Chrome).
+  void _closeActiveTab() {
+    final id = _nav.chatSessionId;
+    if (id == null) return;
+    _nav.closeSession(id);
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    windowManager.addListener(this);
     _network.addListener(_onNetwork);
     _network.start();
     _tailscale.start();
     // El chequeo arranca después del primer frame: si se hiciera en
     // `initState`, la app espera a GitHub antes de pintar el chat.
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkForUpdate());
+    // Maximizar al arrancar (solo desktop): con el primer frame ya pintado
+    // la ventana existe seguro. En main.dart hay otro intento más temprano;
+    // el que llegue primero gana, el segundo es no-op.
+    if (!kIsWeb && Platform.isWindows) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await _maximizeAtStartup();
+      });
+    }
+  }
+
+  /// Instante del arranque, para no forzar maximizado fuera de él.
+  late final DateTime _startedAt = DateTime.now();
+
+  /// Maximiza una vez dentro de los primeros segundos. Si el foco llega tarde
+  /// (el usuario abrió otra cosa en el medio), el primer foco dentro de la
+  /// ventana de arranque también lo intenta. Pasados 5 s nunca se fuerza:
+  /// el usuario manda.
+  Future<void> _maximizeAtStartup() async {
+    if (DateTime.now().difference(_startedAt) > const Duration(seconds: 5)) {
+      return;
+    }
+    try {
+      if (!await windowManager.isMaximized()) {
+        await windowManager.maximize();
+      }
+    } on Object catch (e) {
+      debugPrint('desktop: no se pudo maximizar al arrancar: $e');
+    }
   }
 
   @override
@@ -307,6 +381,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   /// gastar sus datos en esto. La banda aparece igual y él decide.
   Future<void> _checkForUpdate() async {
     if (_updateDismissed) return;
+    // Desktop/web: no es plataforma del APK, no hay nada que bajar. Saltear
+    // acá apaga también el reintento del ciclo de vida, porque los dos
+    // caminos pasan por este método.
+    if (!_updatesSupported) return;
     final found = await _updates.check();
     if (!found || !mounted) return;
     _updateDismissed = false;
@@ -324,6 +402,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    windowManager.removeListener(this);
     _network
       ..removeListener(_onNetwork)
       ..dispose();
@@ -358,15 +437,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               body: SafeArea(
                 bottom: false,
                 child: desktop
-                    ? Row(
-                        children: [
-                          _rail(context),
-                          const VerticalDivider(width: 1),
-                          Expanded(
-                            child: _body(desktop: true, inSplit: inSplit),
-                          ),
-                        ],
-                      )
+                    ? _desktopBody(context, inSplit: inSplit)
                     : _body(desktop: false, inSplit: false),
               ),
               bottomNavigationBar: desktop
@@ -387,13 +458,112 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   /// El rail desktop reusa la misma selección que el bottom-nav móvil.
-  Widget _rail(BuildContext context) => DesktopRail(
+  Widget _rail(BuildContext context, {required bool inSplit}) => DesktopRail(
     current: _nav.tab,
-    chatEnabled: _nav.chatSessionId != null,
-    onSelect: (tab) => _onSelectTab(context, tab),
+    chatEnabled: _nav.chatSessionId != null || _nav.openChats.isNotEmpty,
+    onSelect: (tab) => _onSelectTab(context, tab, reselectNoop: inSplit),
+    sidebarVisible: _sidebarVisible,
+    onToggleSidebar: _toggleSidebar,
+    onShortcuts: () => showKeyboardShortcuts(context),
   );
 
-  void _onSelectTab(BuildContext context, MobileTab tab) {
+  /// Shell desktop: barra de título con pestañas + rail + contenido.
+  ///
+  /// La barra va siempre (también en Archivos/Ajustes): con la caption
+  /// nativa oculta es la única zona de arrastre de la ventana. Atajos:
+  /// Ctrl+B el master, Ctrl+W cerrar pestaña, F11 pantalla completa,
+  /// Ctrl+/ la ayuda.
+  Widget _desktopBody(BuildContext context, {required bool inSplit}) {
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.keyB, control: true):
+            _toggleSidebar,
+        const SingleActivator(LogicalKeyboardKey.keyW, control: true):
+            _closeActiveTab,
+        const SingleActivator(LogicalKeyboardKey.f11): _toggleFullScreen,
+        SingleActivator(
+          LogicalKeyboardKey.slash,
+          control: true,
+        ): () => showKeyboardShortcuts(context),
+      },
+      child: Column(
+        children: [
+          DesktopTitleBar(
+            tabs: _nav.openChats,
+            activeId: _nav.chatSessionId,
+            onSelect: _nav.activateSession,
+            onClose: _nav.closeSession,
+            maximized: _maximized,
+            onToggleMaximize: _toggleMaximize,
+            fullScreen: _fullScreen,
+          ),
+          Expanded(
+            child: DragToResizeArea(
+              // Maximizada o fullscreen, el resize por bordes no aplica.
+              enableResizeEdges: (_maximized || _fullScreen)
+                  ? const []
+                  : null,
+              child: Row(
+                children: [
+                  _rail(context, inSplit: inSplit),
+                  const VerticalDivider(width: 1),
+                  Expanded(child: _body(desktop: true, inSplit: inSplit)),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  bool _fullScreen = false;
+
+  /// Maximizada (para el icono restaurar/maximizar). La avisa el sistema vía
+  /// `WindowListener`, así vale también si se maximiza por otro camino.
+  bool _maximized = false;
+
+  @override
+  void onWindowMaximize() {
+    if (!mounted || _maximized) return;
+    setState(() => _maximized = true);
+  }
+
+  @override
+  void onWindowUnmaximize() {
+    if (!mounted || !_maximized) return;
+    setState(() => _maximized = false);
+  }
+
+  /// F11: pantalla completa real (el sistema esconde sus botones, por eso la
+  /// barra deja de reservarles lugar).
+  Future<void> _toggleFullScreen() async {
+    final next = !_fullScreen;
+    try {
+      await windowManager.setFullScreen(next);
+    } on Object catch (e) {
+      debugPrint('desktop: no se pudo cambiar a pantalla completa: $e');
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _fullScreen = next);
+  }
+
+  /// Maximizar/restaurar del botón de la barra (doble toque en la zona de
+  /// arrastre hace lo mismo por su cuenta).
+  Future<void> _toggleMaximize() async {
+    try {
+      if (await windowManager.isMaximized()) {
+        await windowManager.unmaximize();
+      } else {
+        await windowManager.maximize();
+      }
+    } on Object catch (e) {
+      debugPrint('desktop: no se pudo maximizar/restaurar: $e');
+    }
+  }
+
+  void _onSelectTab(BuildContext context, MobileTab tab, {bool reselectNoop = false}) {
     // Chat sin sesión: no es un destino, es un atajo a la lista.
     // Se dice en vez de dejar un botón que no hace nada.
     if (tab == MobileTab.chat && _nav.chatSessionId == null) {
@@ -405,8 +575,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       );
       return;
     }
-    // Desde el header del chat, `select` hace de "atrás".
+    // Desde el header del chat, `select` hace de "atrás". En el split no:
+    // con pestañas no hay a dónde volver y retocar la activa la vaciaba.
     if (tab == _nav.tab && tab == MobileTab.chat) {
+      if (reselectNoop) return;
       _nav.leaveChat();
     } else {
       _nav.select(tab);
@@ -414,15 +586,21 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   /// Contenido: bandas + pestañas. En desktop y con sesiones/chat al frente
-  /// es master-detail (lista 380 + chat); el resto usa el mismo `IndexedStack`
-  /// de móvil para no perder estados.
+  /// es master-detail (lista redimensionable + chat); el resto usa el mismo
+  /// `IndexedStack` de móvil para no perder estados.
   ///
   /// Cruzar el borde split↔archivos/ajustes remontan sesiones/chat (sus VMs
   /// nacen con la posición en el árbol): dentro del split no se pierde nada.
   Widget _body({required bool desktop, required bool inSplit}) {
     final sessionsTab = _SessionsTab(
       config: widget.config,
-      onOpen: _nav.openSession,
+      // En móvil (una sola vista, sin tira) abrir reemplaza la pestaña; en
+      // desktop acumula (sin duplicados: eso lo garantiza el nav).
+      onOpen: (session) => _nav.openSession(session, single: !desktop),
+      directory: _dir,
+      onDirectoryChanged: _onDirectoryChanged,
+      // El botón de carpeta es desktop: en móvil la vista no cambia.
+      showDirectoryButton: desktop,
       // El `IndexedStack` mantiene las cuatro pestañas
       // montadas, así que sin esto el poll de
       // `/api/session/active` seguía corriendo con el chat al
@@ -461,8 +639,9 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
     return Column(
       children: [
-        // Autoupdate: banda no bloqueante, se oculta sola.
-        if (!_updateDismissed)
+        // Autoupdate: banda no bloqueante, se oculta sola. Es del APK, así
+        // que en desktop no se monta (el chequeo ni corre ahí).
+        if (!_updateDismissed && _updatesSupported)
           ListenableBuilder(
             listenable: _updates,
             builder: (context, _) => UpdateBanner(
@@ -501,21 +680,54 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         ),
         Expanded(
           child: inSplit
-              ? Row(
-                  children: [
-                    SizedBox(
-                      width: kDesktopMasterWidth,
-                      child: sessionsTab,
-                    ),
-                    const VerticalDivider(width: 1),
-                    Expanded(child: chatTab),
-                  ],
+              ? DesktopSplit(
+                  sessions: sessionsTab,
+                  chat: _detail(chatTab),
+                  masterWidth: _masterWidth,
+                  sidebarVisible: _sidebarVisible,
+                  onResize: (dx) => setState(
+                    () => _masterWidth = clampMasterWidth(_masterWidth + dx),
+                  ),
+                  onResizeEnd: () =>
+                      unawaited(widget.prefs.setSidebarWidth(_masterWidth)),
+                  onToggle: _toggleSidebar,
                 )
               : IndexedStack(
                   index: _nav.tab.index,
                   children: [sessionsTab, chatTab, filesTab, settingsView],
                 ),
         ),
+      ],
+    );
+  }
+
+  /// Detalle del split desktop: los chats por pestaña.
+  ///
+  /// Sin pestañas abiertas va el `chatTab` tal cual (que con id vacío pinta
+  /// "Sin sesión abierta"). Con pestañas, un `IndexedStack` por pestaña: cada
+  /// `_ChatTab` conserva su viewmodel, su scroll y su stream, y sólo el
+  /// activo tiene `visible` (los demás pausan socket y timers, como las
+  /// pestañas del shell móvil). La tira vive en la barra de título.
+  Widget _detail(Widget chatTab) {
+    final tabs = _nav.openChats;
+    if (tabs.isEmpty) return chatTab;
+    final activeId = _nav.chatSessionId;
+    final at = tabs.indexWhere((s) => s.id == activeId);
+    return IndexedStack(
+      index: at < 0 ? 0 : at,
+      children: [
+        for (final session in tabs)
+          _ChatTab(
+            sessionInfo: session,
+            sessionId: session.id,
+            config: widget.config,
+            visible: session.id == activeId,
+            onBack: _nav.handleBack,
+            canBack: () => _nav.canHandleBack,
+            streamFactory: widget.chatStreamFactory,
+            policy: _policy,
+            key: ValueKey('chat-${session.id}'),
+          ),
       ],
     );
   }
@@ -527,11 +739,23 @@ class _SessionsTab extends StatefulWidget {
     required this.config,
     required this.onOpen,
     required this.visible,
+    this.directory,
+    this.onDirectoryChanged,
+    this.showDirectoryButton = false,
   });
 
   final ServerConfig config;
   final bool visible;
   final void Function(SessionInfo session) onOpen;
+
+  /// Carpeta abierta. `null` = la del server.
+  final String? directory;
+
+  /// Cambió la carpeta (diálogo de la vista). El shell persiste.
+  final ValueChanged<String>? onDirectoryChanged;
+
+  /// Botón de carpeta en el header (solo desktop).
+  final bool showDirectoryButton;
 
   @override
   State<_SessionsTab> createState() => _SessionsTabState();
@@ -540,6 +764,7 @@ class _SessionsTab extends StatefulWidget {
 class _SessionsTabState extends State<_SessionsTab> {
   late final SessionsViewModel _vm = SessionsViewModel(
     repository: SessionRepository(ApiClient(config: widget.config)),
+    directory: widget.directory,
   );
 
   @override
@@ -572,6 +797,10 @@ class _SessionsTabState extends State<_SessionsTab> {
   @override
   void didUpdateWidget(covariant _SessionsTab old) {
     super.didUpdateWidget(old);
+    if (old.directory != widget.directory) {
+      // Otra carpeta: la lista recarga contra ese directory (el VM avisa).
+      unawaited(_vm.setDirectory(widget.directory));
+    }
     if (old.visible == widget.visible) return;
     if (widget.visible) {
       _vm.startPolling();
@@ -684,7 +913,11 @@ class _SessionsTabState extends State<_SessionsTab> {
     // La contraseña nunca llega a la pantalla: sólo a `redactSecret`, para
     // tacharla de los errores crudos que trae el server.
     secret: widget.config.password,
-    currentDirectory: _cwd,
+    // Con carpeta elegida se muestra ésa; si no, el cwd del server.
+    currentDirectory: widget.directory ?? _cwd,
+    onOpenDirectory: widget.showDirectoryButton
+        ? (path) => widget.onDirectoryChanged?.call(path)
+        : null,
   );
 }
 
@@ -809,6 +1042,9 @@ class _ChatTabState extends State<_ChatTab> with WidgetsBindingObserver {
       ApiClient(config: widget.config),
       sessionInfo: widget.sessionInfo,
       sessionId: sessionId,
+      // El `directory` de la sesión: sin esto el VM pedía todo contra la
+      // raíz (incluidas las imágenes que nombra el agente, que daban 404).
+      directory: widget.sessionInfo?.chatDirectory,
       streamFactory: widget.streamFactory,
       policy: widget.policy,
     )..load();

@@ -3,7 +3,7 @@
 /// Un solo widget para los ocho tipos de [SessionMessage] porque la lista los
 /// intercala en el mismo scroll y cada uno es una fracción de la misma caja:
 ///
-/// * [UserMessage] → burbuja a la derecha, `primary` sobre `on-primary`.
+/// * [UserMessage] → burbuja a la izquierda, `primary` sobre `on-primary`.
 /// * [AssistantMessage] → caja de actividad del **turno** (la primera en
 ///   [(prompt)] → [caja] → [mensajes del turno]), la card de pregunta si hay
 ///   un `question` pendiente, la de error del proveedor si vino
@@ -26,6 +26,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -61,6 +62,7 @@ class MessageBubble extends StatelessWidget {
     this.onRetrySend,
     this.isOpenAssistant,
     this.onMenu,
+    this.menuHoverReveal = false,
     this.onPendingEdit,
     this.onPendingDiscard,
     this.onPendingSend,
@@ -144,6 +146,11 @@ class MessageBubble extends StatelessWidget {
   /// que mas se usaba, ese se queda con el long-press y el menu completo va en
   /// un boton explicito.
   final VoidCallback? onMenu;
+
+  /// En desktop el ⋯ del mensaje aparece al pasar el mouse (hover-reveal,
+  /// como Linear): en reposo el único ⋯ visible es el de la sesión. Con
+  /// teclado o lector sigue existiendo (la semántica no depende del opacity).
+  final bool menuHoverReveal;
 
   /// Reintenta un mensaje del usuario que el server no tomó (409 al mandar
   /// con el agente trabajando, o 429 de rate limit).
@@ -468,14 +475,14 @@ class MessageBubble extends StatelessWidget {
         borderRadius: const BorderRadius.only(
           topLeft: Radius.circular(16),
           topRight: Radius.circular(16),
-          bottomLeft: Radius.circular(16),
-          // La burbuja del usuario "pega" con la siguiente: la esquina inferior
-          // derecha se cierra a 4px, como en el CSS.
-          bottomRight: Radius.circular(4),
+          // La burbuja propia va a la izquierda: la esquina inferior
+          // izquierda se cierra a 4px, espejo del CSS.
+          bottomLeft: Radius.circular(4),
+          bottomRight: Radius.circular(16),
         ),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
           if (user.files.isNotEmpty) _attachments(context, user.files),
@@ -487,6 +494,8 @@ class MessageBubble extends StatelessWidget {
           // texto del chat que no se podia seleccionar.
           SelectableText(
             user.text,
+            // El texto arranca a la izquierda, como la burbuja.
+            textAlign: TextAlign.start,
             // El cuerpo del tema (13/1.5) con el color del chip: el `Text` solo
             // con `fontSize` heredaba el alto de línea de otra base.
             style: theme.textTheme.bodyMedium?.copyWith(color: tinta),
@@ -511,7 +520,7 @@ class MessageBubble extends StatelessWidget {
           // es ruido. Editar y borrar ya están arriba.
           if (onMenu != null && !pendiente) ...[
             const SizedBox(height: 4),
-            _menuButton(context),
+            _menuButton(context, AlignmentDirectional.centerStart),
           ],
         ],
       ),
@@ -526,7 +535,8 @@ class MessageBubble extends StatelessWidget {
       // pantalla, que incluye la barra de sistema.
       child: LayoutBuilder(
         builder: (context, constraints) => Align(
-          alignment: Alignment.centerRight,
+          // La burbuja propia arranca a la izquierda, no a la derecha.
+          alignment: Alignment.centerLeft,
           child: ConstrainedBox(
             constraints: BoxConstraints(
               maxWidth: constraints.maxWidth.isFinite
@@ -544,38 +554,24 @@ class MessageBubble extends StatelessWidget {
   static const double _userMaxWidth = 0.88;
 
   /// `chat.msg.user.attachment`: miniatura de 120×90 con el nombre abajo a la
-  /// derecha, como el `.att` del prototipo. SVG, nunca emoji ni Material icon.
+  /// izquierda. Si es imagen con bytes (data URI), la miniatura es la foto y
+  /// al tocarla abre el visor; si no, icono genérico. SVG, nunca emoji.
   Widget _attachments(BuildContext context, List<UserFileAttachment> files) {
     final scheme = Theme.of(context).colorScheme;
     return LayerGate(
       'chat.msg.user.attachment',
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
           for (final file in files)
             Padding(
               padding: const EdgeInsets.only(bottom: AppSpacing.xs),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Container(
-                    width: 120,
-                    height: 90,
-                    decoration: BoxDecoration(
-                      color: scheme.surfaceContainer,
-                      borderRadius: AppRadius.mdAll,
-                      border: Border.all(color: scheme.outline),
-                    ),
-                    child: Center(
-                      child: AppIcon(
-                        _isImage(file.mime) ? 'image' : 'file',
-                        size: 24,
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
+                  _attachmentThumb(context, file),
                   // `.attname`: vive dentro de la burbuja `primary`, así que el
                   // nombre va en `on-primary` al 80% — en gris se perdía contra
                   // el fondo del chip. Los 3 px de `margin-top` son los del
@@ -599,6 +595,65 @@ class MessageBubble extends StatelessWidget {
     );
   }
 
+  /// Miniatura de un adjunto propio: la foto si hay bytes, icono si no.
+  /// La foto se puede tocar para verla grande (antes no había forma de ver
+  /// lo que uno mismo había mandado).
+  Widget _attachmentThumb(BuildContext context, UserFileAttachment file) {
+    final scheme = Theme.of(context).colorScheme;
+    final bytes = _dataUriBytes(file.uri);
+    final thumb = Container(
+      width: 120,
+      height: 90,
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainer,
+        borderRadius: AppRadius.mdAll,
+        border: Border.all(color: scheme.outline),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: bytes != null && _isImage(file.mime)
+          ? Image.memory(bytes, fit: BoxFit.cover)
+          : Center(
+              child: AppIcon(
+                _isImage(file.mime) ? 'image' : 'file',
+                size: 24,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+    );
+    if (bytes == null || !_isImage(file.mime)) return thumb;
+    return Semantics(
+      button: true,
+      label: 'Ver imagen ${file.name ?? ''}',
+      child: InkWell(
+        borderRadius: AppRadius.mdAll,
+        onTap: () => showImageViewer(
+          context,
+          // Igual que la expansion del agente: 75% del alto de la pantalla.
+          (dialogContext) => Image.memory(
+            bytes,
+            fit: BoxFit.contain,
+            height: MediaQuery.sizeOf(dialogContext).height * 0.75,
+          ),
+          title: file.name ?? '',
+        ),
+        child: thumb,
+      ),
+    );
+  }
+
+  /// Bytes de un `data:<mime>;base64,…`. `null` si no es data URI (ruta
+  /// pelada, `file://`, URL): esos no tienen bytes locales para mostrar.
+  static Uint8List? _dataUriBytes(String uri) {
+    if (!uri.startsWith('data:')) return null;
+    final i = uri.indexOf('base64,');
+    if (i < 0) return null;
+    try {
+      return base64Decode(uri.substring(i + 7));
+    } on FormatException {
+      return null;
+    }
+  }
+
   static bool _isImage(String? mime) => mime?.startsWith('image/') ?? false;
 
   /// El boton que abre el menu del mensaje. Es lo unico que se ve cambiar, y
@@ -607,12 +662,15 @@ class MessageBubble extends StatelessWidget {
   ///
   /// Va **dentro** de la burbuja y no flotando al lado: al lado empujaria el
   /// texto del asistente (que es de ancho completo) y la burbuja del usuario
-  /// dejaria de pegarse al borde. 22 px de alto y `onSurfaceVariant` al 70%:
+  /// dejaría de pegarse al borde izquierdo. 22 px de alto y `onSurfaceVariant` al 70%:
   /// esta, no la accion.
-  Widget _menuButton(BuildContext context) {
+  Widget _menuButton(
+    BuildContext context, [
+    AlignmentGeometry align = AlignmentDirectional.centerEnd,
+  ]) {
     final scheme = Theme.of(context).colorScheme;
-    return Align(
-      alignment: AlignmentDirectional.centerEnd,
+    final button = Align(
+      alignment: align,
       child: AppIconButton(
         key: MessageBubble.menuKey,
         icon: 'more-horizontal',
@@ -625,6 +683,8 @@ class MessageBubble extends StatelessWidget {
         color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
       ),
     );
+    if (!menuHoverReveal) return button;
+    return _MenuHoverReveal(child: button);
   }
 
   // ─────────────────────── error, pill, question ───────────────────────
@@ -764,6 +824,40 @@ class MessageBubble extends StatelessWidget {
     );
   }
 }
+/// El ⋯ del mensaje visible solo al pasar el mouse (desktop).
+///
+/// En reposo el único ⋯ es el de la sesión; con teclado o lector el botón
+/// sigue existiendo (la semántica no depende de la opacidad). Sin puntero
+/// (táctil) el botón queda oculto: el copiado sigue por selección de texto.
+class _MenuHoverReveal extends StatefulWidget {
+  const _MenuHoverReveal({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_MenuHoverReveal> createState() => _MenuHoverRevealState();
+}
+
+class _MenuHoverRevealState extends State<_MenuHoverReveal> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: IgnorePointer(
+        ignoring: !_hover,
+        child: AnimatedOpacity(
+          opacity: _hover ? 1 : 0,
+          duration: const Duration(milliseconds: 150),
+          child: widget.child,
+        ),
+      ),
+    );
+  }
+}
+
 
 /// Extensiones que se intentan pintar como imagen.
 ///
@@ -964,60 +1058,106 @@ class _Thumb extends StatelessWidget {
     );
   }
 
-  /// Abre la imagen a pantalla completa, con la altura **según la pantalla de
-  /// ese momento**.
-  ///
-  /// `75%` del alto disponible y `BoxFit.contain`: en un teléfono chico la
-  /// imagen se agranda hasta llenar casi toda la pantalla, y en uno grande o en
-  /// una tablet se ve más chica pero entera. Un alto fijo en píxeles se vería
-  /// gigante en un teléfono y diminuto en una tablet.
+  /// Abre la imagen a pantalla completa, con zoom.
   void _expandir(BuildContext context, String nombre) {
-    showDialog<void>(
-      context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.9),
-      builder: (dialogContext) {
-        final alto = MediaQuery.sizeOf(dialogContext).height;
-        // Leer el theme del contexto de afuera **antes** del diálogo: el
-        // diálogo tiene el suyo y el `Navigator` puede quedar fuera del
-        // `MaterialApp` que lo define.
-        final scheme = Theme.of(context).colorScheme;
-        return GestureDetector(
-          key: MessageImages.expandedKey,
-          onTap: () => Navigator.of(dialogContext).pop(),
-          child: SizedBox.expand(
-            child: Padding(
-              padding: const EdgeInsets.all(AppSpacing.md),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Flexible(
-                    child: Image.network(
-                      urlOf(path).toString(),
-                      headers: headers,
-                      height: alto * 0.75,
-                      fit: BoxFit.contain,
-                      errorBuilder: (context, error, stack) =>
-                          _noSePudo(context, nombre),
-                    ),
+    showImageViewer(
+      context,
+      // 75% del alto de la pantalla, no un fijo: en un telefono un valor
+      // en pixeles se ve gigante y en una tablet diminuto (contrato de
+      // `message_images_test`: la expansion sigue a la pantalla).
+      (dialogContext) => Image.network(
+        urlOf(path).toString(),
+        headers: headers,
+        height: MediaQuery.sizeOf(dialogContext).height * 0.75,
+        fit: BoxFit.contain,
+        errorBuilder: (context, error, stack) => Center(
+          child: Text(
+            nombre,
+            style: TextStyle(
+              fontSize: 12,
+              color: Theme.of(context).colorScheme.onInverseSurface,
+            ),
+          ),
+        ),
+      ),
+      title: nombre,
+    );
+  }
+}
+
+/// Visor de imagen a pantalla completa con zoom (pellizco en táctil,
+/// Ctrl+rueda en desktop).
+///
+/// Un solo visor para las fotos propias (bytes en memoria) y las del agente
+/// (red): antes cada una tenía el suyo y solo la del agente se podía abrir.
+///
+/// [image] es un **builder**, no un widget ya armado: las dos fotos se pintan
+/// con un alto relativo a la pantalla (`MediaQuery.sizeOf(…).height * 0.75`) y
+/// el builder se reconstruye al cambiar el tamaño — un widget capturado al
+/// abrir se quedaba con el alto de la pantalla vieja (contrato de
+/// `message_images_test`).
+Future<void> showImageViewer(
+  BuildContext context,
+  Widget Function(BuildContext context) image, {
+  String title = '',
+}) {
+  return showDialog<void>(
+    context: context,
+    barrierColor: Colors.black.withValues(alpha: 0.9),
+    builder: (dialogContext) {
+      final scheme = Theme.of(context).colorScheme;
+      return Stack(
+        key: MessageImages.expandedKey,
+        children: [
+          Positioned.fill(
+            child: InteractiveViewer(
+              maxScale: 8.0,
+              // `Builder` y no `image(context)` a secas: registra la
+              // dependencia del alto en su propio elemento, así un cambio de
+              // ventana vuelve a llamar al builder.
+              child: Builder(builder: (ctx) => Center(child: image(ctx))),
+            ),
+          ),
+          if (title.isNotEmpty)
+            Positioned(
+              left: AppSpacing.md,
+              right: AppSpacing.md,
+              bottom: AppSpacing.xl,
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: scheme.onInverseSurface,
+                ),
+              ),
+            ),
+          Positioned(
+            top: AppSpacing.md,
+            right: AppSpacing.md,
+            child: Semantics(
+              button: true,
+              label: 'Cerrar visor',
+              child: Material(
+                color: Colors.transparent,
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: () => Navigator.of(dialogContext).pop(),
+                  child: const Padding(
+                    padding: EdgeInsets.all(10),
+                    child: AppIcon('x', size: 20),
                   ),
-                  const SizedBox(height: AppSpacing.sm),
-                  Text(
-                    nombre,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: scheme.onInverseSurface,
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
           ),
-        );
-      },
-    );
-  }
+        ],
+      );
+    },
+  );
 }
 
 /// Placeholder de la tira de imágenes con el modo de bajo consumo.

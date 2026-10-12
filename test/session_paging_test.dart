@@ -6,7 +6,6 @@ import 'package:http/testing.dart';
 import 'package:openher_mobile/core/network/api_client.dart';
 import 'package:openher_mobile/core/network/server_config.dart';
 import 'package:openher_mobile/data/repositories/session_repository.dart';
-import 'package:openher_mobile/domain/models/session.dart';
 import 'package:openher_mobile/ui/features/sessions/sessions_viewmodel.dart';
 
 /// La pantalla de sesiones tiene que traer **todas** las sesiones.

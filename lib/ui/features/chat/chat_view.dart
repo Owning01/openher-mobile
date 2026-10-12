@@ -28,6 +28,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:pasteboard/pasteboard.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'composer_suggestions.dart';
@@ -154,6 +155,14 @@ class ChatView extends StatefulWidget {
 
   /// Botón "más acciones" del app bar (`chat.appbar.overflow`).
   static const Key overflowKey = Key('chat-overflow');
+
+  /// Ancho máximo del contenido en pantallas anchas: mensajes, pregunta y
+  /// composer centrados hasta 1000 px (pedido 2026-10-11 para 2k en pantalla
+  /// completa). En móvil va a sangre, como siempre.
+  static const double kWideMaxWidth = 1000.0;
+
+  /// `true` con el ancho dado: el contenido va centrado y acotado.
+  static bool isWide(double maxWidth) => maxWidth >= 900;
 
   @override
   State<ChatView> createState() => _ChatViewState();
@@ -296,63 +305,100 @@ class _ChatViewState extends State<ChatView> {
     setState(() => _atBottom = true);
   }
 
+  /// Centra y acota el hijo en ancho, sólo en pantallas anchas. Para la
+  /// lista de mensajes no sirve (ver `sidePad` en `build`: el `Center` le
+  /// afloja el alto al `ListView`); es para la pregunta y el composer, que
+  /// tienen alto propio.
+  static Widget _centered(Widget child, bool wide) {
+    if (!wide) return child;
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: ChatView.kWideMaxWidth),
+        child: child,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        // Capa chat.appbar: apagar el toggle saca la barra entera.
-        LayerGate('chat.appbar', child: _appBar()),
-        if (_vm.error case final String message) _errorBanner(message),
-        // La sesión se borró en el server: banner propio con salida, no un
-        // error reintentable más.
-        if (_vm.sessionGone) _goneBanner(),
-        // El stream avisa su estado: sin socket en vivo el chat igual se
-        // actualiza por sondeo, y eso se dice en vez de dejarlo adivinar.
-        if (_vm.streamState == StreamState.polling)
-          _streamBanner('Actualizando por sondeo…'),
-        if (_vm.streamState == StreamState.reconnecting)
-          _streamBanner('Reconectando…'),
-        // Capa chat.header.progress: apagada por diseño (se puede
-        // prender desde Ajustes). Indica que hay un turno en curso.
-        LayerGate(
-          'chat.header.progress',
-          child: _vm.working ? const _WorkingLine() : const SizedBox.shrink(),
-        ),
-        Expanded(
-          child: Stack(
-            children: [
-              Positioned.fill(child: _messages()),
-              // `.fabdock`: el FAB flota sobre el borde inferior del scroll,
-              // 10 px por encima de la línea del composer.
-              if (!_atBottom)
-                Positioned(
-                  right: AppSpacing.md,
-                  bottom: 10,
-                  child: LayerGate(
-                    'chat.fab.jump',
-                    child: AppIconButton(
-                      key: ChatView.jumpKey,
-                      icon: 'arrow-downward',
-                      tooltip: 'Ir al último mensaje',
-                      onPressed: _jumpToBottom,
-                      size: 16,
-                      tapSize: 28,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = ChatView.isWide(constraints.maxWidth);
+        // Acotado a 1000 px centrado: con padding lateral, no con `Center`
+        // (que le afloja el alto al `ListView` y revienta el scroll).
+        final sidePad = wide
+            ? (constraints.maxWidth - ChatView.kWideMaxWidth) / 2
+            : 0.0;
+        return Column(
+          children: [
+            // En pantallas anchas no hay app bar: el título ya lo dice la
+            // pestaña activa de la barra de título y el ⋯ vive en el composer.
+            // En móvil sigue todo igual.
+            if (!wide) LayerGate('chat.appbar', child: _appBar()),
+            if (_vm.error case final String message) _errorBanner(message),
+            // La sesión se borró en el server: banner propio con salida, no un
+            // error reintentable más.
+            if (_vm.sessionGone) _goneBanner(),
+            // El stream avisa su estado: sin socket en vivo el chat igual se
+            // actualiza por sondeo, y eso se dice en vez de dejarlo adivinar.
+            if (_vm.streamState == StreamState.polling)
+              _streamBanner('Actualizando por sondeo…'),
+            if (_vm.streamState == StreamState.reconnecting)
+              _streamBanner('Reconectando…'),
+            // Capa chat.header.progress: apagada por diseño (se puede
+            // prender desde Ajustes). Indica que hay un turno en curso.
+            LayerGate(
+              'chat.header.progress',
+              child: _vm.working
+                  ? const _WorkingLine()
+                  : const SizedBox.shrink(),
+            ),
+            Expanded(
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(horizontal: sidePad),
+                      child: _messages(wide),
                     ),
                   ),
-                ),
-            ],
-          ),
-        ),
-        // La pregunta del agente **va siempre abajo**, fija, justo encima del
-        // composer. No más inline en la burbuja del assistant, que era donde se
-        // perdía entre mensajes.
-        //
-        // Solo aparece mientras está pendiente. Cuando el usuario responde,
-        // `pendingQuestion` cae a null y la tarjeta se va: en ese momento el
-        // turno continúa y la respuesta queda en el flujo como un mensaje más.
-        if (_vm.pendingQuestion != null) _pendingQuestionBar(_vm.pendingQuestion!),
-        _composer(),
-      ],
+                  // `.fabdock`: el FAB flota sobre el borde inferior del scroll,
+                  // 10 px por encima de la línea del composer.
+                  if (!_atBottom)
+                    Positioned(
+                      right: AppSpacing.md,
+                      bottom: 10,
+                      child: LayerGate(
+                        'chat.fab.jump',
+                        child: AppIconButton(
+                          key: ChatView.jumpKey,
+                          icon: 'arrow-downward',
+                          tooltip: 'Ir al último mensaje',
+                          onPressed: _jumpToBottom,
+                          size: 16,
+                          tapSize: 28,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            // La pregunta del agente **va siempre abajo**, fija, justo encima del
+            // composer. No más inline en la burbuja del assistant, que era donde se
+            // perdía entre mensajes.
+            //
+            // Solo aparece mientras está pendiente. Cuando el usuario responde,
+            // `pendingQuestion` cae a null y la tarjeta se va: en ese momento el
+            // turno continúa y la respuesta queda en el flujo como un mensaje más.
+            if (_vm.pendingQuestion != null)
+              _centered(
+                _pendingQuestionBar(_vm.pendingQuestion!),
+                wide,
+              ),
+            _centered(_composer(wide), wide),
+          ],
+        );
+      },
     );
   }
 
@@ -559,7 +605,7 @@ class _ChatViewState extends State<ChatView> {
     );
   }
 
-  Widget _messages() {
+  Widget _messages(bool wide) {
     final messages = _vm.messages;
     // Los ítems fijos van **arriba** de la lista y no son un `header`: es un
     // `ListView.builder` y no se puede meter un hijo más sin romper el índice.
@@ -569,7 +615,11 @@ class _ChatViewState extends State<ChatView> {
     // La fila de la grilla va al **pie**: es donde el usuario mira cuando
     // espera. No va detrás de `chat.header.progress` porque esa capa está
     // apagada por diseño (una de las cuatro del catálogo) y no se vería nunca.
-    final thinking = _vm.working ? 1 : 0;
+    //
+    // Pero sólo si la burbuja abierta NO está ya mostrando los puntos: con el
+    // turno vivo y sin texto, puntos en la burbuja + grilla al pie eran dos
+    // spinners animados para el mismo "pensando".
+    final thinking = (_vm.working && !_openShowsTyping(messages)) ? 1 : 0;
     final count = lead + messages.length + thinking;
 
     // Una caja por TURNO, no por mensaje: es el diseno de
@@ -608,8 +658,10 @@ class _ChatViewState extends State<ChatView> {
             return const _ThinkingRow();
           }
           final message = messages[offset];
+          // 8 px entre mensajes, no 12: con 12 la lista respiraba de más y en
+          // desktop se notaba el aire innecesario (pedido 2026-10-11).
           return Padding(
-            padding: const EdgeInsets.only(bottom: AppSpacing.md),
+            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
             child: MessageBubble(
               // offset ya descuenta las filas de encabezado (aviso de
               // reintento y cargar-anteriores). Usar index aca tiraba
@@ -636,6 +688,9 @@ class _ChatViewState extends State<ChatView> {
               onMenu: _canMenu(message)
                   ? () => _openMessageMenu(message)
                   : null,
+              // En pantallas anchas el ⋯ aparece al hover: en reposo el
+              // único ⋯ es el de la sesión (composer).
+              menuHoverReveal: wide,
               // Los tres del mensaje en cola. Editar reutiliza el mismo canal
               // que el "deshacer": el texto vuelve al input por
               // `_prefillComposer`, y acá además desaparece la burbuja (lo
@@ -674,7 +729,10 @@ class _ChatViewState extends State<ChatView> {
               onStopTurn: _vm.abort,
               onPendingEdit: _onPendingEdit,
               onPendingDiscard: _onPendingDiscard,
-              onPendingSend: _vm.confirmSend,
+              // Con el turno en curso el Enviar del pendiente se deshabilita:
+              // mandar ahora sería `steer` y desviaría el turno (ver
+              // `ChatViewModel.confirmSend`). Editar y descartar siguen vivos.
+              onPendingSend: _vm.working ? null : _vm.confirmSend,
               // Ruta a un plan en el texto: se baja y se abre nativo.
               onOpenPlan: _openPlan,
               // Links http/https: preguntan antes de salir al navegador.
@@ -684,6 +742,23 @@ class _ChatViewState extends State<ChatView> {
         },
       ),
     );
+  }
+
+  /// `true` si la burbuja del assistant abierto ya muestra los puntos de
+  /// escritura: es la misma condición que `MessageBubble` usa para pintarlos
+  /// (ver su `working && isOpenAssistant && texto vacío && sin pregunta`).
+  /// La fila de "pensando" se suprime en ese caso para no duplicar spinners.
+  bool _openShowsTyping(List<SessionMessage> messages) {
+    if (!_vm.working) return false;
+    final id = _vm.openAssistantId;
+    if (id == null) return false;
+    for (final m in messages) {
+      if (m is AssistantMessage && m.id == id) {
+        return m.textContent.trim().isEmpty &&
+            MessageBubble.pendingQuestionTool(m) == null;
+      }
+    }
+    return false;
   }
 
   /// El `requestID` de la pregunta que espera, si este mensaje es el que la
@@ -774,7 +849,9 @@ class _ChatViewState extends State<ChatView> {
           onPressed: _vm.loadingEarlier ? null : _vm.loadEarlier,
           icon: AppIcon('history', size: 16, color: scheme.onSurfaceVariant),
           label: Text(
-            _vm.loadingEarlier ? 'Cargando...' : 'Cargar 30 anteriores',
+            _vm.loadingEarlier
+                ? 'Cargando...'
+                : 'Cargar ${_vm.policy.pageSize} anteriores',
             style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
           ),
         ),
@@ -926,7 +1003,7 @@ class _ChatViewState extends State<ChatView> {
 
   // ──────────────────────────── composer ────────────────────────────
 
-  Widget _composer() {
+  Widget _composer(bool wide) {
     // Capa chat.composer: apagar el toggle saca el composer entero.
     return LayerGate(
       'chat.composer',
@@ -957,6 +1034,11 @@ class _ChatViewState extends State<ChatView> {
         onPickModel: _openModelSheet,
         onPickAgent: _openAgentSheet,
         onAttach: _pickAttachment,
+        // Ctrl+V con imagen: va a adjuntos sin pasar por el disco del usuario.
+        onPasteRequest: _pasteImageFromClipboard,
+        // En pantallas anchas el app bar no se pinta: este es el único ⋯
+        // (acciones de la sesión). En móvil es el del app bar.
+        onMoreActions: wide ? _openActions : null,
         // El composer **no recibia** los adjuntos: se elegian fotos y se
         // mandaban bien (por el merge de `onSend`) pero no se veian nunca, y
         // la `x` de cada thumb no hacia nada porque `onRemoveAttachment` era
@@ -1748,6 +1830,44 @@ class _ChatViewState extends State<ChatView> {
       }
     } catch (e) {
       _vm.reportError('No se pudo adjuntar la imagen: $e');
+    }
+  }
+
+  /// Pega la imagen del portapapeles como adjunto pendiente (Ctrl+V).
+  ///
+  /// `true` = había imagen y quedó en `_pending`; `false` = no había nada que
+  /// pegar y el composer pega el texto él mismo. Los bytes van a un archivo
+  /// temporal porque el adjunto viaja al server como data URI leído del disco
+  /// (ver `ComposerAttachment.toPromptFile`).
+  ///
+  /// En Android esto exige el provider `${applicationId}.provider` (ver
+  /// `AndroidManifest.xml`): sin él, `pasteboard` revienta en vez de
+  /// devolver null.
+  Future<bool> _pasteImageFromClipboard() async {
+    try {
+      final bytes = await Pasteboard.image;
+      if (bytes == null || bytes.isEmpty) return false;
+      final file = File(
+        '${Directory.systemTemp.path}${Platform.pathSeparator}'
+        'openher-pegado-${DateTime.now().millisecondsSinceEpoch}.png',
+      );
+      await file.writeAsBytes(bytes, flush: true);
+      if (!mounted) return true;
+      setState(
+        () => _pending = [
+          ..._pending,
+          ComposerAttachment(
+            name: 'imagen-pegada.png',
+            mime: 'image/png',
+            uri: file.path,
+          ),
+        ],
+      );
+      return true;
+    } on Object {
+      // Portapapeles vacío o formato no imagen: no es un error, es "no había
+      // nada". El composer sigue con el texto.
+      return false;
     }
   }
 

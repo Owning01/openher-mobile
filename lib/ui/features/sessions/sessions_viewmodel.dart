@@ -67,8 +67,10 @@ class SessionsViewModel extends ChangeNotifier {
     SessionFavorites? favorites,
     this.pollInterval = const Duration(seconds: 5),
     DateTime Function()? clock,
+    String? directory,
   }) : _clock = clock ?? DateTime.now,
-       _favorites = favorites ?? SessionFavorites(InMemoryPrefs());
+       _favorites = favorites ?? SessionFavorites(InMemoryPrefs()),
+       _directory = (directory == null || directory.isEmpty) ? null : directory;
 
   /// Las favoritas del usuario, **en su orden**. Vienen de afuera porque son un
   /// dato del usuario y no de esta pantalla: las comparte con Ajustes.
@@ -104,6 +106,21 @@ class SessionsViewModel extends ChangeNotifier {
   List<SessionInfo> _sessions = const <SessionInfo>[];
   Set<String> _running = const <String>{};
   Set<String> _attention = const <String>{};
+
+  /// Carpeta/proyecto abierto. `null` = la del server por defecto.
+  /// Cambia con [setDirectory] (botón carpeta): recarga la lista.
+  String? _directory;
+  String? get directory => _directory;
+
+  /// Abre otra carpeta y recarga. Vacío/`null` = volver a la del server.
+  Future<void> setDirectory(String? dir) async {
+    final next = (dir == null || dir.isEmpty) ? null : dir;
+    if (next == _directory) return;
+    _directory = next;
+    _sessions = const [];
+    _loaded = false;
+    await load();
+  }
 
   /// Toques locales de actividad (`id` → ms del reloj inyectado).
   ///
@@ -262,7 +279,7 @@ class SessionsViewModel extends ChangeNotifier {
       // ha trabajado, y con una sola página de 100 quedaban fuera 595 de
       // 654 principales (medido 2026-09-30). Es la única llamada que
       // crece con el historial del usuario.
-      final sessions = await repository.listAll();
+      final sessions = await repository.listAll(directory: _directory);
       _sessions = sessions;
       _touched.removeWhere(
         (id, _) => !_sessions.any((s) => s.id == id),
@@ -303,7 +320,7 @@ class SessionsViewModel extends ChangeNotifier {
     _error = null;
     _notify();
     try {
-      final session = await repository.create();
+      final session = await repository.create(directory: _directory);
       _sessions = [
         session,
         for (final s in _sessions)
@@ -327,7 +344,7 @@ class SessionsViewModel extends ChangeNotifier {
   /// porque la lista es válida sin los dots.
   Future<void> pollActive() async {
     try {
-      final active = await repository.fetchActive();
+      final active = await repository.fetchActive(directory: _directory);
       if (_disposed) return;
       // Turnos nuevos en curso: se tocan con la hora local para que suban
       // arriba sin esperar al `updated` del server (que llega al final).

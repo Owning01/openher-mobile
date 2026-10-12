@@ -45,6 +45,16 @@ class MobileNav extends ChangeNotifier {
   /// "Elegir" aunque el usuario ya los hubiera elegido.
   SessionInfo? chatSession;
 
+  /// Chats abiertos como pestañas (desktop: tira arriba estilo Chrome).
+  ///
+  /// Sin duplicados: abrir dos veces la misma sesión activa la que ya está,
+  /// no apila otra. El tope es 12: cada pestaña mantiene su viewmodel (scroll
+  /// y stream propios) y no se acota en silencio lo que el usuario abrió.
+  final List<SessionInfo> openChats = [];
+
+  /// Tope de pestañas abiertas a la vez.
+  static const int maxOpenChats = 12;
+
   /// Si el usuario puede volver atrás (Android: botón atrás).
   bool get canPop => _stack.length > 1;
 
@@ -60,8 +70,13 @@ class MobileNav extends ChangeNotifier {
 
   void select(MobileTab next) {
     if (next == MobileTab.chat && chatSessionId == null) {
-      // El chat sin sesión no es un destino vacío: la lista lo cubre.
-      return;
+      // El chat sin sesión no es un destino vacío: la lista lo cubre. Pero
+      // si hay pestañas abiertas (se salió con atrás), entrar al Chat vuelve
+      // a la última en vez de quedarse en un callejón sin salida.
+      if (openChats.isEmpty) return;
+      final last = openChats.last;
+      chatSession = last;
+      chatSessionId = last.id;
     }
     if (_tab == next) return;
     // Sin repetidos en la pila: A→B→A apilaba A dos veces y el atrás recorría
@@ -75,9 +90,24 @@ class MobileNav extends ChangeNotifier {
 
   /// Abre una sesión en el destino Chat. La lista la llama con el id que
   /// acaba de crear o de tocar; no hace falta un `openNewSession` aparte.
-  void openSession(SessionInfo session) {
+  ///
+  /// Abrir dos veces la misma sesión NO duplica la pestaña: mueve la que ya
+  /// está al frente y la activa. Con `single` (móvil: una sola vista, sin
+  /// tira) reemplaza las abiertas en vez de acumularlas.
+  void openSession(SessionInfo session, {bool single = false}) {
     chatSession = session;
     chatSessionId = session.id;
+    if (single) {
+      openChats
+        ..clear()
+        ..add(session);
+    } else {
+      openChats.removeWhere((s) => s.id == session.id);
+      openChats.add(session);
+      if (openChats.length > maxOpenChats) {
+        openChats.removeRange(0, openChats.length - maxOpenChats);
+      }
+    }
     _tab = MobileTab.chat;
     // Sin repetidos: reabrir el mismo chat no apila otro Chat encima.
     _stack.remove(MobileTab.chat);
@@ -86,6 +116,38 @@ class MobileNav extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Activa una pestaña ya abierta (la tira la llama al tocar).
+  /// Sin efecto si ese id no está abierto.
+  void activateSession(String id) {
+    SessionInfo? found;
+    for (final s in openChats) {
+      if (s.id == id) found = s;
+    }
+    if (found == null) return;
+    openChats
+      ..removeWhere((s) => s.id == id)
+      ..add(found);
+    chatSession = found;
+    chatSessionId = found.id;
+    _tab = MobileTab.chat;
+    _stack.remove(MobileTab.chat);
+    _stack.add(MobileTab.chat);
+    if (_stack.length > 16) _stack.removeAt(0);
+    notifyListeners();
+  }
+
+  /// Cierra una pestaña. Si era la activa, se activa la más reciente que
+  /// quede (la última, como Chrome); si no queda ninguna, no hay activa.
+  void closeSession(String id) {
+    openChats.removeWhere((s) => s.id == id);
+    if (chatSessionId == id) {
+      final next = openChats.isEmpty ? null : openChats.last;
+      chatSession = next;
+      chatSessionId = next?.id;
+    }
+    notifyListeners();
+  }
+  ///
   /// El boton atras del sistema. Devuelve `true` si el nav consumio el gesto.
   ///
   /// Antes no habia nada: el gesto cerraba la app desde cualquier pestana y

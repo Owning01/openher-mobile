@@ -57,5 +57,54 @@ void main() {
 
       expect(picked, [MobileTab.files]);
     });
+
+    testWidgets('sin onToggleSidebar no hay botón de colapso', (tester) async {
+      await pumpRail(tester);
+
+      expect(find.byTooltip('Ocultar lista (Ctrl+B)'), findsNothing);
+      expect(find.byTooltip('Mostrar lista (Ctrl+B)'), findsNothing);
+    });
+
+    testWidgets('el botón del rail colapsa y expande', (tester) async {
+      var toggles = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: DesktopRail(
+              current: MobileTab.sessions,
+              onSelect: (_) {},
+              sidebarVisible: true,
+              onToggleSidebar: () => toggles++,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byTooltip('Ocultar lista (Ctrl+B)'));
+      await tester.pump();
+
+      expect(toggles, 1);
+    });
+
+    testWidgets('colapsado el tooltip invita a mostrar', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: DesktopRail(
+              current: MobileTab.sessions,
+              onSelect: (_) {},
+              sidebarVisible: false,
+              onToggleSidebar: () {},
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byTooltip('Mostrar lista (Ctrl+B)'), findsOneWidget);
+    });
   });
 }
